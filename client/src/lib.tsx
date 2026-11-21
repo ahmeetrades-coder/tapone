@@ -1,4 +1,12 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
+import easypaisaLogo from "./assets/logo-easypaisa.png";
+import jazzcashLogo from "./assets/logo-jazzcash.png";
+import paypalLogo from "./assets/logo-paypal.png";
+import binanceLogo from "./assets/logo-binance.png";
+import wiseLogo from "./assets/logo-wise.png";
+import payoneerLogo from "./assets/logo-payoneer.png";
+import upiLogo from "./assets/logo-upi.jpg";
+import bankLogo from "./assets/logo-bank.png";
 
 // ------------------------------------------------------------------ money
 
@@ -604,3 +612,49 @@ export const Icons = {
     </Icon>
   ),
 };
+
+// ------------------------------------------------------- payment logos
+
+/**
+ * Official logos of the built-in withdraw methods, bundled with the
+ * app (sourced from the brands' public logo files — see DATA-PLAN).
+ * Owner-added methods carry their own image link from Admin →
+ * Withdraw Methods instead. Every method on the Withdraw page shows
+ * its logo next to its name (owner order 2026-11-21).
+ */
+export const METHOD_LOGOS: Record<string, string> = {
+  easypaisa: easypaisaLogo,
+  jazzcash: jazzcashLogo,
+  paypal: paypalLogo,
+  binance: binanceLogo,
+  wise: wiseLogo,
+  payoneer: payoneerLogo,
+  upi: upiLogo,
+  bank: bankLogo,
+  bank_ach: bankLogo,
+};
+
+export function MethodLogo({
+  methodId,
+  imageUrl,
+  label,
+}: {
+  methodId: string;
+  imageUrl?: string | null;
+  label: string;
+}) {
+  const [failed, setFailed] = useState(false);
+  const src = METHOD_LOGOS[methodId] ?? imageUrl ?? null;
+  if (!src || failed) return null;
+  return (
+    <span className="flex h-9 w-16 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-white px-1.5 ring-1 ring-[var(--border)]">
+      <img
+        src={src}
+        alt={`${label} logo`}
+        className="max-h-7 w-auto max-w-full object-contain"
+        loading="lazy"
+        onError={() => setFailed(true)}
+      />
+    </span>
+  );
+}

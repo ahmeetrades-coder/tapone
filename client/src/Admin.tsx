@@ -6,6 +6,7 @@ import type { Actions } from "../../server/src/actions";
 import {
 COUNTRIES,
 Icons,
+MethodLogo,
 flagEmojiFor,
 fmt,
 fmtDate,
@@ -288,6 +289,26 @@ function Overview({
             </dl>
             <p className="mt-4 rounded-xl bg-[var(--ink)] px-4 py-3 font-mono text-xs leading-relaxed text-[#7ee2b8]">
               postback?network=MMWall&amp;user_code={"{user_id}"}&amp;payout={"{payout}"}&amp;txn_id={"{transaction_id}"}
+            </p>
+
+            <h3 className="mt-6 font-display text-base font-bold">TheoremReach callback — paste this into the TheoremReach app</h3>
+            <p className="mt-2 max-w-2xl text-sm leading-relaxed text-[var(--dim)]">
+              In the TheoremReach publisher dashboard, open the TapOne app and
+              set its server-side reward callback to your site address plus
+              this path (for example{" "}
+              <code className="font-semibold text-[var(--text)]">https://www.tapone.store/theoremreach-callback?...</code>).
+              When a user finishes a survey, TheoremReach calls it, TapOne
+              checks the signature with the Secret Key from Settings →
+              Postback security, and credits the user{" "}
+              <strong className="text-[var(--text)]">70% of the reward</strong> —
+              the <code className="font-semibold text-[var(--text)]">{"{user_id}"}</code> that
+              comes back is the Offer Token from the user&apos;s survey link,
+              so the money lands on the right account. Each{" "}
+              <code className="font-semibold text-[var(--text)]">{"{tx_id}"}</code> credits
+              only once.
+            </p>
+            <p className="mt-4 rounded-xl bg-[var(--ink)] px-4 py-3 font-mono text-xs leading-relaxed text-[#7ee2b8]">
+              theoremreach-callback?user_id={"{user_id}"}&amp;tx_id={"{tx_id}"}&amp;reward={"{reward}"}&amp;reward_amount_in_dollars={"{reward_amount_in_dollars}"}&amp;external_transaction_id={"{external_transaction_id}"}
             </p>
           </section>
         </>
@@ -1140,7 +1161,14 @@ function WithdrawMethodsTab({ token }: { token: string }) {
   const queryClient = useQueryClient();
   const [countryCode, setCountryCode] = useState("");
   const [label, setLabel] = useState("");
+  const [imageUrl, setImageUrl] = useState("");
   const [fieldLabels, setFieldLabels] = useState<string[]>([""]);
+  const [editing, setEditing] = useState<{
+    id: number;
+    label: string;
+    imageUrl: string;
+    fieldLabels: string[];
+  } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -1179,6 +1207,7 @@ function WithdrawMethodsTab({ token }: { token: string }) {
         countryCode,
         countryName: country?.name ?? countryCode,
         label: label.trim(),
+        imageUrl: imageUrl.trim() || undefined,
         fields,
       });
     },
@@ -1187,7 +1216,48 @@ function WithdrawMethodsTab({ token }: { token: string }) {
         `"${label.trim()}" added — it now shows on the Withdraw page of every user from the picked country.`,
       );
       setLabel("");
+      setImageUrl("");
       setFieldLabels([""]);
+      setError(null);
+      invalidate();
+    },
+    onError: (e) => setError(e.message),
+  });
+
+  const update = useMutation({
+    mutationFn: async () => {
+      if (!editing) throw new Error("Nothing is being edited.");
+      const usedKeys = new Set<string>();
+      const fields = editing.fieldLabels
+        .map((f) => f.trim())
+        .filter(Boolean)
+        .map((f, i) => {
+          let key =
+            f
+              .toLowerCase()
+              .replace(/[^a-z0-9]+/g, "_")
+              .replace(/^_+|_+$/g, "")
+              .slice(0, 30) || `field${i + 1}`;
+          if (!/^[a-z]/.test(key)) key = `f_${key}`;
+          while (usedKeys.has(key)) key = `${key}_x`;
+          usedKeys.add(key);
+          return { key, label: f };
+        });
+      if (!editing.label.trim())
+        throw new Error("Give the method a name.");
+      if (fields.length === 0)
+        throw new Error("Add at least one detail field.");
+      return api.adminUpdateWithdrawMethod({
+        adminToken: token,
+        id: editing.id,
+        label: editing.label.trim(),
+        imageUrl: editing.imageUrl.trim() || null,
+        fields,
+      });
+    },
+    onSuccess: () => {
+      setNotice("Method updated — the change shows on users' Withdraw pages right away.");
+      setEditing(null);
       setError(null);
       invalidate();
     },
@@ -1275,6 +1345,22 @@ function WithdrawMethodsTab({ token }: { token: string }) {
               placeholder="e.g. Alipay"
             />
           </div>
+          <div>
+            <label htmlFor="wm-image" className="text-sm font-semibold">Logo image link <span className="font-normal text-[var(--dim)]">(optional)</span></label>
+            <input
+              id="wm-image"
+              {...FIELDS.adminAddWithdrawMethod.imageUrl}
+              value={imageUrl}
+              onChange={(e) => setImageUrl(e.target.value)}
+              className={inputCls}
+              placeholder="https://… logo image URL"
+              inputMode="url"
+            />
+            <p className="mt-1 text-xs text-[var(--dim)]">
+              Shown next to the method's name on the Withdraw page, like the
+              built-in methods' logos.
+            </p>
+          </div>
         </div>
         <div className="mt-3">
           <p className="text-sm font-semibold">Details the user must fill in</p>
@@ -1345,6 +1431,7 @@ function WithdrawMethodsTab({ token }: { token: string }) {
               <ul className="mt-2 divide-y divide-[var(--border)]">
                 {g.methods.map((m) => (
                   <li key={m.id} className="flex flex-wrap items-center gap-3 py-2.5">
+                    <MethodLogo methodId={m.id} imageUrl={m.imageUrl} label={m.label} />
                     <span className="min-w-0 flex-1">
                       <span className="block text-sm font-semibold">{m.label}</span>
                       <span className="block text-xs text-[var(--dim)]">
@@ -1375,21 +1462,128 @@ function WithdrawMethodsTab({ token }: { token: string }) {
               </p>
               <ul className="mt-2 divide-y divide-[var(--border)]">
                 {methods.map((m) => (
-                  <li key={m.id} className="flex flex-wrap items-center gap-3 py-2.5">
-                    <span className="min-w-0 flex-1">
-                      <span className="block text-sm font-semibold">{m.label}</span>
-                      <span className="block text-xs text-[var(--dim)]">
-                        Asks for: {m.fields.map((f) => f.label).join(" · ")}
+                  <li key={m.id} className="py-2.5">
+                    <div className="flex flex-wrap items-center gap-3">
+                      <MethodLogo methodId={`custom_${m.id}`} imageUrl={m.imageUrl} label={m.label} />
+                      <span className="min-w-0 flex-1">
+                        <span className="block text-sm font-semibold">{m.label}</span>
+                        <span className="block text-xs text-[var(--dim)]">
+                          Asks for: {m.fields.map((f) => f.label).join(" · ")}
+                        </span>
                       </span>
-                    </span>
-                    <button
-                      type="button"
-                      disabled={remove.isPending}
-                      onClick={() => remove.mutate({ id: m.id })}
-                      className="rounded-full px-4 py-1.5 text-xs font-bold text-red-600 ring-1 ring-[var(--border)] transition hover:bg-red-500/10 disabled:opacity-60 dark:text-red-400"
-                    >
-                      Remove
-                    </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setEditing({
+                            id: m.id,
+                            label: m.label,
+                            imageUrl: m.imageUrl ?? "",
+                            fieldLabels: m.fields.map((f) => f.label),
+                          })
+                        }
+                        className="rounded-full px-4 py-1.5 text-xs font-bold ring-1 ring-[var(--border)] transition hover:ring-[var(--brand)]"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        type="button"
+                        disabled={remove.isPending}
+                        onClick={() => remove.mutate({ id: m.id })}
+                        className="rounded-full px-4 py-1.5 text-xs font-bold text-red-600 ring-1 ring-[var(--border)] transition hover:bg-red-500/10 disabled:opacity-60 dark:text-red-400"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                    {editing?.id === m.id && (
+                      <div className="mt-3 rounded-xl bg-[var(--surface-2)] p-3 ring-1 ring-[var(--border)]">
+                        <div className="grid gap-3 sm:grid-cols-2">
+                          <div>
+                            <label htmlFor={`wm-edit-label-${m.id}`} className="text-sm font-semibold">Method name</label>
+                            <input
+                              id={`wm-edit-label-${m.id}`}
+                              {...FIELDS.adminUpdateWithdrawMethod.label}
+                              value={editing.label}
+                              onChange={(e) => setEditing({ ...editing, label: e.target.value })}
+                              className={inputCls}
+                            />
+                          </div>
+                          <div>
+                            <label htmlFor={`wm-edit-image-${m.id}`} className="text-sm font-semibold">Logo image link <span className="font-normal text-[var(--dim)]">(blank = no logo)</span></label>
+                            <input
+                              id={`wm-edit-image-${m.id}`}
+                              {...FIELDS.adminUpdateWithdrawMethod.imageUrl}
+                              value={editing.imageUrl}
+                              onChange={(e) => setEditing({ ...editing, imageUrl: e.target.value })}
+                              className={inputCls}
+                              placeholder="https://… logo image URL"
+                              inputMode="url"
+                            />
+                          </div>
+                        </div>
+                        <p className="mt-3 text-sm font-semibold">Details the user must fill in</p>
+                        <div className="mt-2 space-y-2">
+                          {editing.fieldLabels.map((f, i) => (
+                            <div key={i} className="flex gap-2">
+                              <input
+                                aria-label={`Edit detail field ${i + 1}`}
+                                {...FIELDS.adminUpdateWithdrawMethod.fields.label}
+                                value={f}
+                                onChange={(e) =>
+                                  setEditing({
+                                    ...editing,
+                                    fieldLabels: editing.fieldLabels.map((x, j) => (j === i ? e.target.value : x)),
+                                  })
+                                }
+                                className={inputCls}
+                              />
+                              {editing.fieldLabels.length > 1 && (
+                                <button
+                                  type="button"
+                                  aria-label={`Remove edit detail field ${i + 1}`}
+                                  onClick={() =>
+                                    setEditing({
+                                      ...editing,
+                                      fieldLabels: editing.fieldLabels.filter((_, j) => j !== i),
+                                    })
+                                  }
+                                  className="shrink-0 rounded-xl px-3 text-sm font-bold text-red-600 ring-1 ring-[var(--border)] dark:text-red-400"
+                                >
+                                  ✕
+                                </button>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                        {editing.fieldLabels.length < 5 && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setEditing({ ...editing, fieldLabels: [...editing.fieldLabels, ""] })
+                            }
+                            className="mt-2 rounded-full px-4 py-2 text-sm font-bold ring-1 ring-[var(--border)]"
+                          >
+                            + Add another field
+                          </button>
+                        )}
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          <button
+                            type="button"
+                            disabled={update.isPending}
+                            onClick={() => { setError(null); update.mutate(); }}
+                            className="rounded-full bg-[var(--brand)] px-5 py-2 text-sm font-bold text-white transition hover:bg-[var(--brand-deep)] disabled:opacity-60"
+                          >
+                            {update.isPending ? "Saving…" : "Save changes"}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setEditing(null)}
+                            className="rounded-full px-5 py-2 text-sm font-bold ring-1 ring-[var(--border)]"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </li>
                 ))}
               </ul>
@@ -2254,6 +2448,15 @@ function SettingsTab({ token }: { token: string }) {
   const [affiliateEarningPct, setAffiliateEarningPct] = useState("");
   const [affiliateSpendingPct, setAffiliateSpendingPct] = useState("");
   const [postbackSecret, setPostbackSecret] = useState("");
+  const [theoremReachSecret, setTheoremReachSecret] = useState("");
+  const [checkinGoal, setCheckinGoal] = useState("");
+  const [checkinDays, setCheckinDays] = useState<string[]>(["", "", "", "", "", "", ""]);
+  const [dailyTiersText, setDailyTiersText] = useState("");
+  const [affiliateTiersText, setAffiliateTiersText] = useState("");
+  const [centsPerLevel, setCentsPerLevel] = useState("");
+  const [titleRows, setTitleRows] = useState<
+    { name: string; level: string; standardPct: string; enhancedPct: string }[]
+  >([]);
   const [social, setSocial] = useState<Record<string, string>>({});
   const [adminUsername, setAdminUsername] = useState("");
   const [adminPassword, setAdminPassword] = useState("");
@@ -2273,6 +2476,19 @@ function SettingsTab({ token }: { token: string }) {
       setAffiliateEarningPct(String(s.affiliateEarningPct));
       setAffiliateSpendingPct(String(s.affiliateSpendingPct));
       setAdminUsername(s.adminUsername);
+      setCheckinGoal((s.checkinGoalCents / 100).toFixed(2));
+      setCheckinDays(s.checkinRewardsCents.map((c) => (c / 100).toFixed(2)));
+      setDailyTiersText(s.dailyTiersCents.map((c) => (c / 100).toFixed(2)).join(", "));
+      setAffiliateTiersText(s.affiliateTiersCents.map((c) => (c / 100).toFixed(2)).join(", "));
+      setCentsPerLevel((s.levelCentsPerLevel / 100).toFixed(2));
+      setTitleRows(
+        s.levelTitles.map((t) => ({
+          name: t.name,
+          level: String(t.level),
+          standardPct: String(t.standardPct),
+          enhancedPct: String(t.enhancedPct),
+        })),
+      );
       setSocial(s.socialLinks ?? {});
       setHydrated(true);
     }
@@ -2291,6 +2507,52 @@ function SettingsTab({ token }: { token: string }) {
           throw new Error(`${label} must be between 0 and 100.`);
         return n;
       };
+      // Weekly check-in: daily goal + the 7 day amounts (Mon..Sun).
+      const checkinGoalCents = toCents(checkinGoal);
+      if (checkinGoalCents === null || checkinGoalCents < 1)
+        throw new Error("The check-in daily goal must be a valid amount above $0.");
+      const checkinRewardsCents = checkinDays.map((d) => toCents(d));
+      if (checkinRewardsCents.some((c) => c === null))
+        throw new Error("Every check-in day amount (Monday to Sunday) must be a valid dollar amount.");
+      // Contest prize tiers: comma-separated dollar amounts, rank 1 first.
+      const parseTiers = (text: string, label: string, max: number): number[] => {
+        const parts = text.split(/[\s,]+/).filter(Boolean);
+        if (parts.length === 0)
+          throw new Error(`${label}: enter at least one prize amount.`);
+        if (parts.length > max)
+          throw new Error(`${label}: at most ${max} ranks.`);
+        return parts.map((p) => {
+          const v = Number.parseFloat(p);
+          if (!Number.isFinite(v) || v < 0)
+            throw new Error(`${label}: "${p}" is not a valid prize amount.`);
+          return Math.round(v * 100);
+        });
+      };
+      const dailyTiersCents = parseTiers(dailyTiersText, "Daily contest tiers", 150);
+      const affiliateTiersCents = parseTiers(affiliateTiersText, "Affiliate contest tiers", 100);
+      // Levels: earnings per level + the title table.
+      const levelCentsPerLevel = toCents(centsPerLevel);
+      if (levelCentsPerLevel === null || levelCentsPerLevel < 1)
+        throw new Error("Earnings per level must be a valid amount above $0.");
+      if (titleRows.length === 0)
+        throw new Error("Keep at least one title in the Levels table.");
+      const levelTitles = titleRows.map((t, i) => {
+        const level = Number.parseInt(t.level, 10);
+        if (!t.name.trim())
+          throw new Error(`Title ${i + 1}: give it a name.`);
+        if (!Number.isFinite(level) || level < 1)
+          throw new Error(`Title "${t.name}": its level must be a whole number above 0.`);
+        return {
+          name: t.name.trim(),
+          level,
+          standardPct: pct(t.standardPct, `Title "${t.name}" standard bonus`),
+          enhancedPct: pct(t.enhancedPct, `Title "${t.name}" enhanced bonus`),
+        };
+      });
+      for (let i = 1; i < levelTitles.length; i++) {
+        if ((levelTitles[i]?.level ?? 0) <= (levelTitles[i - 1]?.level ?? 0))
+          throw new Error("Title levels must increase from one title to the next.");
+      }
       return api.adminUpdateSettings({
         adminToken: token,
         googleClientId: googleClientId.trim(),
@@ -2301,6 +2563,13 @@ function SettingsTab({ token }: { token: string }) {
         affiliateEarningPct: pct(affiliateEarningPct, "Affiliate earning commission"),
         affiliateSpendingPct: pct(affiliateSpendingPct, "Affiliate spending commission"),
         postbackSecret: postbackSecret.trim() === "" ? undefined : postbackSecret.trim(),
+        theoremReachSecret: theoremReachSecret.trim() === "" ? undefined : theoremReachSecret.trim(),
+        checkinGoalCents,
+        checkinRewardsCents: checkinRewardsCents as number[],
+        dailyTiersCents,
+        affiliateTiersCents,
+        levelCentsPerLevel,
+        levelTitles,
         socialDiscord: (social["discord"] ?? "").trim(),
         socialYoutube: (social["youtube"] ?? "").trim(),
         socialTiktok: (social["tiktok"] ?? "").trim(),
@@ -2315,6 +2584,7 @@ function SettingsTab({ token }: { token: string }) {
     onSuccess: () => {
       setOkMsg("Settings saved — they apply across the whole site right away.");
       setPostbackSecret("");
+      setTheoremReachSecret("");
       setAdminPassword("");
       void queryClient.invalidateQueries({ queryKey: ["admin-overview", token] });
       void queryClient.invalidateQueries({ queryKey: ["public-home"] });
@@ -2459,15 +2729,11 @@ function SettingsTab({ token }: { token: string }) {
               <input id="set-min" value={minWithdraw} onChange={(e) => setMinWithdraw(e.target.value)} inputMode="decimal" className={fieldCls} />
             </div>
             <div>
-              <p className="text-sm font-semibold">Weekly check-in</p>
+              <label htmlFor="set-checkin-goal" className="text-sm font-semibold">Check-in daily goal ($)</label>
+              <input id="set-checkin-goal" value={checkinGoal} onChange={(e) => setCheckinGoal(e.target.value)} inputMode="decimal" className={fieldCls} />
               <p className="mt-1 text-xs leading-relaxed text-[var(--dim)]">
-                Fixed schedule, not set here: a day completes automatically
-                when the user earns $1 that day (offers, surveys or invite
-                commissions). Each calendar day pays its own amount —
-                Monday $0.20, Tuesday $0.25, Wednesday $0.30, Thursday
-                $0.40, Friday $0.50, Saturday $0.65, Sunday $0.70 ($3.00
-                per week in total). A missed day loses only that day;
-                the next day still pays its own full amount.
+                A check-in day completes automatically when the user earns
+                this much that day (offers, surveys or invite commissions).
               </p>
             </div>
 
@@ -2484,6 +2750,172 @@ function SettingsTab({ token }: { token: string }) {
               <input id="set-asp" {...FIELDS.adminUpdateSettings.affiliateSpendingPct} value={affiliateSpendingPct} onChange={(e) => setAffiliateSpendingPct(e.target.value)} inputMode="numeric" className={fieldCls} />
             </div>
           </div>
+          <div className="mt-5 border-t border-[var(--border)] pt-4">
+            <p className="text-sm font-semibold">Weekly check-in — each day's bonus ($)</p>
+            <p className="mt-1 text-xs leading-relaxed text-[var(--dim)]">
+              Each calendar day pays its own amount when the user reaches the
+              daily goal above; the bonus is credited at that moment. A missed
+              day loses only that day — the next day still pays its own full
+              amount. Week total:{" "}
+              <strong className="text-[var(--text)]">
+                $
+                {checkinDays
+                  .reduce((sum, d) => sum + (Number.parseFloat(d) || 0), 0)
+                  .toFixed(2)}
+              </strong>
+            </p>
+            <div className="mt-3 grid grid-cols-4 gap-3 sm:grid-cols-7">
+              {["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((day, i) => (
+                <div key={day}>
+                  <label htmlFor={`set-checkin-${i}`} className="text-sm font-semibold">{day}</label>
+                  <input
+                    id={`set-checkin-${i}`}
+                    value={checkinDays[i] ?? ""}
+                    onChange={(e) =>
+                      setCheckinDays((prev) => prev.map((x, j) => (j === i ? e.target.value : x)))
+                    }
+                    inputMode="decimal"
+                    className={fieldCls}
+                  />
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        <section className="rounded-3xl bg-[var(--surface)] p-5 ring-1 ring-[var(--border)] sm:p-6">
+          <h2 className="font-display text-lg font-bold">Contest prize tiers</h2>
+          <p className="mt-1 text-sm leading-relaxed text-[var(--dim)]">
+            The prize for each rank, in dollars, separated by commas — rank 1
+            first. These are the exact amounts recorded for the winners (you
+            pay them from Contest Payouts) and shown on the Leaderboard. Keep
+            the totals in line with the pools above: the built-in Daily table
+            sums to $100 over 100 ranks, the Affiliate table to $1,500 over
+            25 ranks.
+          </p>
+          <div className="mt-3">
+            <label htmlFor="set-daily-tiers" className="text-sm font-semibold">
+              Daily contest tiers ($) — total{" "}
+              ${dailyTiersText.split(/[\s,]+/).filter(Boolean).reduce((sum, p) => sum + (Number.parseFloat(p) || 0), 0).toFixed(2)}
+              {" "}over {dailyTiersText.split(/[\s,]+/).filter(Boolean).length} ranks
+            </label>
+            <textarea
+              id="set-daily-tiers"
+              value={dailyTiersText}
+              onChange={(e) => setDailyTiersText(e.target.value)}
+              rows={3}
+              className={fieldCls}
+            />
+          </div>
+          <div className="mt-4">
+            <label htmlFor="set-aff-tiers" className="text-sm font-semibold">
+              Affiliate contest tiers ($) — total{" "}
+              ${affiliateTiersText.split(/[\s,]+/).filter(Boolean).reduce((sum, p) => sum + (Number.parseFloat(p) || 0), 0).toFixed(2)}
+              {" "}over {affiliateTiersText.split(/[\s,]+/).filter(Boolean).length} ranks
+            </label>
+            <textarea
+              id="set-aff-tiers"
+              value={affiliateTiersText}
+              onChange={(e) => setAffiliateTiersText(e.target.value)}
+              rows={3}
+              className={fieldCls}
+            />
+          </div>
+        </section>
+
+        <section className="rounded-3xl bg-[var(--surface)] p-5 ring-1 ring-[var(--border)] sm:p-6">
+          <h2 className="font-display text-lg font-bold">Levels &amp; Title Bonuses</h2>
+          <p className="mt-1 text-sm leading-relaxed text-[var(--dim)]">
+            A user's level is their lifetime earnings divided by the amount
+            per level. A Title Bonus settles automatically at every 10 new
+            levels (first at Level 20): the title's percentage of that
+            10-level block of earnings — the Enhanced rate while the user's
+            chargeback rate is under 3%, the Standard rate at 3–5%, and no
+            bonus above 5%. Changes apply to bonuses settled after the save;
+            levels already reached are not re-paid.
+          </p>
+          <div className="mt-3 max-w-xs">
+            <label htmlFor="set-per-level" className="text-sm font-semibold">Earnings per level ($)</label>
+            <input id="set-per-level" value={centsPerLevel} onChange={(e) => setCentsPerLevel(e.target.value)} inputMode="decimal" className={fieldCls} />
+          </div>
+          <div className="mt-4 space-y-2">
+            {titleRows.map((t, i) => (
+              <div key={i} className="grid grid-cols-2 gap-3 rounded-2xl bg-[var(--surface-2)] p-3 ring-1 ring-[var(--border)] sm:grid-cols-[1fr_110px_110px_110px_auto]">
+                <div>
+                  <label htmlFor={`title-name-${i}`} className="text-xs font-semibold text-[var(--dim)]">Title</label>
+                  <input
+                    id={`title-name-${i}`}
+                    value={t.name}
+                    onChange={(e) =>
+                      setTitleRows((prev) => prev.map((x, j) => (j === i ? { ...x, name: e.target.value } : x)))
+                    }
+                    className={fieldCls}
+                  />
+                </div>
+                <div>
+                  <label htmlFor={`title-level-${i}`} className="text-xs font-semibold text-[var(--dim)]">From level</label>
+                  <input
+                    id={`title-level-${i}`}
+                    value={t.level}
+                    onChange={(e) =>
+                      setTitleRows((prev) => prev.map((x, j) => (j === i ? { ...x, level: e.target.value } : x)))
+                    }
+                    inputMode="numeric"
+                    className={fieldCls}
+                  />
+                </div>
+                <div>
+                  <label htmlFor={`title-std-${i}`} className="text-xs font-semibold text-[var(--dim)]">Standard %</label>
+                  <input
+                    id={`title-std-${i}`}
+                    value={t.standardPct}
+                    onChange={(e) =>
+                      setTitleRows((prev) => prev.map((x, j) => (j === i ? { ...x, standardPct: e.target.value } : x)))
+                    }
+                    inputMode="numeric"
+                    className={fieldCls}
+                  />
+                </div>
+                <div>
+                  <label htmlFor={`title-enh-${i}`} className="text-xs font-semibold text-[var(--dim)]">Enhanced %</label>
+                  <input
+                    id={`title-enh-${i}`}
+                    value={t.enhancedPct}
+                    onChange={(e) =>
+                      setTitleRows((prev) => prev.map((x, j) => (j === i ? { ...x, enhancedPct: e.target.value } : x)))
+                    }
+                    inputMode="numeric"
+                    className={fieldCls}
+                  />
+                </div>
+                <div className="flex items-end">
+                  <button
+                    type="button"
+                    aria-label={`Remove title ${t.name || i + 1}`}
+                    disabled={titleRows.length <= 1}
+                    onClick={() => setTitleRows((prev) => prev.filter((_, j) => j !== i))}
+                    className="rounded-xl px-3 py-2.5 text-sm font-bold text-red-600 ring-1 ring-[var(--border)] disabled:opacity-40 dark:text-red-400"
+                  >
+                    ✕
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+          {titleRows.length < 8 && (
+            <button
+              type="button"
+              onClick={() =>
+                setTitleRows((prev) => [
+                  ...prev,
+                  { name: "", level: "", standardPct: "", enhancedPct: "" },
+                ])
+              }
+              className="mt-3 rounded-full px-4 py-2 text-sm font-bold ring-1 ring-[var(--border)]"
+            >
+              + Add a title
+            </button>
+          )}
         </section>
 
         <section className="rounded-3xl bg-[var(--surface)] p-5 ring-1 ring-[var(--border)] sm:p-6">
@@ -2493,6 +2925,19 @@ function SettingsTab({ token }: { token: string }) {
               Postback secret {s?.postbackSecretSet ? <span className="text-[var(--brand-deep)] dark:text-[var(--brand)]">(currently set)</span> : <span className="text-[var(--dim)]">(not set — postbacks are open)</span>}
             </label>
             <input id="set-secret" {...FIELDS.adminUpdateSettings.postbackSecret} value={postbackSecret} onChange={(e) => setPostbackSecret(e.target.value)} placeholder="Type a new secret to change it" className={fieldCls} />
+          </div>
+          <div className="mt-5">
+            <label htmlFor="set-tr-secret" className="text-sm font-semibold">
+              TheoremReach secret key {s?.theoremReachSecretSet ? <span className="text-[var(--brand-deep)] dark:text-[var(--brand)]">(currently set — callbacks are signature-checked)</span> : <span className="text-[var(--dim)]">(not set — TheoremReach callbacks are NOT verified)</span>}
+            </label>
+            <input id="set-tr-secret" {...FIELDS.adminUpdateSettings.theoremReachSecret} value={theoremReachSecret} onChange={(e) => setTheoremReachSecret(e.target.value)} placeholder="Paste the Secret Key from your TheoremReach app" className={fieldCls} />
+            <p className="mt-1.5 text-xs leading-relaxed text-[var(--dim)]">
+              Find it in the TheoremReach publisher dashboard, in the TapOne
+              app&apos;s details. TapOne uses it to verify the signature on
+              every TheoremReach reward callback — a callback with a wrong
+              signature never credits anyone. Set the callback URL in the
+              same app (see Overview → TheoremReach callback).
+            </p>
           </div>
         </section>
 

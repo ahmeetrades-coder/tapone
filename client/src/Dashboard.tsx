@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { actionFields } from "@hatch/space-sdk/fields" with { type: "macro" };
 import { api, type ApiResponse } from "./api";
 import type { Actions } from "../../server/src/actions";
-import { Icons, applyThemeMode, fmt, fmtDate, fmtDateTime, getThemeMode, isAuthError } from "./lib";
+import { Icons, MethodLogo, applyThemeMode, fmt, fmtDate, fmtDateTime, getThemeMode, isAuthError } from "./lib";
 import { fileToBase64 } from "@hatch/space-sdk/client";
 import { ContentCard, FooterThemePill, Wordmark } from "./App";
 
@@ -333,8 +333,8 @@ export function Dashboard({
               {tab === "dashboard" && (
                 <DashboardHome token={token} user={user} go={pick} />
               )}
-              {tab === "offers" && (<><ContentSection token={token} kind="offerwall" /><MyOffersPanel token={token} /></>)}
-              {tab === "surveys" && <ContentSection token={token} kind="survey" />}
+              {tab === "offers" && (<><ContentSection token={token} kind="offerwall" includeSurveyWalls /><MyOffersPanel token={token} /></>)}
+              {tab === "surveys" && <SurveysSection token={token} />}
               {tab === "playtime" && <ContentSection token={token} kind="game" />}
               {tab === "apps" && <ContentSection token={token} kind="offerwall" heading="Apps" />}
               {tab === "partners" && <ContentSection token={token} kind="survey" heading="Surveys partners" />}
@@ -750,14 +750,28 @@ function ContentSection({
   token,
   kind,
   heading,
+  includeSurveyWalls,
 }: {
   token: string;
   kind: "offerwall" | "survey" | "game";
   heading?: string;
+  /**
+   * Offerwalls tab only (owner order 2026-11-21): survey partner
+   * WALLS — TheoremReach, CPX and the like — are offerwalls and their
+   * cards belong here. Individual surveys never appear as cards
+   * anywhere: they live inside the walls, which open embedded on the
+   * Surveys tab.
+   */
+  includeSurveyWalls?: boolean;
 }) {
   const query = useQuery({
     queryKey: ["content", kind, token],
     queryFn: () => api.listContent({ token, kind }),
+  });
+  const wallsQuery = useQuery({
+    queryKey: ["content", "survey", token],
+    queryFn: () => api.listContent({ token, kind: "survey" }),
+    enabled: includeSurveyWalls === true,
   });
   const meta = {
     offerwall: {
@@ -779,8 +793,14 @@ function ContentSection({
         "No games are live yet. Game partners are reviewing TapOne — approved games will appear here, with the best ones featured on the home page.",
     },
   }[kind];
-  const featured = query.data?.items.filter((i) => i.featured) ?? [];
-  const rest = query.data?.items.filter((i) => !i.featured) ?? [];
+  const allItems = [
+    ...(query.data?.items ?? []),
+    ...(includeSurveyWalls ? (wallsQuery.data?.items ?? []) : []),
+  ];
+  const featured = allItems.filter((i) => i.featured);
+  const rest = allItems.filter((i) => !i.featured);
+  const loading =
+    query.isPending || (includeSurveyWalls === true && wallsQuery.isPending);
   return (
     <div>
       {kind === "survey" && <CheckinBonus token={token} />}
@@ -792,9 +812,9 @@ function ContentSection({
       <div className="mt-5">
         <SectionStats token={token} kind={kind} />
       </div>
-      {query.isPending ? (
+      {loading ? (
         <p className="mt-8 text-sm text-[var(--dim)]">Loading…</p>
-      ) : query.data && query.data.items.length > 0 ? (
+      ) : allItems.length > 0 ? (
         <div className="mt-6 space-y-6">
           {featured.length > 0 && (
             <div className="grid gap-4 sm:grid-cols-2">
@@ -818,6 +838,111 @@ function ContentSection({
         </div>
       )}
     </div>
+  );
+}
+
+// ------------------------------------------------------------- surveys tab
+
+type ContentListItem = ApiResponse<typeof api, "listContent">["items"][number];
+
+/**
+ * Surveys tab (owner order 2026-11-21): NO partner cards here — a
+ * card the user has to click is exactly what the owner removed. Each
+ * survey partner's wall opens directly on this page, below the
+ * check-in card: the partner matches surveys to the user's IP inside
+ * its own wall, and listContent has already personalised the wall URL
+ * with the user's own Offer Token ({user_id}) and a fresh transaction
+ * ID, so a completed survey credits the right account. The wall CARDS
+ * live in the Offerwalls tab (Offers), where the owner wants them.
+ */
+function SurveysSection({ token }: { token: string }) {
+  const query = useQuery({
+    queryKey: ["content", "survey", token],
+    queryFn: () => api.listContent({ token, kind: "survey" }),
+  });
+  const items = query.data?.items ?? [];
+  return (
+    <div>
+      <CheckinBonus token={token} />
+      <h1 className="font-display text-2xl font-extrabold sm:text-3xl">Surveys</h1>
+      <p className="mt-1 text-sm text-[var(--dim)]">
+        The latest surveys matched to your account open right here —
+        no extra tap needed.
+      </p>
+      <div className="mt-5">
+        <SectionStats token={token} kind="survey" />
+      </div>
+      {query.isPending ? (
+        <p className="mt-8 text-sm text-[var(--dim)]">Loading…</p>
+      ) : items.length > 0 ? (
+        <div className="mt-6 space-y-6">
+          {items.map((item) => (
+            <SurveyWall key={item.id} item={item} />
+          ))}
+        </div>
+      ) : (
+        <div className="mt-8 rounded-3xl border-2 border-dashed border-[var(--border)] bg-[var(--surface)] px-6 py-12 text-center">
+          <span className="text-[var(--brand)]">{Icons.survey("h-10 w-10")}</span>
+          <p className="mx-auto mt-3 max-w-md text-sm leading-relaxed text-[var(--dim)]">
+            No survey partners are live yet. When a survey network
+            approves TapOne, its surveys for you will open here
+            automatically.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SurveyWall({ item }: { item: ContentListItem }) {
+  return (
+    <section
+      aria-label={`${item.title} surveys`}
+      className="overflow-hidden rounded-3xl bg-[var(--surface)] ring-1 ring-[var(--border)]"
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3 sm:px-5">
+        <div>
+          <h2 className="font-display text-base font-bold text-[var(--text)]">{item.title}</h2>
+          {item.provider && (
+            <p className="text-xs font-semibold uppercase tracking-wide text-[var(--dim)]">
+              {item.provider}
+            </p>
+          )}
+        </div>
+        {item.url && (
+          <a
+            href={item.url}
+            target="_blank"
+            rel="noreferrer"
+            aria-label={`Open ${item.title} in a new tab`}
+            className="rounded-full bg-[var(--brand)] px-4 py-2 text-sm font-bold text-white transition hover:bg-[var(--brand-deep)]"
+          >
+            Open in new tab
+          </a>
+        )}
+      </div>
+      {item.url ? (
+        <>
+          <iframe
+            src={item.url}
+            title={`${item.title} — surveys matched to your account`}
+            className="h-[620px] w-full border-t border-[var(--border)] bg-white"
+            loading="lazy"
+          />
+          <p className="px-4 py-2.5 text-xs leading-relaxed text-[var(--dim)] sm:px-5">
+            The surveys above are matched to your account by{" "}
+            {item.provider || item.title}. If the wall does not load
+            inside this page, use Open in new tab instead — your
+            earnings are credited either way.
+          </p>
+        </>
+      ) : (
+        <p className="border-t border-[var(--border)] px-4 py-6 text-sm text-[var(--dim)] sm:px-5">
+          This survey partner is not live yet — its surveys will open
+          here as soon as it is.
+        </p>
+      )}
+    </section>
   );
 }
 
@@ -907,12 +1032,13 @@ function WithdrawTab({ token }: { token: string }) {
                 setMethodId(m.id);
                 setDetails({});
               }}
-              className={`rounded-full px-4 py-2.5 text-sm font-bold ring-1 transition ${
+              className={`flex items-center gap-2.5 rounded-full py-1.5 pl-1.5 pr-4 text-sm font-bold ring-1 transition ${
                 selected?.id === m.id
                   ? "bg-[var(--brand)] text-white ring-[var(--brand)]"
                   : "bg-[var(--surface)] ring-[var(--border)] hover:ring-[var(--brand)]"
               }`}
             >
+              <MethodLogo methodId={m.id} imageUrl={m.imageUrl} label={m.label} />
               {m.label}
             </button>
           ))}
@@ -983,9 +1109,16 @@ function WithdrawTab({ token }: { token: string }) {
                   <span className="font-display text-lg font-extrabold">{fmt(w.amountCents)}</span>
                   <StatusChip status={w.status} />
                 </div>
-                <p className="mt-1 text-sm text-[var(--dim)]">
-                  {w.methodLabel} · Requested {fmtDateTime(w.createdAt)}
-                  {w.decidedAt ? ` · Decided ${fmtDateTime(w.decidedAt)}` : ""}
+                <p className="mt-1 flex flex-wrap items-center gap-2 text-sm text-[var(--dim)]">
+                  <MethodLogo
+                    methodId={w.method}
+                    imageUrl={methods.find((m) => m.id === w.method)?.imageUrl}
+                    label={w.methodLabel}
+                  />
+                  <span>
+                    {w.methodLabel} · Requested {fmtDateTime(w.createdAt)}
+                    {w.decidedAt ? ` · Decided ${fmtDateTime(w.decidedAt)}` : ""}
+                  </span>
                 </p>
                 {w.adminNote && (
                   <p className="mt-1.5 text-sm">
