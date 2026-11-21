@@ -92,6 +92,13 @@
       "when": 1795162209714,
       "tag": "0013_remove_temporary_preview_account",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "6",
+      "when": 1795254884748,
+      "tag": "0014_withdraw_method_image_url",
+      "breakpoints": true
     }
   ]
 }
