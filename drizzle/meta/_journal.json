@@ -134,6 +134,13 @@
       "when": 1795261873846,
       "tag": "0019_user_title_rewards_paid",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "6",
+      "when": 1795272613705,
+      "tag": "0020_partner_callback_sig_format_and_divisor",
+      "breakpoints": true
     }
   ]
 }
