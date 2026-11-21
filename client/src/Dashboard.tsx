@@ -922,6 +922,7 @@ function ContentSection({
 // ------------------------------------------------------------- surveys tab
 
 type FeedSurvey = ApiResponse<typeof api, "listSurveyFeed">["surveys"][number];
+type FeedGame = ApiResponse<typeof api, "listGameFeed">["games"][number];
 
 /**
  * Surveys tab (owner order 2026-11-21, TimeBucks model): ONE merged
@@ -1164,14 +1165,16 @@ function PlatformIcon({
  * there are enough games the row's content is duplicated so scrolling
  * wraps around seamlessly (the TimeBucks loop).
  */
-function LoopRow({
+function LoopRow<T,>({
   items,
   renderCard,
   label,
+  keyOf,
 }: {
-  items: GameItem[];
-  renderCard: (item: GameItem, key: string) => ReactNode;
+  items: T[];
+  renderCard: (item: T, key: string) => ReactNode;
   label: string;
+  keyOf: (item: T) => string;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const loop = items.length > 3;
@@ -1210,8 +1213,8 @@ function LoopRow({
         role="list"
         aria-label={label}
       >
-        {items.map((item) => renderCard(item, `a-${item.id}`))}
-        {loop && items.map((item) => renderCard(item, `b-${item.id}`))}
+        {items.map((item) => renderCard(item, `a-${keyOf(item)}`))}
+        {loop && items.map((item) => renderCard(item, `b-${keyOf(item)}`))}
       </div>
     </div>
   );
@@ -1268,6 +1271,55 @@ function GameCard({
         </span>
       </span>
     </button>
+  );
+}
+
+/**
+ * One game from a partner's own items feed (listGameFeed): the same
+ * card as an admin-added game — artwork, title, payout — but tapping
+ * opens that game's own link directly, exactly like a survey card
+ * (feed games carry no milestone table, so there is no popup).
+ */
+function FeedGameCard({ game }: { game: FeedGame }) {
+  const [imgOk, setImgOk] = useState(true);
+  const art = game.imageUrl ?? game.providerImageUrl;
+  const title = game.title ?? game.provider;
+  return (
+    <a
+      href={game.url}
+      target="_blank"
+      rel="noreferrer"
+      role="listitem"
+      aria-label={`${title} — earn ${fmt(game.payoutCents)}`}
+      className="w-36 flex-none overflow-hidden rounded-2xl bg-[var(--surface)] text-left ring-1 ring-[var(--border)] transition hover:ring-[var(--brand)] sm:w-44"
+    >
+      {art && imgOk ? (
+        <img
+          src={art}
+          alt={title}
+          className="aspect-square w-full object-cover"
+          loading="lazy"
+          onError={() => setImgOk(false)}
+        />
+      ) : (
+        <span className="flex aspect-square w-full items-center justify-center bg-[var(--surface-2)] text-[var(--brand)]">
+          {Icons.game("h-12 w-12")}
+        </span>
+      )}
+      <span className="block px-3 pb-3 pt-2">
+        <span className="block truncate font-display text-sm font-bold text-[var(--text)]">
+          {title}
+        </span>
+        <span className="mt-1.5 flex items-end justify-between gap-2">
+          <span className="font-display text-lg font-extrabold leading-none text-green-600 dark:text-green-400">
+            {fmt(game.payoutCents)}
+          </span>
+          <span className="min-w-0 truncate text-xs font-semibold text-[var(--dim)]">
+            {game.provider}
+          </span>
+        </span>
+      </span>
+    </a>
   );
 }
 
@@ -1399,21 +1451,50 @@ function GamePopup({
   );
 }
 
+type GameEntry =
+  | { source: "admin"; name: string; platform: string; item: GameItem }
+  | { source: "feed"; name: string; platform: string; item: FeedGame };
+
 /**
  * Games tab (owner order 2026-11-21, TimeBucks model): ONE merged
- * list of every game from every game offerwall the admin has added —
- * listContent has already matched them to the user's country (login
- * IP) server-side; here the Android/iOS pills filter by device, with
- * the visitor's own device selected by default. Nothing is copied
- * from anywhere: games appear only when the admin adds them after a
- * partner approves TapOne.
+ * list of every game from every game partner — the games the admin
+ * added one by one (listContent) AND the individual games pulled
+ * live from game walls that expose an items feed (listGameFeed).
+ * Both lists are already matched to the user's country (login IP)
+ * server-side; here the Android/iOS pills filter by device, with
+ * the visitor's own device selected by default (feed games carry no
+ * platform, so they show on both). Nothing is copied from anywhere:
+ * games appear only from partners the admin added after approval.
  */
 function GamesSection({ token }: { token: string }) {
   const query = useQuery({
     queryKey: ["content", "game", token],
     queryFn: () => api.listContent({ token, kind: "game" }),
   });
-  const all = query.data?.items ?? [];
+  const feedQuery = useQuery({
+    queryKey: ["game-feed", token],
+    queryFn: () => api.listGameFeed({ token }),
+    staleTime: 60_000,
+  });
+  const adminGames = query.data?.items ?? [];
+  const entries: GameEntry[] = [
+    ...adminGames.map(
+      (item): GameEntry => ({
+        source: "admin",
+        name: item.provider || item.title,
+        platform: item.platform,
+        item,
+      }),
+    ),
+    ...(feedQuery.data?.games ?? []).map(
+      (item): GameEntry => ({
+        source: "feed",
+        name: item.provider,
+        platform: "both",
+        item,
+      }),
+    ),
+  ];
   const [platform, setPlatform] = useState<"android" | "ios">(() =>
     detectDevicePlatform(),
   );
@@ -1422,25 +1503,31 @@ function GamesSection({ token }: { token: string }) {
 
   const partnerNames: string[] = [];
   const partnerCounts = new Map<string, number>();
-  for (const g of all) {
-    const name = g.provider || g.title;
-    if (!partnerCounts.has(name)) partnerNames.push(name);
-    partnerCounts.set(name, (partnerCounts.get(name) ?? 0) + 1);
+  for (const e of entries) {
+    if (!partnerCounts.has(e.name)) partnerNames.push(e.name);
+    partnerCounts.set(e.name, (partnerCounts.get(e.name) ?? 0) + 1);
   }
 
-  const forPlatform = all.filter(
-    (g) => g.platform === platform || g.platform === "both",
+  const forPlatform = entries.filter(
+    (e) => e.platform === platform || e.platform === "both",
   );
   const visible = partner
-    ? forPlatform.filter((g) => (g.provider || g.title) === partner)
+    ? forPlatform.filter((e) => e.name === partner)
     : forPlatform;
   const rowA = visible.filter((_, i) => i % 2 === 0);
   const rowB = visible.filter((_, i) => i % 2 === 1);
-  const openItem = all.find((g) => g.id === openId) ?? null;
+  const openItem = adminGames.find((g) => g.id === openId) ?? null;
 
-  const renderCard = (item: GameItem, key: string) => (
-    <GameCard key={key} item={item} onOpen={() => setOpenId(item.id)} />
-  );
+  const renderCard = (entry: GameEntry, key: string) =>
+    entry.source === "admin" ? (
+      <GameCard
+        key={key}
+        item={entry.item}
+        onOpen={() => setOpenId(entry.item.id)}
+      />
+    ) : (
+      <FeedGameCard key={key} game={entry.item} />
+    );
 
   return (
     <div>
@@ -1475,9 +1562,9 @@ function GamesSection({ token }: { token: string }) {
         ))}
       </div>
 
-      {query.isPending ? (
+      {query.isPending || feedQuery.isPending ? (
         <p className="mt-8 text-sm text-[var(--dim)]">Loading games…</p>
-      ) : all.length === 0 ? (
+      ) : entries.length === 0 ? (
         <div className="mt-8 rounded-3xl border-2 border-dashed border-[var(--border)] bg-[var(--surface)] px-6 py-12 text-center">
           <span className="text-[var(--brand)]">{Icons.game("h-10 w-10")}</span>
           <p className="mx-auto mt-3 max-w-md text-sm leading-relaxed text-[var(--dim)]">
@@ -1505,9 +1592,9 @@ function GamesSection({ token }: { token: string }) {
           )}
           {visible.length > 0 ? (
             <div className="mt-5 space-y-5">
-              <LoopRow items={rowA} renderCard={renderCard} label="Games row 1" />
+              <LoopRow items={rowA} renderCard={renderCard} label="Games row 1" keyOf={(e) => (e.source === "admin" ? `a${e.item.id}` : e.item.key)} />
               {rowB.length > 0 && (
-                <LoopRow items={rowB} renderCard={renderCard} label="Games row 2" />
+                <LoopRow items={rowB} renderCard={renderCard} label="Games row 2" keyOf={(e) => (e.source === "admin" ? `a${e.item.id}` : e.item.key)} />
               )}
             </div>
           ) : (

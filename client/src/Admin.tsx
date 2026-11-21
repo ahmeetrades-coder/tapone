@@ -1176,6 +1176,7 @@ interface ContentForm {
   description: string;
   rewardDollars: string;
   url: string;
+  feedUrl: string;
   imageUrl: string;
   badge: string;
   platform: "android" | "ios" | "both";
@@ -1193,6 +1194,7 @@ const EMPTY_FORM: ContentForm = {
   description: "",
   rewardDollars: "",
   url: "",
+  feedUrl: "",
   imageUrl: "",
   badge: "",
   platform: "android",
@@ -1695,6 +1697,7 @@ function ContentTab({ token }: { token: string }) {
         description: f.description.trim(),
         rewardCents,
         url: f.url.trim(),
+        feedUrl: f.feedUrl.trim() === "" ? null : f.feedUrl.trim(),
         imageUrl: f.imageUrl.trim() === "" ? null : f.imageUrl.trim(),
         badge: f.badge.trim() === "" ? null : f.badge.trim(),
         platform: f.platform,
@@ -1731,6 +1734,7 @@ function ContentTab({ token }: { token: string }) {
     description: item.description,
     rewardDollars: item.rewardCents != null ? (item.rewardCents / 100).toFixed(2) : "",
     url: item.url,
+    feedUrl: item.feedUrl ?? "",
     imageUrl: item.imageUrl ?? "",
     badge: item.badge ?? "",
     platform:
@@ -1846,6 +1850,15 @@ function ContentTab({ token }: { token: string }) {
               <label htmlFor="ct-url" className="text-sm font-semibold">Offer URL <span className="font-normal text-[var(--dim)]">(the partner link, with the user's ID if the partner supports it)</span></label>
               <input id="ct-url" {...FIELDS.adminUpsertContent.url} value={form.url} onChange={(e) => setForm({ ...form, url: e.target.value })} placeholder="https://…" className={fieldCls} />
             </div>
+            {(form.kind === "survey" || form.kind === "game") && (
+              <div className="sm:col-span-2">
+                <label htmlFor="ct-feed" className="text-sm font-semibold">Items feed URL <span className="font-normal text-[var(--dim)]">(optional — the partner's JSON feed of individual {form.kind === "game" ? "games" : "surveys"}; they list automatically in the {form.kind === "game" ? "Games" : "Surveys"} tab, matched to each user)</span></label>
+                <input id="ct-feed" {...FIELDS.adminUpsertContent.feedUrl} value={form.feedUrl} onChange={(e) => setForm({ ...form, feedUrl: e.target.value })} placeholder="https://…?user_id={user_id}&ip={ip}&country={country}" className={fieldCls} />
+                <p className="mt-1 text-xs leading-relaxed text-[var(--dim)]">
+                  Placeholders: {"{user_id}"} = the user's Offer Token, {"{ip}"} = their sign-in IP, {"{country}"} = their country code. Leave empty for partners TapOne already reads directly (TheoremReach, CPX Research).
+                </p>
+              </div>
+            )}
             <div>
               <label htmlFor="ct-img" className="text-sm font-semibold">Image URL <span className="font-normal text-[var(--dim)]">(optional)</span></label>
               <input id="ct-img" {...FIELDS.adminUpsertContent.imageUrl} value={form.imageUrl} onChange={(e) => setForm({ ...form, imageUrl: e.target.value })} placeholder="https://…" className={fieldCls} />
