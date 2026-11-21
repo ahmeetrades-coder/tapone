@@ -1929,10 +1929,13 @@ function LevelTab({ token, go }: { token: string; go: (t: DashboardTab) => void 
     <div>
       <h1 className="font-display text-2xl font-extrabold sm:text-3xl">Level &amp; Privileges</h1>
       <p className="mt-1 max-w-xl text-sm leading-relaxed text-[var(--dim)]">
-        Every $1 you earn raises you one level. At every 10 new levels your
-        Title Bonus is settled automatically into your balance — the rate
-        depends on your title, and it is saved in your history, not just
-        shown here.
+        Every $1 you earn raises you one level. The moment you reach a new
+        title, its one-time Level Reward is credited to your balance
+        automatically
+        {d && d.titles.length > 0
+          ? ` — ${fmt(d.titles.reduce((s, t) => s + t.rewardCents, 0))} in total across all ${d.titles.length} titles`
+          : ""}
+        {" "}— and it is saved in your history, not just shown here.
       </p>
       <section className="mt-5 rounded-3xl bg-[var(--pill)] p-6 ring-1 ring-[var(--border)]" aria-label="Your level">
         <p className="text-sm font-semibold text-[var(--dim)]">Your level</p>
@@ -1955,12 +1958,16 @@ function LevelTab({ token, go }: { token: string; go: (t: DashboardTab) => void 
             : "Loading…"}
         </p>
         <p className="mt-3 inline-block rounded-full bg-[var(--surface)] px-3.5 py-1.5 text-sm font-bold ring-1 ring-[var(--border)]">
-          Chargeback rate: {d ? `${d.chargebackRatePct}%` : "…"} — under 3% keeps the Enhanced bonus rate
+          {d?.nextTitle
+            ? `Next reward: ${fmt(d.nextTitle.rewardCents)} when you reach ${d.nextTitle.name} (Level ${d.nextTitle.level.toLocaleString()})`
+            : d
+              ? `Every title reward collected — ${fmt(d.titles.reduce((s, t) => s + t.rewardCents, 0))} in total`
+              : "Loading your rewards…"}
         </p>
       </section>
 
       <section className="mt-6" aria-label="Titles">
-        <h2 className="font-display text-lg font-bold">Titles &amp; Title Bonus rates</h2>
+        <h2 className="font-display text-lg font-bold">Titles &amp; Level Rewards</h2>
         <ul className="mt-3 divide-y divide-[var(--border)] rounded-2xl bg-[var(--surface)] px-4 ring-1 ring-[var(--border)]">
           {(d?.titles ?? []).map((title) => (
             <li key={title.name} className="flex items-center gap-3 py-3">
@@ -1970,27 +1977,33 @@ function LevelTab({ token, go }: { token: string; go: (t: DashboardTab) => void 
               <span className="min-w-0 flex-1">
                 <span className="block text-sm font-bold">{title.name}</span>
                 <span className="block text-xs text-[var(--dim)]">
-                  Unlocks at Level {title.level.toLocaleString()} · Title Bonus {title.standardPct}% Standard / {title.enhancedPct}% Enhanced
+                  Unlocks at Level {title.level.toLocaleString()} · One-time reward {fmt(title.rewardCents)}
                 </span>
+              </span>
+              <span className="shrink-0 font-display text-base font-extrabold text-[var(--brand-deep)]">
+                {fmt(title.rewardCents)}
               </span>
               {title.current ? (
                 <span className="rounded-full bg-[var(--pill)] px-2.5 py-1 text-xs font-bold text-[var(--brand-deep)] ring-1 ring-[var(--border)]">Your title</span>
               ) : title.reached ? (
-                <span className="text-sm font-bold text-[var(--brand-deep)]">✓ Reached</span>
+                <span className="text-sm font-bold text-[var(--brand-deep)]">✓ Paid</span>
               ) : null}
             </li>
           ))}
         </ul>
         <p className="mt-3 text-xs leading-relaxed text-[var(--dim)]">
-          Title Bonus is paid automatically at every 10 new levels (first
-          settled after Level 15). Enhanced rate applies when your chargeback
-          rate is under 3%, Standard at 3–5%, and no bonus above 5%.
-          Chargebacks can reduce your level and title.
+          Each title pays its reward once, the moment you reach it — every
+          user, automatically, no claiming needed.
+          {d && d.titles.length > 0
+            ? ` Together the ${d.titles.length} titles pay ${fmt(d.titles.reduce((s, t) => s + t.rewardCents, 0))}.`
+            : ""}
+          {" "}Chargebacks can reduce your level and title, but a reward
+          already paid is never taken back.
         </p>
       </section>
 
-      <section className="mt-6" aria-label="Title bonus history">
-        <h2 className="font-display text-lg font-bold">Title Bonuses you received</h2>
+      <section className="mt-6" aria-label="Level reward history">
+        <h2 className="font-display text-lg font-bold">Level Rewards you received</h2>
         {lvl.isPending ? (
           <p className="mt-3 text-sm text-[var(--dim)]">Loading…</p>
         ) : d && d.rewardHistory.length > 0 ? (
@@ -2007,8 +2020,12 @@ function LevelTab({ token, go }: { token: string; go: (t: DashboardTab) => void 
           </ul>
         ) : (
           <p className="mt-3 rounded-2xl border-2 border-dashed border-[var(--border)] bg-[var(--surface)] px-5 py-8 text-center text-sm text-[var(--dim)]">
-            No Title Bonuses yet — bonuses settle automatically every 10
-            levels, starting after Level 15.
+            {(() => {
+              const first = d?.titles.find((t) => t.rewardCents > 0);
+              return first
+                ? `No Level Rewards yet — your first one, ${fmt(first.rewardCents)}, is credited the moment you reach ${first.name} at Level ${first.level.toLocaleString()}.`
+                : "No Level Rewards yet — rewards are credited the moment you reach a title.";
+            })()}
           </p>
         )}
       </section>

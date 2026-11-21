@@ -3204,7 +3204,7 @@ function SettingsTab({ token }: { token: string }) {
   const [affiliateTiersText, setAffiliateTiersText] = useState("");
   const [centsPerLevel, setCentsPerLevel] = useState("");
   const [titleRows, setTitleRows] = useState<
-    { name: string; level: string; standardPct: string; enhancedPct: string }[]
+    { name: string; level: string; standardPct: string; enhancedPct: string; reward: string }[]
   >([]);
   const [social, setSocial] = useState<Record<string, string>>({});
   const [adminUsername, setAdminUsername] = useState("");
@@ -3236,6 +3236,7 @@ function SettingsTab({ token }: { token: string }) {
           level: String(t.level),
           standardPct: String(t.standardPct),
           enhancedPct: String(t.enhancedPct),
+          reward: (t.rewardCents / 100).toFixed(2),
         })),
       );
       setSocial(s.socialLinks ?? {});
@@ -3291,11 +3292,15 @@ function SettingsTab({ token }: { token: string }) {
           throw new Error(`Title ${i + 1}: give it a name.`);
         if (!Number.isFinite(level) || level < 1)
           throw new Error(`Title "${t.name}": its level must be a whole number above 0.`);
+        const rewardCents = toCents(t.reward);
+        if (rewardCents === null || rewardCents < 0)
+          throw new Error(`Title "${t.name}": its one-time reward must be a valid dollar amount (0 = no reward).`);
         return {
           name: t.name.trim(),
           level,
           standardPct: pct(t.standardPct, `Title "${t.name}" standard bonus`),
           enhancedPct: pct(t.enhancedPct, `Title "${t.name}" enhanced bonus`),
+          rewardCents,
         };
       });
       for (let i = 1; i < levelTitles.length; i++) {
@@ -3573,15 +3578,19 @@ function SettingsTab({ token }: { token: string }) {
         </section>
 
         <section className="rounded-3xl bg-[var(--surface)] p-5 ring-1 ring-[var(--border)] sm:p-6">
-          <h2 className="font-display text-lg font-bold">Levels &amp; Title Bonuses</h2>
+          <h2 className="font-display text-lg font-bold">Levels &amp; Title Rewards</h2>
           <p className="mt-1 text-sm leading-relaxed text-[var(--dim)]">
             A user's level is their lifetime earnings divided by the amount
-            per level. A Title Bonus settles automatically at every 10 new
-            levels (first at Level 20): the title's percentage of that
-            10-level block of earnings — the Enhanced rate while the user's
-            chargeback rate is under 3%, the Standard rate at 3–5%, and no
-            bonus above 5%. Changes apply to bonuses settled after the save;
-            levels already reached are not re-paid.
+            per level. The moment a user reaches a title, that title's
+            one-time reward is credited to their balance automatically —
+            once per title per user, never twice. With the built-in amounts
+            (Bronze $5, Silver $5, Gold $15, Diamond $25, Champion $50,
+            Master $900) the rewards total exactly $1,000 per user. A user
+            who already passed a title gets its reward on their next
+            earning. Changing an amount here applies to rewards paid after
+            the save; a title already paid to a user is never paid again.
+            (The Standard/Enhanced % columns are kept from the old bonus
+            table and no longer pay anything.)
           </p>
           <div className="mt-3 max-w-xs">
             <label htmlFor="set-per-level" className="text-sm font-semibold">Earnings per level ($)</label>
@@ -3589,7 +3598,7 @@ function SettingsTab({ token }: { token: string }) {
           </div>
           <div className="mt-4 space-y-2">
             {titleRows.map((t, i) => (
-              <div key={i} className="grid grid-cols-2 gap-3 rounded-2xl bg-[var(--surface-2)] p-3 ring-1 ring-[var(--border)] sm:grid-cols-[1fr_110px_110px_110px_auto]">
+              <div key={i} className="grid grid-cols-2 gap-3 rounded-2xl bg-[var(--surface-2)] p-3 ring-1 ring-[var(--border)] sm:grid-cols-[1fr_110px_110px_110px_110px_auto]">
                 <div>
                   <label htmlFor={`title-name-${i}`} className="text-xs font-semibold text-[var(--dim)]">Title</label>
                   <input
@@ -3637,6 +3646,18 @@ function SettingsTab({ token }: { token: string }) {
                     className={fieldCls}
                   />
                 </div>
+                <div>
+                  <label htmlFor={`title-reward-${i}`} className="text-xs font-semibold text-[var(--dim)]">One-time reward ($)</label>
+                  <input
+                    id={`title-reward-${i}`}
+                    value={t.reward}
+                    onChange={(e) =>
+                      setTitleRows((prev) => prev.map((x, j) => (j === i ? { ...x, reward: e.target.value } : x)))
+                    }
+                    inputMode="decimal"
+                    className={fieldCls}
+                  />
+                </div>
                 <div className="flex items-end">
                   <button
                     type="button"
@@ -3651,13 +3672,18 @@ function SettingsTab({ token }: { token: string }) {
               </div>
             ))}
           </div>
+          <p className="mt-3 text-sm font-semibold">
+            Total one-time rewards across all titles: $
+            {titleRows.reduce((sum, t) => sum + (Number.parseFloat(t.reward) || 0), 0).toFixed(2)}
+            {" "}per user
+          </p>
           {titleRows.length < 8 && (
             <button
               type="button"
               onClick={() =>
                 setTitleRows((prev) => [
                   ...prev,
-                  { name: "", level: "", standardPct: "", enhancedPct: "" },
+                  { name: "", level: "", standardPct: "", enhancedPct: "", reward: "" },
                 ])
               }
               className="mt-3 rounded-full px-4 py-2 text-sm font-bold ring-1 ring-[var(--border)]"
