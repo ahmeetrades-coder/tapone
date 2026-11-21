@@ -18,6 +18,14 @@
 //                matches, alongside the built-in per-country methods
 // adminNotifications — owner alerts, e.g. every new registration with the
 //                user's name, email, country, flag and IP
+// partnerCallbacks — owner-configured reward callbacks for partners that
+//                do NOT match the built-in generic postback or the
+//                TheoremReach callback: for each partner the owner sets
+//                which query parameter carries the user ID, the
+//                transaction ID and the payout, and how the call is
+//                authenticated (no secret / a shared secret parameter /
+//                HMAC-SHA1 / HMAC-SHA256). Adding a partner is then pure
+//                admin data — no code change or redeploy.
 
 import { integer, real, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
@@ -25,6 +33,11 @@ export const users = sqliteTable("users", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   userCode: text("user_code").notNull().unique(),
   name: text("name").notNull(),
+  // How many times the user has changed their display name from the
+  // Profile page. Lifetime limit is 3 (MAX_NAME_CHANGES in actions.ts);
+  // at the limit the name is locked. Sign-in never resets it and never
+  // overwrites a name the user chose.
+  nameChanges: integer("name_changes").notNull().default(0),
   email: text("email").notNull().unique(),
   pictureUrl: text("picture_url"),
   loginMethod: text("login_method").notNull().default("google"),
@@ -236,6 +249,43 @@ export const adminNotifications = sqliteTable("admin_notifications", {
   flagEmoji: text("flag_emoji"),
   ip: text("ip"),
   read: integer("read").notNull().default(0),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+export const partnerCallbacks = sqliteTable("partner_callbacks", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  // Short URL-safe key the partner's callback address ends with:
+  // /partner-callback/<key>. Unique — one config per partner.
+  key: text("key").notNull().unique(),
+  // Partner display name; also the network name written on postback
+  // log rows and the user's history note.
+  name: text("name").notNull(),
+  // Names of the query parameters THIS partner sends: which one holds
+  // the user ID (the user's Offer Token / user code), which one the
+  // unique transaction ID, and which one the payout amount.
+  userParam: text("user_param").notNull().default("user_id"),
+  txnParam: text("txn_param").notNull().default("txn_id"),
+  payoutParam: text("payout_param").notNull().default("payout"),
+  // 1 = the payout parameter arrives in cents (divided by 100 before
+  // crediting); 0 = it arrives in dollars.
+  payoutInCents: integer("payout_in_cents").notNull().default(0),
+  // How the partner proves the callback is genuine:
+  //   none        — no check (not recommended for live partners)
+  //   secret      — a parameter (secretParam) must equal the secret
+  //   hmac_sha1   — a parameter (secretParam) must equal the hex
+  //   hmac_sha256   HMAC of every other parameter, sorted by name and
+  //                 joined as name=value&name=value, keyed by the secret
+  authMethod: text("auth_method", {
+    enum: ["none", "secret", "hmac_sha1", "hmac_sha256"],
+  })
+    .notNull()
+    .default("none"),
+  // Name of the parameter that carries the secret / signature.
+  secretParam: text("secret_param").notNull().default(""),
+  secret: text("secret").notNull().default(""),
+  active: integer("active").notNull().default(1),
   createdAt: integer("created_at", { mode: "timestamp_ms" })
     .notNull()
     .$defaultFn(() => new Date()),

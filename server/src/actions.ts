@@ -102,6 +102,15 @@ function newToken(prefix: string): string {
 
 type UserRow = typeof schema.users.$inferSelect;
 
+// A user may change their display name at most 3 times in the whole
+// life of the account (owner rule 2026-11-21). The count lives on the
+// user row (users.name_changes); at the limit the name is locked.
+const MAX_NAME_CHANGES = 3;
+
+function nameChangesLeft(u: UserRow): number {
+  return Math.max(0, MAX_NAME_CHANGES - u.nameChanges);
+}
+
 function publicUser(u: UserRow, titles: readonly TitleDef[] = DEFAULT_TITLES) {
   return {
     id: u.id,
@@ -111,6 +120,7 @@ function publicUser(u: UserRow, titles: readonly TitleDef[] = DEFAULT_TITLES) {
     // rows created before the offer_token column existed.
     offerToken: u.offerToken ?? u.userCode,
     name: u.name,
+    nameChangesLeft: nameChangesLeft(u),
     email: u.email,
     pictureUrl: u.pictureUrl ?? null,
     loginMethod: u.loginMethod,
@@ -1382,6 +1392,7 @@ const userShape = z.object({
   userCode: z.string(),
   offerToken: z.string(),
   name: z.string(),
+  nameChangesLeft: z.number(),
   email: z.string(),
   pictureUrl: z.string().nullable(),
   loginMethod: z.string(),
@@ -1483,8 +1494,89 @@ async function theoremReachSignature(
 }
 
 /**
- * The one reward-credit path, shared by the generic offerwall postback
- * and the TheoremReach callback: inserts the postback log row (its
+ * Hex HMAC (SHA-1 or SHA-256) for owner-configured partner callbacks
+ * (Admin → Partner Callbacks). The signed string is every callback
+ * parameter EXCEPT the signature parameter itself, sorted by parameter
+ * name and joined as `name=value&name=value` with the values exactly as
+ * received — the scheme the admin panel documents for the owner, so a
+ * partner (or the owner, testing by hand) can reproduce it from the
+ * config alone.
+ */
+async function partnerHmacHex(
+  secret: string,
+  params: Record<string, string>,
+  signatureParam: string,
+  hash: "SHA-1" | "SHA-256",
+): Promise<string> {
+  const canonical = Object.keys(params)
+    .filter((k) => k !== signatureParam)
+    .sort()
+    .map((k) => `${k}=${params[k] ?? ""}`)
+    .join("&");
+  const enc = new TextEncoder();
+  const key = await globalThis.crypto.subtle.importKey(
+    "raw",
+    enc.encode(secret),
+    { name: "HMAC", hash },
+    false,
+    ["sign"],
+  );
+  const raw = new Uint8Array(
+    await globalThis.crypto.subtle.sign("HMAC", key, enc.encode(canonical)),
+  );
+  return [...raw].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** Constant-time string compare for secrets and signatures. */
+function secretsEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+type PartnerCallbackRow = typeof schema.partnerCallbacks.$inferSelect;
+
+const partnerCallbackShape = z.object({
+  id: z.number(),
+  key: z.string(),
+  name: z.string(),
+  userParam: z.string(),
+  txnParam: z.string(),
+  payoutParam: z.string(),
+  payoutInCents: z.boolean(),
+  authMethod: z.enum(["none", "secret", "hmac_sha1", "hmac_sha256"]),
+  secretParam: z.string(),
+  // The secret value itself is NEVER sent back to the client — only
+  // whether one is stored (same rule as the postback secrets).
+  secretSet: z.boolean(),
+  active: z.boolean(),
+  createdAt: z.string(),
+});
+
+function publicPartnerCallback(
+  row: PartnerCallbackRow,
+): z.infer<typeof partnerCallbackShape> {
+  return {
+    id: row.id,
+    key: row.key,
+    name: row.name,
+    userParam: row.userParam,
+    txnParam: row.txnParam,
+    payoutParam: row.payoutParam,
+    payoutInCents: row.payoutInCents === 1,
+    authMethod: row.authMethod,
+    secretParam: row.secretParam,
+    secretSet: row.secret !== "",
+    active: row.active === 1,
+    createdAt: row.createdAt.toISOString(),
+  };
+}
+
+/**
+ * The one reward-credit path, shared by the generic offerwall postback,
+ * the TheoremReach callback and every owner-configured partner
+ * callback: inserts the postback log row (its
  * unique txn_id is what makes a second call a duplicate — callers check
  * for an existing row BEFORE calling this), credits the user their
  * share (user_share_pct, default 70%) of the payout, writes the ledger
@@ -1913,7 +2005,10 @@ export const Actions = {
         await db
           .update(schema.users)
           .set({
-            name,
+            // NOTE: the stored display name is deliberately NOT
+            // overwritten with the Google account name here — a name
+            // the user picked in Profile (they get 3 lifetime changes)
+            // must survive every later sign-in.
             pictureUrl: pictureUrl ?? user.pictureUrl,
             ip: geo.ip ?? user.ip,
             countryCode: geo.countryCode ?? user.countryCode,
@@ -2916,6 +3011,43 @@ export const Actions = {
     },
   }),
 
+  updateDisplayName: defineAction({
+    description:
+      "Changes the signed-in user's display name (1–40 characters). Lifetime limit: 3 changes per account — every successful change is counted on the user row, and once all 3 are used the name is locked and further changes are refused. Saving the name the user already has is not a change and is never counted. The name lives on the user row, so a new name shows at once everywhere the name appears — leaderboard, referrals, winner banners, admin lists. The Google email on the account never changes.",
+    request: z.object({
+      token: z.string().min(1).max(200),
+      name: z
+        .string()
+        .trim()
+        .min(1, "Type a display name.")
+        .max(40, "Display name can be at most 40 characters."),
+    }),
+    response: z.object({ name: z.string(), nameChangesLeft: z.number() }),
+    async handler(ctx, args) {
+      const db = ctx.db<typeof schema>();
+      const user = await requireUser(ctx, args.token);
+      // Re-saving the current name is not a change — never counted,
+      // and allowed even when the limit is used up.
+      if (args.name === user.name) {
+        return { name: user.name, nameChangesLeft: nameChangesLeft(user) };
+      }
+      if (user.nameChanges >= MAX_NAME_CHANGES)
+        throw new Error(
+          `You have used all ${MAX_NAME_CHANGES} display name changes — your name is now locked as "${user.name}".`,
+        );
+      const used = user.nameChanges + 1;
+      await db
+        .update(schema.users)
+        .set({ name: args.name, nameChanges: used })
+        .where(eq(schema.users.id, user.id));
+      ctx.invalidateQueries();
+      return {
+        name: args.name,
+        nameChangesLeft: Math.max(0, MAX_NAME_CHANGES - used),
+      };
+    },
+  }),
+
   // NOTE: sign-in is Google-only, so Profile/Settings carries no
   // extra account-verification preference — the owner removed that
   // option entirely on 2026-11-19.
@@ -3201,6 +3333,147 @@ export const Actions = {
         txnId: txnKey,
         payout,
         note: "TheoremReach survey completed",
+        rawJson,
+      });
+      ctx.invalidateQueries();
+      return { status: "credited" as const, creditedCents };
+    },
+  }),
+
+  partnerCallback: defineAction({
+    description:
+      "Reward callback for an owner-configured partner (Admin → Partner Callbacks): reads the user ID, transaction ID and payout from the parameter names the owner set for that partner, checks the secret/signature the owner configured (none / secret parameter / HMAC-SHA1 / HMAC-SHA256), then credits the user 70% through the same path as the built-in postbacks — referrer commission, level-ups and weekly check-in included. Idempotent per partner + transaction ID.",
+    request: z.object({
+      // The partner's key from its callback address:
+      // /partner-callback/<key> on the standalone server.
+      key: z.string().trim().min(1).max(60),
+      // Every query parameter the partner sent, verbatim — which ones
+      // mean user / transaction / payout / signature is decided by the
+      // owner's saved config, never by fixed names here.
+      params: z.record(z.string(), z.string()),
+    }),
+    response: z.object({
+      status: z.enum(["credited", "duplicate", "unknown_user", "rejected"]),
+      creditedCents: z.number(),
+    }),
+    async handler(ctx, args) {
+      const db = ctx.db<typeof schema>();
+      const settings = await getSettings(db);
+      const key = args.key.toLowerCase();
+      const rows = await db
+        .select()
+        .from(schema.partnerCallbacks)
+        .where(eq(schema.partnerCallbacks.key, key))
+        .limit(1);
+      const config = rows[0];
+      if (!config || config.active !== 1)
+        throw new Error("Unknown partner callback.");
+
+      const params = args.params;
+      const userId = (params[config.userParam] ?? "").trim();
+      const txId = (params[config.txnParam] ?? "").trim();
+      const payoutRaw = (params[config.payoutParam] ?? "").trim();
+      if (!userId || !txId || !payoutRaw)
+        throw new Error(
+          `Missing callback parameters: this partner must send ${config.userParam}, ${config.txnParam} and ${config.payoutParam}.`,
+        );
+
+      // Authentication exactly as the owner configured it for this
+      // partner. A stored secret is required for every method except
+      // "none" — a config that names a method but has no secret is a
+      // setup mistake, so the callback is refused, never waved through.
+      if (config.authMethod !== "none") {
+        if (!config.secret)
+          throw new Error(
+            "This partner's callback secret is not set in Admin → Partner Callbacks.",
+          );
+        const given = (params[config.secretParam] ?? "").trim();
+        if (!given) throw new Error("Missing callback signature.");
+        if (config.authMethod === "secret") {
+          if (!secretsEqual(given, config.secret))
+            throw new Error("Invalid callback secret.");
+        } else {
+          const expected = await partnerHmacHex(
+            config.secret,
+            params,
+            config.secretParam,
+            config.authMethod === "hmac_sha1" ? "SHA-1" : "SHA-256",
+          );
+          if (!secretsEqual(given.toLowerCase(), expected))
+            throw new Error("Invalid callback signature.");
+        }
+      }
+
+      const payoutNumber = Number.parseFloat(payoutRaw);
+      if (!Number.isFinite(payoutNumber))
+        throw new Error("Invalid payout amount.");
+      const payout =
+        config.payoutInCents === 1 ? payoutNumber / 100 : payoutNumber;
+      // Negative or zero payouts (reversals/chargebacks) never credit
+      // and never debit automatically — same rule as TheoremReach.
+      if (payout <= 0) {
+        return { status: "rejected" as const, creditedCents: 0 };
+      }
+
+      // Idempotent per partner + transaction ID (namespaced so two
+      // partners can reuse the same transaction ID safely, and so a
+      // partner transaction can never collide with the generic
+      // postback or TheoremReach namespaces).
+      const txnKey = `partner:${config.key}:${txId}`;
+      const existing = await db
+        .select()
+        .from(schema.postbacks)
+        .where(eq(schema.postbacks.txnId, txnKey))
+        .limit(1);
+      if (existing[0]) {
+        return {
+          status: "duplicate" as const,
+          creditedCents: existing[0].creditedCents,
+        };
+      }
+
+      // The user ID is whatever the partner echoes back from the
+      // user's entry link: the user's Offer Token first, then their
+      // user code, then a plain numeric account ID.
+      let userRows = await db
+        .select()
+        .from(schema.users)
+        .where(eq(schema.users.offerToken, userId))
+        .limit(1);
+      if (!userRows[0]) {
+        userRows = await db
+          .select()
+          .from(schema.users)
+          .where(eq(schema.users.userCode, userId))
+          .limit(1);
+      }
+      if (!userRows[0] && /^\d+$/.test(userId)) {
+        userRows = await db
+          .select()
+          .from(schema.users)
+          .where(eq(schema.users.id, Number.parseInt(userId, 10)))
+          .limit(1);
+      }
+      const user = userRows[0];
+      const rawJson = JSON.stringify({ partner: config.key, params });
+      if (!user) {
+        await db.insert(schema.postbacks).values({
+          txnId: txnKey,
+          network: config.name,
+          userId: null,
+          payout,
+          creditedCents: 0,
+          status: "unknown_user",
+          rawJson,
+        });
+        return { status: "unknown_user" as const, creditedCents: 0 };
+      }
+
+      const creditedCents = await applyRewardCredit(db, settings, user, {
+        network: config.name,
+        txnId: txnKey,
+        payout,
+        note: `${config.name} completed`,
         rawJson,
       });
       ctx.invalidateQueries();
@@ -4254,6 +4527,183 @@ export const Actions = {
           createdAt: r.p.createdAt.toISOString(),
         })),
       };
+    },
+  }),
+
+  adminListPartnerCallbacks: defineAction({
+    description:
+      "All owner-configured partner callbacks (Admin → Partner Callbacks): each partner's callback key, the parameter names it sends for user ID / transaction ID / payout, and its authentication method. Secret values are never returned — only whether one is set.",
+    request: z.object({ adminToken: z.string().min(1).max(200) }),
+    response: z.object({ partners: z.array(partnerCallbackShape) }),
+    async handler(ctx, args) {
+      await requireAdmin(ctx, args.adminToken);
+      const db = ctx.db<typeof schema>();
+      const rows = await db
+        .select()
+        .from(schema.partnerCallbacks)
+        .orderBy(schema.partnerCallbacks.id);
+      return { partners: rows.map(publicPartnerCallback) };
+    },
+  }),
+
+  adminUpsertPartnerCallback: defineAction({
+    description:
+      "Adds or edits a partner callback config: partner name + callback key, which parameters carry the user ID, transaction ID and payout (and whether the payout is in cents), and how callbacks are authenticated — no secret, a shared secret parameter, or an HMAC-SHA1 / HMAC-SHA256 signature — with the secret value. Saved configs take effect on the very next callback; no redeploy. Leaving the secret blank while editing keeps the stored one.",
+    request: z.object({
+      adminToken: z.string().min(1).max(200),
+      id: z.number().int().positive().optional(),
+      key: z
+        .string()
+        .trim()
+        .toLowerCase()
+        .regex(
+          /^[a-z0-9][a-z0-9-]{1,39}$/,
+          "Callback key must be 2–40 characters: lowercase letters, numbers and dashes.",
+        ),
+      name: z.string().trim().min(1).max(80),
+      userParam: z.string().trim().min(1).max(60),
+      txnParam: z.string().trim().min(1).max(60),
+      payoutParam: z.string().trim().min(1).max(60),
+      payoutInCents: z.boolean().default(false),
+      authMethod: z
+        .enum(["none", "secret", "hmac_sha1", "hmac_sha256"])
+        .default("none"),
+      secretParam: z.string().trim().max(60).default(""),
+      // Blank while editing = keep the stored secret; on a new partner
+      // with an auth method chosen, a secret is required.
+      secret: z.string().trim().max(300).optional(),
+      active: z.boolean().default(true),
+    }),
+    response: z.object({ id: z.number() }),
+    async handler(ctx, args) {
+      await requireAdmin(ctx, args.adminToken);
+      const db = ctx.db<typeof schema>();
+      if (args.key === "theoremreach")
+        throw new Error(
+          '"theoremreach" is reserved for the built-in TheoremReach callback. Pick a different key.',
+        );
+      if (
+        args.userParam === args.txnParam ||
+        args.userParam === args.payoutParam ||
+        args.txnParam === args.payoutParam
+      )
+        throw new Error(
+          "User ID, transaction ID and payout must be three different parameter names.",
+        );
+      if (args.authMethod !== "none") {
+        if (!args.secretParam)
+          throw new Error(
+            "Name the parameter that will carry the secret / signature.",
+          );
+        if (
+          args.secretParam === args.userParam ||
+          args.secretParam === args.txnParam ||
+          args.secretParam === args.payoutParam
+        )
+          throw new Error(
+            "The secret / signature parameter must be its own parameter name.",
+          );
+      }
+      // The key is the partner's callback address — it must be unique.
+      const sameKey = await db
+        .select()
+        .from(schema.partnerCallbacks)
+        .where(eq(schema.partnerCallbacks.key, args.key))
+        .limit(1);
+      if (sameKey[0] && sameKey[0].id !== args.id)
+        throw new Error(
+          `Another partner already uses the callback key "${args.key}". Pick a different one.`,
+        );
+
+      const base = {
+        key: args.key,
+        name: args.name,
+        userParam: args.userParam,
+        txnParam: args.txnParam,
+        payoutParam: args.payoutParam,
+        payoutInCents: args.payoutInCents ? 1 : 0,
+        authMethod: args.authMethod,
+        secretParam: args.authMethod === "none" ? "" : args.secretParam,
+        active: args.active ? 1 : 0,
+      };
+
+      if (args.id) {
+        const rows = await db
+          .select()
+          .from(schema.partnerCallbacks)
+          .where(eq(schema.partnerCallbacks.id, args.id))
+          .limit(1);
+        const row = rows[0];
+        if (!row) throw new Error("That partner no longer exists.");
+        const secret =
+          args.secret !== undefined && args.secret !== ""
+            ? args.secret
+            : row.secret;
+        if (args.authMethod !== "none" && !secret)
+          throw new Error(
+            "Type the partner's secret — this authentication method needs one.",
+          );
+        await db
+          .update(schema.partnerCallbacks)
+          .set({ ...base, secret: args.authMethod === "none" ? row.secret : secret })
+          .where(eq(schema.partnerCallbacks.id, args.id));
+        ctx.invalidateQueries();
+        return { id: args.id };
+      }
+
+      const secret = args.secret ?? "";
+      if (args.authMethod !== "none" && !secret)
+        throw new Error(
+          "Type the partner's secret — this authentication method needs one.",
+        );
+      const inserted = await db
+        .insert(schema.partnerCallbacks)
+        .values({ ...base, secret })
+        .returning({ id: schema.partnerCallbacks.id });
+      const row = inserted[0];
+      if (!row) throw new Error("The partner could not be saved.");
+      ctx.invalidateQueries();
+      return { id: row.id };
+    },
+  }),
+
+  adminSetPartnerCallbackActive: defineAction({
+    description:
+      "Switches a partner callback on or off. While off, that partner's callbacks are refused and nothing is credited; the config itself is kept.",
+    request: z.object({
+      adminToken: z.string().min(1).max(200),
+      id: z.number().int().positive(),
+      active: z.boolean(),
+    }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args): Promise<{ ok: true }> {
+      await requireAdmin(ctx, args.adminToken);
+      const db = ctx.db<typeof schema>();
+      await db
+        .update(schema.partnerCallbacks)
+        .set({ active: args.active ? 1 : 0 })
+        .where(eq(schema.partnerCallbacks.id, args.id));
+      ctx.invalidateQueries();
+      return { ok: true };
+    },
+  }),
+
+  adminRemovePartnerCallback: defineAction({
+    description:
+      "Removes a partner callback config for good. Past credits from that partner stay in the postback log and users' history — only the callback address stops working.",
+    request: z.object({
+      adminToken: z.string().min(1).max(200),
+      id: z.number().int().positive(),
+    }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args): Promise<{ ok: true }> {
+      await requireAdmin(ctx, args.adminToken);
+      const db = ctx.db<typeof schema>();
+      await db
+        .delete(schema.partnerCallbacks)
+        .where(eq(schema.partnerCallbacks.id, args.id));
+      ctx.invalidateQueries();
+      return { ok: true };
     },
   }),
 

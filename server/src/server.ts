@@ -24,6 +24,11 @@
 //   GET  /theoremreach-callback?…   — TheoremReach's server-to-server
 //     reward callback; dispatched to the theoremReachCallback action
 //     with the raw signed URL so the action can verify the signature.
+//   GET|POST /partner-callback/<key>?… — reward callback for any
+//     partner the owner configured in Admin → Partner Callbacks;
+//     dispatched to the partnerCallback action with every query
+//     parameter verbatim (the saved config says which ones mean user
+//     ID, transaction ID, payout and signature).
 //   GET  /*                         — static files from CLIENT_DIR with an
 //     index.html fallback (the app is a hash-routed single page).
 //   Once a day at SETTLE_TIME it invokes the settleDailyContest action
@@ -407,6 +412,34 @@ const server = Bun.serve({
           hash,
           signed_url: signedUrl,
         });
+        return Response.json(data ?? { status: "ok" });
+      } catch (err) {
+        return errorResponse(err);
+      }
+    }
+    if (url.pathname.startsWith("/partner-callback/")) {
+      // Owner-configured partner reward callback (Admin → Partner
+      // Callbacks). The key is the last path segment; every query
+      // parameter is passed through verbatim — the partner's saved
+      // config decides which parameters carry the user ID, the
+      // transaction ID, the payout and the secret/signature, and the
+      // action verifies and credits. Partners call this with GET;
+      // POST with the same query string works too.
+      if (req.method !== "GET" && req.method !== "POST") {
+        return Response.json(
+          { error: { message: "Callback is called with GET." } },
+          { status: 405 },
+        );
+      }
+      const key = decodeURIComponent(
+        url.pathname.slice("/partner-callback/".length).split("/")[0] ?? "",
+      );
+      const params: Record<string, string> = {};
+      url.searchParams.forEach((value, name) => {
+        params[name] = value;
+      });
+      try {
+        const data = await dispatch("partnerCallback", { key, params });
         return Response.json(data ?? { status: "ok" });
       } catch (err) {
         return errorResponse(err);
