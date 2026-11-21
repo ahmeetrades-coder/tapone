@@ -1,10 +1,1 @@
-User-agent: *
-Allow: /
-Disallow: /actions
-Disallow: /blobs/
-
-Sitemap: https://www.tapone.store/sitemap.xml
-
-
-
-
+User-agent: *Allow: /Sitemap: https://www.tapone.store/sitemap.xml
