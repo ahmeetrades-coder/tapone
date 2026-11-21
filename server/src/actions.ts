@@ -52,6 +52,13 @@ const DEFAULT_SETTINGS: Record<string, string> = {
   // Admin → Settings → Contest prize tiers.
   daily_tiers_cents: "",
   affiliate_tiers_cents: "",
+  // Built-in withdraw methods per country, as JSON
+  // { "PK": ["easypaisa", ...], "DEFAULT": [...] } written from
+  // Admin → Withdraw Methods. Empty = the built-in table in code
+  // (METHODS_BY_COUNTRY). A country key present here REPLACES that
+  // country's built-in set, so the owner can add/remove built-in
+  // methods per country without a redeploy.
+  withdraw_methods_json: "",
 };
 
 async function getSettings(db: DB): Promise<Record<string, string>> {
@@ -341,19 +348,70 @@ const METHODS: Record<string, MethodDef> = {
   },
 };
 
+// Built-in withdraw method sets per country (owner spec 2026-11-21,
+// superseding the earlier lists): Pakistan — Easypaisa, JazzCash,
+// Binance, Payoneer. India — Payoneer, UPI, PayPal + Bank Transfer.
+// USA — PayPal, Bank Transfer (ACH), Wise, Payoneer, Binance USDT.
+// UK — PayPal, Bank Transfer, Wise, Payoneer. Every other country —
+// PayPal + Bank Transfer + Wise. The owner can REPLACE any of these
+// sets from Admin → Withdraw Methods (stored in the
+// withdraw_methods_json setting) without a redeploy — see
+// builtinMethodIdsFor below.
 const METHODS_BY_COUNTRY: Record<string, string[]> = {
-  PK: ["easypaisa", "jazzcash", "bank", "paypal", "binance"],
+  PK: ["easypaisa", "jazzcash", "binance", "payoneer"],
   US: ["paypal", "bank_ach", "wise", "payoneer", "binance"],
   GB: ["paypal", "bank", "wise", "payoneer"],
-  IN: ["paypal", "upi", "bank"],
+  IN: ["payoneer", "upi", "paypal", "bank"],
 };
 const DEFAULT_METHOD_IDS = ["paypal", "bank", "wise"];
 
-function methodsForCountry(countryCode: string | null): MethodDef[] {
-  const ids =
-    (countryCode ? METHODS_BY_COUNTRY[countryCode.toUpperCase()] : undefined) ??
-    DEFAULT_METHOD_IDS;
-  return ids
+/** The owner's Admin → Withdraw Methods override of the built-in
+ *  per-country sets, parsed from the withdraw_methods_json setting.
+ *  Keys are ISO country codes or "DEFAULT"; values are method ids
+ *  from the METHODS catalogue (unknown ids are dropped). A malformed
+ *  setting yields no overrides — the code table above applies. */
+function builtinMethodsOverride(
+  settings: Record<string, string>,
+): Record<string, string[]> {
+  const raw = (settings["withdraw_methods_json"] ?? "").trim();
+  if (!raw) return {};
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+      return {};
+    const out: Record<string, string[]> = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      if (!Array.isArray(value)) continue;
+      const ids = value.filter(
+        (v): v is string => typeof v === "string" && METHODS[v] != null,
+      );
+      out[key.toUpperCase()] = [...new Set(ids)];
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+/** Built-in method ids for a country: the owner's admin override for
+ *  that country (or for DEFAULT) wins over the code table. */
+function builtinMethodIdsFor(
+  settings: Record<string, string> | undefined,
+  countryCode: string | null,
+): string[] {
+  const override = settings ? builtinMethodsOverride(settings) : {};
+  const code = countryCode ? countryCode.toUpperCase() : null;
+  if (code && override[code] !== undefined) return override[code];
+  if (override["DEFAULT"] !== undefined && !(code && METHODS_BY_COUNTRY[code]))
+    return override["DEFAULT"];
+  return (code ? METHODS_BY_COUNTRY[code] : undefined) ?? DEFAULT_METHOD_IDS;
+}
+
+function methodsForCountry(
+  countryCode: string | null,
+  settings?: Record<string, string>,
+): MethodDef[] {
+  return builtinMethodIdsFor(settings, countryCode)
     .map((id) => METHODS[id])
     .filter((m): m is MethodDef => m != null);
 }
@@ -413,7 +471,7 @@ async function methodsForCountryWithCustom(
   db: DB,
   countryCode: string | null,
 ): Promise<MethodDefOut[]> {
-  const builtins = methodsForCountry(countryCode);
+  const builtins = methodsForCountry(countryCode, await getSettings(db));
   if (!countryCode)
     return builtins.map((m) => ({
       id: m.id,
@@ -2435,11 +2493,16 @@ export const Actions = {
             // the user picked in Profile (they get 3 lifetime changes)
             // must survive every later sign-in.
             pictureUrl: pictureUrl ?? user.pictureUrl,
-            ip: geo.ip ?? user.ip,
-            countryCode: geo.countryCode ?? user.countryCode,
-            countryName: geo.countryName ?? user.countryName,
-            flagEmoji: geo.flagEmoji ?? user.flagEmoji,
-            isp: geo.isp ?? user.isp,
+            // COUNTRY + IP LOCK (owner rule 2026-11-21): the country
+            // and IP stored at ACCOUNT CREATION decide the user's
+            // withdraw methods and content for the account's whole
+            // life, so a later sign-in must NEVER overwrite them —
+            // re-detecting on every login silently flipped accounts
+            // to whatever country the latest connection resolved to
+            // (a Pakistan account lost Easypaisa/JazzCash that way).
+            // Only the owner can correct a locked country, from
+            // Admin → Users (adminSetUserCountry). The fresh geo is
+            // still used above for the VPN/ban checks on THIS login.
             lastSeenAt: new Date(),
           })
           .where(eq(schema.users.id, user.id));
@@ -2877,7 +2940,7 @@ export const Actions = {
 
   getLeaderboard: defineAction({
     description:
-      "Daily contest (today's offer earnings) and Affiliate contest leaderboards. The Affiliate contest is MONTHLY: standings cover the current calendar month only — for every ranked user, how many people they brought this month, their score (highest first) and the prize for their rank — plus the exact moment the month ends (for the live countdown) and last month's winner. Opening this board records yesterday's Daily winners and last month's Affiliate winners (as pending awards the owner pays from the admin panel) if they are due.",
+      "Daily contest (today's offer earnings) and Affiliate contest leaderboards. Every ranked row (Top 100, highest first) carries the user's name, profile picture and earnings so the board shows who is at each rank. The Affiliate contest is MONTHLY: standings cover the current calendar month only — for every ranked user, how many people they brought this month, their score (highest first) and the prize for their rank — plus the exact moment the month ends (for the live countdown) and last month's winner. Opening this board records yesterday's Daily winners and last month's Affiliate winners (as pending awards the owner pays from the admin panel) if they are due.",
     request: z.object({ token: z.string().max(200).optional() }),
     response: z.object({
       dailyPoolCents: z.number(),
@@ -2908,6 +2971,12 @@ export const Actions = {
         z.object({
           rank: z.number(),
           name: z.string(),
+          // The ranked user's profile picture (their uploaded photo
+          // or Google picture), null when they have none — the board
+          // rows show it next to the name, initial-letter avatar as
+          // the fallback. Name + picture + earnings for EVERY row,
+          // both contests, up to rank 100 (owner order 2026-11-21).
+          pictureUrl: z.string().nullable(),
           referrals: z.number(),
           qualifiedReferrals: z.number(),
           score: z.number(),
@@ -2918,6 +2987,7 @@ export const Actions = {
         z.object({
           rank: z.number(),
           name: z.string(),
+          pictureUrl: z.string().nullable(),
           earnedCents: z.number(),
         }),
       ),
@@ -2950,6 +3020,7 @@ export const Actions = {
         .map(([userId, earned], i) => ({
           rank: i + 1,
           name: userById.get(userId)?.name ?? "User",
+          pictureUrl: userById.get(userId)?.pictureUrl ?? null,
           earnedCents: earned,
         }));
       // Affiliate contest: THIS calendar month's standings only — a
@@ -2960,6 +3031,7 @@ export const Actions = {
       const affiliateStandings = monthStandings.slice(0, 100).map((row, i) => ({
         rank: i + 1,
         name: userById.get(row.userId)?.name ?? "User",
+        pictureUrl: userById.get(row.userId)?.pictureUrl ?? null,
         referrals: row.referrals,
         qualifiedReferrals: row.qualifiedReferrals,
         score: row.score,
@@ -4247,6 +4319,39 @@ export const Actions = {
     },
   }),
 
+  adminSetUserCountry: defineAction({
+    description:
+      "Corrects a user's locked account country (set at sign-up from the login IP and never changed by later sign-ins). The user's withdraw methods and country-matched content follow the new country at once. For accounts whose sign-up connection resolved to the wrong country.",
+    request: z.object({
+      adminToken: z.string().min(1).max(200),
+      userId: z.number().int().positive(),
+      countryCode: z.string().trim().regex(/^[A-Za-z]{2}$/),
+      countryName: z.string().trim().min(1).max(80),
+    }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args): Promise<{ ok: true }> {
+      await requireAdmin(ctx, args.adminToken);
+      const db = ctx.db<typeof schema>();
+      const code = args.countryCode.toUpperCase();
+      const rows = await db
+        .select()
+        .from(schema.users)
+        .where(eq(schema.users.id, args.userId))
+        .limit(1);
+      if (!rows[0]) throw new Error("User not found.");
+      await db
+        .update(schema.users)
+        .set({
+          countryCode: code,
+          countryName: args.countryName,
+          flagEmoji: flagFromCountryCode(code),
+        })
+        .where(eq(schema.users.id, args.userId));
+      ctx.invalidateQueries();
+      return { ok: true };
+    },
+  }),
+
   adminAdjustBalance: defineAction({
     description: "Manually credits or debits a user's dollar balance with a note (recorded in their history).",
     request: z.object({
@@ -4582,13 +4687,17 @@ export const Actions = {
 
   adminListWithdrawMethods: defineAction({
     description:
-      "Every withdraw method in one place: the built-in per-country methods (Pakistan, USA, UK, India and the default set for all other countries) plus all extra methods the owner has added per country.",
+      "Every withdraw method in one place: the EFFECTIVE built-in per-country methods (Pakistan, USA, UK, India and the default set for all other countries — the owner's saved override applied where set), the full built-in catalogue the owner can pick from per country, plus all extra methods the owner has added per country.",
     request: z.object({ adminToken: z.string().min(1).max(200) }),
     response: z.object({
       builtIns: z.array(
         z.object({
           countryCode: z.string(),
           countryName: z.string(),
+          // True when this group's set comes from the owner's saved
+          // override (Admin → Withdraw Methods) rather than the
+          // built-in table — the UI offers Reset only then.
+          overridden: z.boolean(),
           methods: z.array(
             z.object({
               id: z.string(),
@@ -4597,6 +4706,14 @@ export const Actions = {
               fields: z.array(z.object({ key: z.string(), label: z.string() })),
             }),
           ),
+        }),
+      ),
+      catalogue: z.array(
+        z.object({
+          id: z.string(),
+          label: z.string(),
+          imageUrl: z.string().nullable(),
+          fields: z.array(z.object({ key: z.string(), label: z.string() })),
         }),
       ),
       methods: z.array(
@@ -4613,6 +4730,8 @@ export const Actions = {
     async handler(ctx, args) {
       await requireAdmin(ctx, args.adminToken);
       const db = ctx.db<typeof schema>();
+      const settings = await getSettings(db);
+      const override = builtinMethodsOverride(settings);
       const rows = await db
         .select()
         .from(schema.withdrawMethods)
@@ -4624,30 +4743,29 @@ export const Actions = {
         GB: "United Kingdom",
         IN: "India",
       };
+      const methodOut = (m: MethodDef) => ({
+        id: m.id,
+        label: m.label,
+        imageUrl: m.imageUrl ?? null,
+        fields: m.fields,
+      });
       const builtIns = [
         ...Object.keys(METHODS_BY_COUNTRY).map((code) => ({
           countryCode: code,
           countryName: BUILT_IN_GROUP_NAMES[code] ?? code,
-          methods: methodsForCountry(code).map((m) => ({
-            id: m.id,
-            label: m.label,
-            imageUrl: m.imageUrl ?? null,
-            fields: m.fields,
-          })),
+          overridden: override[code] !== undefined,
+          methods: methodsForCountry(code, settings).map(methodOut),
         })),
         {
           countryCode: "DEFAULT",
           countryName: "All other countries (default)",
-          methods: methodsForCountry(null).map((m) => ({
-            id: m.id,
-            label: m.label,
-            imageUrl: m.imageUrl ?? null,
-            fields: m.fields,
-          })),
+          overridden: override["DEFAULT"] !== undefined,
+          methods: methodsForCountry(null, settings).map(methodOut),
         },
       ];
       return {
         builtIns,
+        catalogue: Object.values(METHODS).map(methodOut),
         methods: rows.map((r) => {
           const def = customMethodDef(r);
           return {
@@ -4660,6 +4778,59 @@ export const Actions = {
           };
         }),
       };
+    },
+  }),
+
+  adminSetBuiltinWithdrawMethods: defineAction({
+    description:
+      "Replaces the built-in withdraw method set for one or more country groups (ISO code, or DEFAULT for all other countries) with the owner's picked methods from the built-in catalogue. Saved in site settings and applied at once to every user whose locked country matches — no redeploy. A group named in resetGroups drops its override and returns to the built-in table.",
+    request: z.object({
+      adminToken: z.string().min(1).max(200),
+      groups: z
+        .array(
+          z.object({
+            countryCode: z
+              .string()
+              .trim()
+              .regex(/^([A-Za-z]{2}|DEFAULT)$/),
+            methodIds: z.array(z.string().trim().min(1).max(40)).min(1).max(20),
+          }),
+        )
+        .max(10)
+        .default([]),
+      resetGroups: z
+        .array(z.string().trim().regex(/^([A-Za-z]{2}|DEFAULT)$/))
+        .max(10)
+        .default([]),
+    }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args): Promise<{ ok: true }> {
+      await requireAdmin(ctx, args.adminToken);
+      const db = ctx.db<typeof schema>();
+      const settings = await getSettings(db);
+      const override = builtinMethodsOverride(settings);
+      for (const group of args.groups) {
+        const ids = group.methodIds.filter((id) => METHODS[id] != null);
+        if (ids.length === 0)
+          throw new Error(
+            "Pick at least one known method for each country — a country must keep at least one built-in withdraw method.",
+          );
+        override[group.countryCode.toUpperCase()] = [...new Set(ids)];
+      }
+      for (const code of args.resetGroups)
+        delete override[code.toUpperCase()];
+      await db
+        .insert(schema.settings)
+        .values({
+          key: "withdraw_methods_json",
+          value: JSON.stringify(override),
+        })
+        .onConflictDoUpdate({
+          target: schema.settings.key,
+          set: { value: JSON.stringify(override) },
+        });
+      ctx.invalidateQueries();
+      return { ok: true };
     },
   }),
 
@@ -4690,7 +4861,9 @@ export const Actions = {
       // A custom method must not shadow a built-in method of that
       // country (same name would confuse users and the merge dedupes).
       const builtinLabels = new Set(
-        methodsForCountry(code).map((m) => m.label.toLowerCase()),
+        methodsForCountry(code, await getSettings(db)).map((m) =>
+          m.label.toLowerCase(),
+        ),
       );
       if (builtinLabels.has(args.label.toLowerCase()))
         throw new Error(
@@ -4760,7 +4933,9 @@ export const Actions = {
       if (!row || row.active !== 1)
         throw new Error("That method no longer exists.");
       const builtinLabels = new Set(
-        methodsForCountry(row.countryCode).map((m) => m.label.toLowerCase()),
+        methodsForCountry(row.countryCode, await getSettings(db)).map((m) =>
+          m.label.toLowerCase(),
+        ),
       );
       if (builtinLabels.has(args.label.toLowerCase()))
         throw new Error(
