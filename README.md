@@ -51,7 +51,7 @@ Requires [Bun](https://bun.sh) 1.3+.
 
 ```sh
 bun install            # install dependencies
-bun run build:client   # client -> client/dist/ (static bundle)
+HATCH_SPACES_BUILD_DRIVER=1 bun run build:client   # client -> client/dist/ (static bundle)
 bun run start          # standalone server: server/src/server.ts
 ```
 

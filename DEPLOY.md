@@ -14,9 +14,11 @@ account that owns the repo (`ahmeetrades-coder`).
 ```sh
 git clone https://github.com/ahmeetrades-coder/tapone.git
 # Copy into the clone (see README "Files that go into the repo"):
-#   client/  server/  drizzle/  package.json  bun.lock  bunfig.toml
+#   client/  server/  drizzle/  vendor/  package.json  bun.lock  bunfig.toml
 #   tsconfig.base.json  space.json  README.md  DEPLOY.md
 #   .env.example  .gitignore  CNAME
+# vendor/ holds the @hatch/space-sdk tarball the app needs to build — the
+# SDK is NOT on npm, so it is vendored in the repo (file:./vendor/space-sdk.tgz).
 # Do NOT copy: app.db, app.db-wal, app.db-shm, node_modules, .bun-cache,
 # .harness, audits, .space-build*, client/dist, server/dist
 cd tapone
@@ -43,7 +45,10 @@ writable persistent disk for the database:
 
 ```sh
 bun install
-bun run build:client               # client -> client/dist/
+HATCH_SPACES_BUILD_DRIVER=1 bun run build:client   # client -> client/dist/
+# NOTE: the env var above is REQUIRED — the SDK's bundler refuses to run
+# without it. It only gates the standalone build; it does not touch the
+# Hatch artifact. Without it the build fails with "cannot be built by hand".
 DATABASE_PATH=/data/app.db bun run start
                                    # standalone server: server/src/server.ts
                                    # listens on the host's PORT env var
@@ -94,13 +99,16 @@ The domain is registered at Hostinger; the published site must open on
    single line `tapone.store` — GitHub's custom-domain declaration for
    this repo. Keep it in the push (Step 1).
 2. **DNS side (Hostinger):** hPanel → Domains → tapone.store → DNS
-   Zone Editor. Point the domain at the host from Step 2:
-   - `A` record — name `@` — value: the host's IP address
-   - `CNAME` record — name `www` — value: the host's hostname
-   Use the exact values the host shows in its custom-domain screen;
-   remove any old A/CNAME records for `@`/`www` that point elsewhere
-   (e.g. a previous host), or the domain will keep opening the old
-   place. DNS changes can take a few hours to spread.
+   Zone Editor. FadeHost asks for **CNAME records only** (no A record):
+   - `CNAME` — name `@` (tapone.store) — value `tapone.fadehost.app`
+   - `CNAME` — name `www` (www.tapone.store) — value `tapone.fadehost.app`
+   Remove the old records for `@`/`www` that point at Netlify (A @ →
+   75.2.60.5, CNAME www → peaceful-faun-19e615.netlify.app), or the
+   domain will keep opening the old place. DNS changes can take a few
+   hours to spread. If a domain is still "Waiting for DNS" after an
+   hour, FadeHost also asks for a TXT record: name
+   `_cf-custom-hostname.tapone.store`, value
+   `0c787530-66cc-4160-a098-696997e0cc88`.
    *(GitHub Pages variant, for a static page only: `A` records for `@`
    to 185.199.108.153, 185.199.109.153, 185.199.110.153, 185.199.111.153
    and `www` CNAME to `ahmeetrades-coder.github.io`. Pages cannot run
