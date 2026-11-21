@@ -1,0 +1,258 @@
+// TapOne data model. All money is integer cents; the UI shows dollars only.
+//
+// users        — one row per Google account; country/IP locked at sign-in
+// sessions     — opaque session tokens issued at sign-in
+// contentItems — offerwalls / surveys / games the admin manages; every
+//                client reads these rows, so admin edits reach everyone
+// transactions — the earnings ledger (offer credits, affiliate commissions)
+// withdrawals  — user requests the admin approves or rejects
+// messages     — help requests and admin mailbox replies (one thread table)
+// postbacks    — offerwall conversion log; txn_id unique = idempotent credit
+// settings     — key/value site settings (Google client id, admin login,
+//                contest pools, minimum withdrawal)
+// bannedCountries — countries the owner has banned; no new account may be
+//                created from a banned country (checked server-side at sign-up)
+// withdrawMethods — EXTRA withdraw payment methods the owner adds per
+//                country from the admin panel; they appear on the
+//                Withdraw page of every user whose locked country
+//                matches, alongside the built-in per-country methods
+// adminNotifications — owner alerts, e.g. every new registration with the
+//                user's name, email, country, flag and IP
+
+import { integer, real, sqliteTable, text } from "drizzle-orm/sqlite-core";
+
+export const users = sqliteTable("users", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userCode: text("user_code").notNull().unique(),
+  name: text("name").notNull(),
+  email: text("email").notNull().unique(),
+  pictureUrl: text("picture_url"),
+  loginMethod: text("login_method").notNull().default("google"),
+  ip: text("ip"),
+  countryCode: text("country_code"),
+  countryName: text("country_name"),
+  flagEmoji: text("flag_emoji"),
+  isp: text("isp"),
+  balanceCents: integer("balance_cents").notNull().default(0),
+  totalEarnedCents: integer("total_earned_cents").notNull().default(0),
+  // Current level: every $1 of lifetime earnings = 1 level (RewardJoy
+  // rule). Title Bonuses are paid by checkLevelUps in actions.ts.
+  level: integer("level").notNull().default(0),
+  // Highest 10-level milestone whose Title Bonus has been settled.
+  titleBonusPaidLevel: integer("title_bonus_paid_level").notNull().default(0),
+  // Dark/light choice, saved per user so it persists across devices.
+  theme: text("theme").notNull().default("light"),
+  referralCode: text("referral_code").notNull().unique(),
+  // Offer Token shown on the user's own Profile. Every user gets their
+  // OWN unique token (generated at sign-up, unique in the DB) — no two
+  // users share one. Nullable only so pre-existing rows could be
+  // backfilled by migration 0010; new rows always set it.
+  offerToken: text("offer_token").unique(),
+  referredById: integer("referred_by_id"),
+  blocked: integer("blocked").notNull().default(0),
+  lastSeenAt: integer("last_seen_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+export const sessions = sqliteTable("sessions", {
+  token: text("token").primaryKey(),
+  userId: integer("user_id").notNull(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+export const contentItems = sqliteTable("content_items", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  kind: text("kind", { enum: ["offerwall", "survey", "game"] }).notNull(),
+  title: text("title").notNull(),
+  provider: text("provider").notNull().default(""),
+  description: text("description").notNull().default(""),
+  rewardCents: integer("reward_cents"),
+  url: text("url").notNull().default(""),
+  imageUrl: text("image_url"),
+  // Comma-separated ISO country codes, or "ALL".
+  countries: text("countries").notNull().default("ALL"),
+  featured: integer("featured").notNull().default(0),
+  active: integer("active").notNull().default(1),
+  sortOrder: integer("sort_order").notNull().default(0),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+export const transactions = sqliteTable("transactions", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id").notNull(),
+  kind: text("kind", {
+    enum: [
+      "offer_credit",
+      "affiliate_earning",
+      "affiliate_spending",
+      "withdrawal_hold",
+      "withdrawal_refund",
+      "admin_adjust",
+      "checkin_bonus",
+      "contest_prize",
+      "level_reward",
+    ],
+  }).notNull(),
+  amountCents: integer("amount_cents").notNull(),
+  note: text("note").notNull().default(""),
+  refId: integer("ref_id"),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+export const withdrawals = sqliteTable("withdrawals", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id").notNull(),
+  amountCents: integer("amount_cents").notNull(),
+  method: text("method").notNull(),
+  detailsJson: text("details_json").notNull().default("{}"),
+  status: text("status", { enum: ["pending", "approved", "rejected"] })
+    .notNull()
+    .default("pending"),
+  adminNote: text("admin_note").notNull().default(""),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  decidedAt: integer("decided_at", { mode: "timestamp_ms" }),
+});
+
+export const messages = sqliteTable("messages", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id").notNull(),
+  sender: text("sender", { enum: ["user", "admin"] }).notNull(),
+  subject: text("subject").notNull().default(""),
+  body: text("body").notNull(),
+  readByAdmin: integer("read_by_admin").notNull().default(0),
+  readByUser: integer("read_by_user").notNull().default(0),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+export const postbacks = sqliteTable("postbacks", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  txnId: text("txn_id").notNull().unique(),
+  network: text("network").notNull().default(""),
+  userId: integer("user_id"),
+  payout: real("payout").notNull().default(0),
+  creditedCents: integer("credited_cents").notNull().default(0),
+  status: text("status", {
+    enum: ["credited", "duplicate", "unknown_user"],
+  }).notNull(),
+  rawJson: text("raw_json").notNull().default("{}"),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+export const settings = sqliteTable("settings", {
+  key: text("key").primaryKey(),
+  value: text("value").notNull(),
+});
+
+export const bannedCountries = sqliteTable("banned_countries", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  countryCode: text("country_code").notNull().unique(),
+  countryName: text("country_name").notNull().default(""),
+  flagEmoji: text("flag_emoji"),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+export const withdrawMethods = sqliteTable("withdraw_methods", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  countryCode: text("country_code").notNull(),
+  countryName: text("country_name").notNull().default(""),
+  label: text("label").notNull(),
+  // JSON array of { key, label } — the detail fields the user fills in
+  // when withdrawing with this method (all required).
+  fieldsJson: text("fields_json").notNull().default("[]"),
+  // Removal is a soft delete (active = 0) so past withdrawals made
+  // with the method keep resolving its label.
+  active: integer("active").notNull().default(1),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+export const contestJoins = sqliteTable("contest_joins", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id").notNull(),
+  contest: text("contest", { enum: ["daily", "affiliate"] }).notNull(),
+  // Daily contest: the day key "YYYY-MM-DD". Affiliate contest: "ALL".
+  periodKey: text("period_key").notNull(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+export const contestPayouts = sqliteTable("contest_payouts", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  contest: text("contest", { enum: ["daily", "affiliate"] })
+    .notNull()
+    .default("daily"),
+  // The day being settled, "YYYY-MM-DD". Unique per contest = settles once.
+  periodKey: text("period_key").notNull(),
+  winnerUserId: integer("winner_user_id"),
+  amountCents: integer("amount_cents").notNull().default(0),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+export const checkins = sqliteTable("checkins", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id").notNull(),
+  // Calendar day the bonus was claimed for, "YYYY-MM-DD" (server day).
+  dayKey: text("day_key").notNull(),
+  amountCents: integer("amount_cents").notNull().default(0),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+export const adminNotifications = sqliteTable("admin_notifications", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  type: text("type", { enum: ["registration"] }).notNull().default("registration"),
+  userId: integer("user_id"),
+  userName: text("user_name").notNull().default(""),
+  userEmail: text("user_email").notNull().default(""),
+  userCode: text("user_code").notNull().default(""),
+  countryCode: text("country_code"),
+  countryName: text("country_name"),
+  flagEmoji: text("flag_emoji"),
+  ip: text("ip"),
+  read: integer("read").notNull().default(0),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+export const contestAwards = sqliteTable("contest_awards", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  contest: text("contest", { enum: ["daily", "affiliate"] })
+    .notNull()
+    .default("daily"),
+  periodKey: text("period_key").notNull(),
+  userId: integer("user_id").notNull(),
+  rank: integer("rank").notNull(),
+  amountCents: integer("amount_cents").notNull().default(0),
+  // "pending" = winner recorded, waiting for the owner to pay it from
+  // Admin → Contest Payouts; "paid" = the owner paid it into the
+  // winner's balance. Contest prizes are NEVER paid automatically.
+  status: text("status", { enum: ["pending", "paid"] }).notNull().default("paid"),
+  releaseAt: integer("release_at", { mode: "timestamp_ms" }),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
