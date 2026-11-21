@@ -127,6 +127,13 @@
       "when": 1795260104559,
       "tag": "0018_content_feed_url",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "6",
+      "when": 1795261873846,
+      "tag": "0019_user_title_rewards_paid",
+      "breakpoints": true
     }
   ]
 }
