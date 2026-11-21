@@ -1,0 +1,2539 @@
+import { useEffect, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { actionFields } from "@hatch/space-sdk/fields" with { type: "macro" };
+import { api, type ApiResponse } from "./api";
+import type { Actions } from "../../server/src/actions";
+import {
+COUNTRIES,
+Icons,
+flagEmojiFor,
+fmt,
+fmtDate,
+fmtDateTime,
+getAdminToken,
+getGoogleRedirectUri,
+getSiteOrigin,
+setAdminToken,
+} from "./lib";
+import { Wordmark, goHome } from "./App";
+
+const FIELDS = actionFields<typeof Actions>();
+
+type AdminTab = "overview" | "users" | "stats" | "payouts" | "withdrawals" | "methods" | "content" | "inbox" | "notifications" | "countries" | "postbacks" | "settings" | "deploy";
+
+const ADMIN_TABS: { id: AdminTab; label: string }[] = [
+  { id: "overview", label: "Overview" },
+  { id: "users", label: "Users" },
+  { id: "stats", label: "Challenge Stats" },
+  { id: "payouts", label: "Contest Payouts" },
+  { id: "withdrawals", label: "Withdrawals" },
+  { id: "methods", label: "Withdraw Methods" },
+  { id: "content", label: "Offerwalls / Surveys / Games" },
+  { id: "inbox", label: "Inbox" },
+  { id: "notifications", label: "Notifications" },
+  { id: "countries", label: "Countries" },
+  { id: "postbacks", label: "Postbacks" },
+  { id: "settings", label: "Settings" },
+  { id: "deploy", label: "GitHub & Deploy" },
+];
+
+function NotifBadge({ token }: { token: string }) {
+  const q = useQuery({
+    queryKey: ["admin-notifications", token],
+    queryFn: () => api.adminListNotifications({ adminToken: token, limit: 100 }),
+  });
+  if (!q.data || q.data.unreadCount === 0) return null;
+  return (
+    <span className="ml-1.5 rounded-full bg-[var(--gold)] px-2 py-0.5 text-xs font-bold text-[var(--ink)]">
+      {q.data.unreadCount}
+    </span>
+  );
+}
+
+function toCents(dollars: string): number | null {
+  const n = Number.parseFloat(dollars);
+  if (!Number.isFinite(n) || n < 0) return null;
+  return Math.round(n * 100);
+}
+
+export function Admin() {
+  const [token, setToken] = useState<string | null>(() => getAdminToken());
+  const [tab, setTab] = useState<AdminTab>("overview");
+
+  if (!token) {
+    return (
+      <AdminLogin
+        onLogin={(t) => {
+          setAdminToken(t);
+          setToken(t);
+        }}
+      />
+    );
+  }
+
+  const signOut = () => {
+    setAdminToken(null);
+    setToken(null);
+    // Owner order 2026-11-20: logging out of the panel goes to the
+    // public homepage (Start earning now / Sign in), never straight
+    // back to the admin login screen.
+    goHome();
+  };
+
+  return (
+    <div className="min-h-screen bg-[var(--bg)] text-[var(--text)]">
+      <header className="border-b border-[var(--border)] bg-[var(--surface)]">
+        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 px-4 py-3.5">
+          <span className="flex items-center gap-3">
+            <Wordmark />
+            <span className="rounded-full bg-[var(--gold)] px-2.5 py-1 text-xs font-bold text-[var(--ink)]">
+              OWNER PANEL
+            </span>
+          </span>
+          <button
+            type="button"
+            onClick={signOut}
+            aria-label="Log out of the owner panel"
+            className="flex items-center gap-2 rounded-full bg-[var(--brand)] px-5 py-2.5 text-sm font-bold text-white shadow-sm transition hover:bg-[var(--brand-deep)]"
+          >
+            {Icons.logout("h-4 w-4")} Logout
+          </button>
+        </div>
+        <nav className="mx-auto flex max-w-6xl gap-1.5 overflow-x-auto px-4 pb-3" aria-label="Admin">
+          {ADMIN_TABS.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              onClick={() => setTab(t.id)}
+              aria-current={tab === t.id ? "page" : undefined}
+              className={`whitespace-nowrap rounded-full px-4 py-2 text-sm font-bold transition ${
+                tab === t.id ? "bg-[var(--brand)] text-white" : "bg-[var(--surface-2)] text-[var(--dim)] hover:text-[var(--text)]"
+              }`}
+            >
+              {t.label}
+              {t.id === "notifications" && <NotifBadge token={token} />}
+            </button>
+          ))}
+        </nav>
+      </header>
+
+      <main className="mx-auto w-full max-w-6xl px-3 py-5 pb-16 sm:px-4 sm:py-6">
+        {tab === "overview" && <Overview token={token} onAuthFail={signOut} />}
+        {tab === "users" && <UsersTab token={token} />}
+        {tab === "stats" && <StatsTab token={token} />}
+        {tab === "payouts" && <ContestPayoutsTab token={token} />}
+        {tab === "withdrawals" && <WithdrawalsTab token={token} />}
+        {tab === "methods" && <WithdrawMethodsTab token={token} />}
+        {tab === "content" && <ContentTab token={token} />}
+        {tab === "inbox" && <InboxTab token={token} />}
+        {tab === "notifications" && <NotificationsTab token={token} />}
+        {tab === "countries" && <CountriesTab token={token} />}
+        {tab === "postbacks" && <PostbacksTab token={token} />}
+        {tab === "settings" && <SettingsTab token={token} />}
+        {tab === "deploy" && <DeployTab token={token} />}
+
+        <div className="mt-10 flex justify-center border-t border-[var(--border)] pt-6">
+          <button
+            type="button"
+            onClick={signOut}
+            aria-label="Log out of the owner panel"
+            className="flex items-center gap-2 rounded-full bg-[var(--brand)] px-6 py-3 text-base font-bold text-white shadow-sm transition hover:bg-[var(--brand-deep)]"
+          >
+            {Icons.logout("h-5 w-5")} Logout
+          </button>
+        </div>
+      </main>
+    </div>
+  );
+}
+
+function AdminLogin({ onLogin }: { onLogin: (token: string) => void }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const login = useMutation({
+    mutationFn: async () => api.adminLogin({ username: username.trim(), password }),
+    onSuccess: (r) => onLogin(r.token),
+    onError: (e) => setError(e.message),
+  });
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-[var(--bg)] px-4">
+      <form
+        className="w-full max-w-sm rounded-3xl bg-[var(--surface)] p-6 text-[var(--text)] shadow-2xl"
+        onSubmit={(e) => {
+          e.preventDefault();
+          setError(null);
+          login.mutate();
+        }}
+      >
+        <Wordmark />
+        <p className="mt-4 font-display text-xl font-bold">Owner sign in</p>
+        <p className="mt-1 text-sm text-[var(--dim)]">This panel is not linked anywhere on the site.</p>
+        <div className="mt-5">
+          <label htmlFor="adm-user" className="text-sm font-semibold">
+            Username
+          </label>
+          <input
+            id="adm-user"
+            {...FIELDS.adminLogin.username}
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            autoComplete="username"
+            className="mt-1 w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 outline-none focus:border-[var(--brand)]"
+          />
+        </div>
+        <div className="mt-3">
+          <label htmlFor="adm-pass" className="text-sm font-semibold">
+            Password
+          </label>
+          <input
+            id="adm-pass"
+            type="password"
+            {...FIELDS.adminLogin.password}
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            autoComplete="current-password"
+            className="mt-1 w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 outline-none focus:border-[var(--brand)]"
+          />
+        </div>
+        {error && (
+          <p role="alert" className="mt-3 text-sm font-medium text-red-600 dark:text-red-400">
+            {error}
+          </p>
+        )}
+        <button
+          type="submit"
+          disabled={login.isPending}
+          className="mt-5 w-full rounded-full bg-[var(--brand)] px-5 py-3 font-display text-base font-bold text-white transition hover:bg-[var(--brand-deep)] disabled:opacity-60"
+        >
+          {login.isPending ? "Signing in…" : "Sign in"}
+        </button>
+      </form>
+    </div>
+  );
+}
+
+// --------------------------------------------------------------- overview
+
+function Overview({
+  token,
+  onAuthFail,
+}: {
+  token: string;
+  onAuthFail: () => void;
+}) {
+  const overview = useQuery({
+    queryKey: ["admin-overview", token],
+    queryFn: () => api.adminGetOverview({ adminToken: token }),
+    retry: false,
+  });
+  if (overview.isError) {
+    onAuthFail();
+    return null;
+  }
+  const stats = overview.data?.stats;
+  const cards: [string, string][] = stats
+    ? [
+        ["Users", String(stats.users)],
+        ["Blocked users", String(stats.blockedUsers)],
+        ["Pending withdrawals", `${stats.pendingWithdrawals} · ${fmt(stats.pendingCents)}`],
+        ["Paid out (approved)", fmt(stats.paidOutCents)],
+        ["Credited via postbacks", fmt(stats.creditedCents)],
+        ["Unread help messages", String(stats.unreadMessages)],
+        ["Live content items", String(stats.contentItems)],
+        ["Banned countries", String(stats.bannedCountries)],
+        ["New registrations", `${stats.unreadNotifications} new · ${stats.totalNotifications} total`],
+      ]
+    : [];
+  return (
+    <div>
+      <h1 className="font-display text-2xl font-extrabold">Overview</h1>
+      {overview.isPending ? (
+        <p className="mt-4 text-sm text-[var(--dim)]">Loading…</p>
+      ) : (
+        <>
+          <div className="mt-5 grid grid-cols-2 gap-3 lg:grid-cols-4">
+            {cards.map(([label, value]) => (
+              <div key={label} className="rounded-2xl bg-[var(--surface)] p-4 ring-1 ring-[var(--border)]">
+                <p className="font-display text-xl font-extrabold">{value}</p>
+                <p className="mt-0.5 text-xs font-semibold text-[var(--dim)]">{label}</p>
+              </div>
+            ))}
+          </div>
+
+          <section className="mt-6 rounded-3xl bg-[var(--surface)] p-5 ring-1 ring-[var(--border)] sm:p-6" aria-label="Postback setup">
+            <h2 className="font-display text-lg font-bold">Offerwall postback — give this to partners (e.g. MM Wall)</h2>
+            <p className="mt-2 max-w-2xl text-sm leading-relaxed text-[var(--dim)]">
+              When a user completes an offer, the partner calls the postback and TapOne
+              credits the user <strong className="text-[var(--text)]">70% of the payout</strong> in
+              dollars (plus 8% earning commission to their referrer). Each transaction ID
+              credits only once. In this workspace the postback is the{" "}
+              <code className="font-semibold text-[var(--text)]">postback</code> action with
+              these parameters — the same parameters plug into the public site's postback
+              URL when it is deployed:
+            </p>
+            <dl className="mt-4 grid gap-2 text-sm sm:grid-cols-2">
+              {[
+                ["network", "Partner name, e.g. MM Wall"],
+                ["user_code", "The user's TapOne ID (shown on their Profile), e.g. TO-AB12CD"],
+                ["payout", "Gross payout in dollars, e.g. 1.50"],
+                ["txn_id", "Partner's unique transaction ID (prevents double credit)"],
+                ["secret", "Only if a postback secret is set in Settings"],
+              ].map(([k, v]) => (
+                <div key={k} className="rounded-xl bg-[var(--surface-2)] px-4 py-3">
+                  <dt className="font-display font-bold">{k}</dt>
+                  <dd className="mt-0.5 text-[var(--dim)]">{v}</dd>
+                </div>
+              ))}
+            </dl>
+            <p className="mt-4 rounded-xl bg-[var(--ink)] px-4 py-3 font-mono text-xs leading-relaxed text-[#7ee2b8]">
+              postback?network=MMWall&amp;user_code={"{user_id}"}&amp;payout={"{payout}"}&amp;txn_id={"{transaction_id}"}
+            </p>
+          </section>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ------------------------------------------------------------------ deploy
+
+function CopyBlock({ label, text }: { label: string; text: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <div className="mt-3">
+      <div className="flex items-center justify-between gap-3">
+        <p className="text-sm font-semibold">{label}</p>
+        <button
+          type="button"
+          aria-label={`Copy ${label}`}
+          onClick={() => {
+            void navigator.clipboard?.writeText(text).then(() => {
+              setCopied(true);
+              window.setTimeout(() => setCopied(false), 2000);
+            });
+          }}
+          className="rounded-full bg-[var(--surface-2)] px-3.5 py-1.5 text-xs font-bold text-[var(--dim)] transition hover:text-[var(--text)]"
+        >
+          {copied ? "Copied ✓" : "Copy"}
+        </button>
+      </div>
+      <pre className="mt-1.5 overflow-x-auto rounded-xl bg-[#2b211a] px-4 py-3 font-mono text-xs leading-relaxed whitespace-pre-wrap text-[#ffd9ae]">
+        {text}
+      </pre>
+    </div>
+  );
+}
+
+function DeployTab({ token }: { token: string }) {
+  const info = useQuery({
+    queryKey: ["admin-deploy-info", token],
+    queryFn: () => api.adminGetDeployInfo({ adminToken: token }),
+  });
+  const d = info.data;
+  const origin = getSiteOrigin();
+  const redirectUri = getGoogleRedirectUri();
+
+  const pushFiles: [string, string][] = [
+    ["client/", "React app — src (App, Dashboard, Admin), index.html, build.mjs, tsconfig.json"],
+    ["server/", "Bun server — src/actions.ts (all actions + postback), src/server.ts (standalone entry point: PORT + DATABASE_PATH + /actions + static client), src/schema.ts, tsconfig.json"],
+    ["drizzle/", "SQLite migrations 0001–0013, applied in order on a fresh database"],
+    ["package.json + bun.lock", "Dependencies and the install / build / start scripts"],
+    ["bunfig.toml + tsconfig.base.json", "Bun and shared TypeScript config"],
+    ["space.json", "App metadata + the daily 00:15 contest schedule"],
+    ["CNAME", "Custom domain declaration — the file's single line is tapone.store, so the published site opens on the owner's own domain"],
+    ["README.md + DEPLOY.md", "Full source guide and step-by-step deploy instructions (in the repo root)"],
+    [".env.example", "Every configuration value a host needs, with names"],
+    [".gitignore", "Keeps the live database and build output OUT of the repo"],
+  ];
+  const neverPush: [string, string][] = [
+    ["app.db (+ app.db-wal / app.db-shm)", "LIVE database — real user accounts, balances and the admin password. The repo is public. Excluded by .gitignore."],
+    ["node_modules/ + .bun-cache/", "Dependencies — rebuilt by bun install on the host"],
+    ["client/dist/ + server/dist/ + .space-build*/", "Build output — rebuilt by bun run build"],
+    [".harness/ + audits/", "Authoring-workspace internals, not app code"],
+  ];
+  const pushCommands = [
+    "git clone https://github.com/ahmeetrades-coder/tapone.git",
+    "# copy the files listed in Step 1 into the clone — NOT app.db",
+    "cd tapone",
+    "git add .",
+    "git status   # check: app.db must NOT appear",
+    'git commit -m "TapOne full source"',
+    "git push origin main",
+  ].join("\n");
+  const hostCommands = [
+    "bun install",
+    "bun run build:client             # client -> client/dist/",
+    "DATABASE_PATH=/data/app.db bun run start   # standalone server (PORT comes from the host)",
+    "# The server applies drizzle/ migrations itself on first run and",
+    "# runs the daily 00:15 contest settlement in-process — no extra cron.",
+    "# Copy the existing app.db to /data/app.db first to keep all users,",
+    "# balances and settings (never through git — the repo is public).",
+  ].join("\n");
+
+  return (
+    <div>
+      <h1 className="font-display text-2xl font-extrabold">GitHub &amp; Deploy</h1>
+      <p className="mt-2 max-w-3xl text-sm leading-relaxed text-[var(--dim)]">
+        The full TapOne source (client + Bun server + SQLite migrations + settings reference) is
+        prepared to push to your GitHub repo. The push itself happens from a computer with git and
+        your GitHub sign-in — it cannot run from inside this panel — so this tab lists exactly what
+        is needed: the files, the commands, and the live configuration values. The same guide ships
+        in the repo as <strong className="text-[var(--text)]">README.md</strong> and{" "}
+        <strong className="text-[var(--text)]">DEPLOY.md</strong>.
+      </p>
+
+      <section className="mt-6 rounded-3xl bg-[var(--surface)] p-5 ring-1 ring-[var(--border)] sm:p-6" aria-label="GitHub repository">
+        <h2 className="font-display text-lg font-bold">Your repository</h2>
+        {info.isPending ? (
+          <p className="mt-3 text-sm text-[var(--dim)]">Loading…</p>
+        ) : d ? (
+          <>
+            <p className="mt-3">
+              <a
+                href={d.repoUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="font-mono text-sm font-bold break-all text-[var(--brand-deep)] underline"
+              >
+                {d.repoUrl}
+              </a>
+            </p>
+            <p className="mt-2 text-sm leading-relaxed text-[var(--dim)]">
+              The repo exists and is public, currently empty. Nothing has been pushed yet — follow
+              the steps below. Because the repo is public, the live database file must never be
+              uploaded (Step 1 lists what stays out, and the included{" "}
+              <code className="font-semibold text-[var(--text)]">.gitignore</code> blocks it
+              automatically).
+            </p>
+          </>
+        ) : (
+          <p className="mt-3 text-sm text-[var(--dim)]">Could not load the deploy info — reload the panel and try again.</p>
+        )}
+      </section>
+
+      <section className="mt-6 rounded-3xl bg-[var(--surface)] p-5 ring-1 ring-[var(--border)] sm:p-6" aria-label="Files to push">
+        <h2 className="font-display text-lg font-bold">Step 1 — Files to push</h2>
+        <dl className="mt-4 grid gap-2 text-sm sm:grid-cols-2">
+          {pushFiles.map(([k, v]) => (
+            <div key={k} className="rounded-xl bg-[var(--surface-2)] px-4 py-3">
+              <dt className="font-mono font-bold">{k}</dt>
+              <dd className="mt-0.5 text-[var(--dim)]">{v}</dd>
+            </div>
+          ))}
+        </dl>
+        <h3 className="mt-5 font-display text-base font-bold text-red-600">Never push these</h3>
+        <dl className="mt-3 grid gap-2 text-sm sm:grid-cols-2">
+          {neverPush.map(([k, v]) => (
+            <div key={k} className="rounded-xl bg-[var(--surface-2)] px-4 py-3 ring-1 ring-red-400">
+              <dt className="font-mono font-bold">{k}</dt>
+              <dd className="mt-0.5 text-[var(--dim)]">{v}</dd>
+            </div>
+          ))}
+        </dl>
+      </section>
+
+      <section className="mt-6 rounded-3xl bg-[var(--surface)] p-5 ring-1 ring-[var(--border)] sm:p-6" aria-label="Commands">
+        <h2 className="font-display text-lg font-bold">Step 2 — Commands</h2>
+        <p className="mt-2 text-sm leading-relaxed text-[var(--dim)]">
+          Push from a computer signed in to GitHub as the repo owner:
+        </p>
+        <CopyBlock label="Push commands" text={pushCommands} />
+        <p className="mt-5 text-sm leading-relaxed text-[var(--dim)]">
+          On the host, the app builds and runs with Bun (the host must run Bun + SQLite —{" "}
+          <strong className="text-[var(--text)]">GitHub Pages cannot run this app</strong>, it only
+          serves static files; deploy from the repo to a Bun host such as DOM Cloud or a VPS):
+        </p>
+        <CopyBlock label="Install · build · start" text={hostCommands} />
+        <p className="mt-3 text-sm leading-relaxed text-[var(--dim)]">
+          Serve <code className="font-semibold text-[var(--text)]">client/dist/</code> on the same
+          origin as the server. On a fresh disk, create{" "}
+          <code className="font-semibold text-[var(--text)]">app.db</code> by applying the{" "}
+          <code className="font-semibold text-[var(--text)]">drizzle/</code> migrations in order —
+          or copy the existing <code className="font-semibold text-[var(--text)]">app.db</code>{" "}
+          file directly (never through git) to carry over users, balances and settings.
+        </p>
+      </section>
+
+      {d && (
+        <section className="mt-6 rounded-3xl bg-[var(--surface)] p-5 ring-1 ring-[var(--border)] sm:p-6" aria-label="Configuration values">
+          <h2 className="font-display text-lg font-bold">Step 3 — Configuration the host needs</h2>
+          <p className="mt-2 max-w-3xl text-sm leading-relaxed text-[var(--dim)]">
+            TapOne keeps its configuration in the database settings (edited in the Settings tab) —
+            there are no secret files to upload.{" "}
+            <code className="font-semibold text-[var(--text)]">.env.example</code> in the repo lists
+            the same values with environment-variable names. These are the live values right now:
+          </p>
+          <dl className="mt-4 grid gap-2 text-sm sm:grid-cols-2">
+            <div className="rounded-xl bg-[var(--surface-2)] px-4 py-3 sm:col-span-2">
+              <dt className="font-display font-bold">GOOGLE_CLIENT_ID</dt>
+              <dd className="mt-0.5 font-mono text-xs break-all">{d.googleClientId || "— not set —"}</dd>
+              <dd className="mt-1 text-[var(--dim)]">
+                In Google Cloud Console add the site's address under Authorized JavaScript
+                origins and Authorized redirect URIs, and publish the OAuth app (Testing mode
+                allows test users only). For the live domain these are origin{" "}
+                <span className="font-mono font-semibold text-[var(--text)]">https://tapone.store</span>{" "}
+                and redirect URI{" "}
+                <span className="font-mono font-semibold text-[var(--text)]">https://tapone.store/</span>{" "}
+                — without them, sign-in fails on tapone.store. This test version's own address:{" "}
+                <span className="font-mono font-semibold text-[var(--text)]">{origin}</span> ·
+                redirect URI:{" "}
+                <span className="font-mono font-semibold text-[var(--text)]">{redirectUri}</span>
+              </dd>
+            </div>
+            <div className="rounded-xl bg-[var(--surface-2)] px-4 py-3">
+              <dt className="font-display font-bold">ADMIN_USERNAME</dt>
+              <dd className="mt-0.5 font-mono">{d.adminUsername}</dd>
+              <dd className="mt-1 text-[var(--dim)]">
+                Admin password is set in the Settings tab and is never shown here — change it
+                before the site goes public.
+              </dd>
+            </div>
+            <div className="rounded-xl bg-[var(--surface-2)] px-4 py-3">
+              <dt className="font-display font-bold">POSTBACK_SECRET</dt>
+              <dd className="mt-0.5">
+                {d.postbackSecretSet ? (
+                  <span className="font-bold text-emerald-600">Set ✓</span>
+                ) : (
+                  <span className="font-bold text-red-600">NOT SET — set one in Settings before connecting a live offerwall; without it, postbacks are accepted with no secret.</span>
+                )}
+              </dd>
+            </div>
+            {(
+              [
+                ["DAILY_POOL_CENTS", `${fmt(d.dailyPoolCents)} Daily contest pool`],
+                ["AFFILIATE_POOL_CENTS", `${fmt(d.affiliatePoolCents)} Affiliate contest pool`],
+                ["MIN_WITHDRAW_CENTS", `${fmt(d.minWithdrawCents)} minimum withdrawal`],
+                ["USER_SHARE_PCT", `${d.userSharePct}% of each postback payout goes to the user`],
+                ["AFFILIATE_EARNING_PCT", `${d.affiliateEarningPct}% referral earning commission`],
+                ["AFFILIATE_SPENDING_PCT", `${d.affiliateSpendingPct}% referral spending commission`],
+              ] as [string, string][]
+            ).map(([k, v]) => (
+              <div key={k} className="rounded-xl bg-[var(--surface-2)] px-4 py-3">
+                <dt className="font-mono font-bold">{k}</dt>
+                <dd className="mt-0.5 text-[var(--dim)]">{v}</dd>
+              </div>
+            ))}
+          </dl>
+        </section>
+      )}
+
+      <section className="mt-6 rounded-3xl bg-[var(--surface)] p-5 ring-1 ring-[var(--border)] sm:p-6" aria-label="Custom domain">
+        <h2 className="font-display text-lg font-bold">Step 4 — Custom domain: tapone.store</h2>
+        <p className="mt-2 max-w-3xl text-sm leading-relaxed text-[var(--dim)]">
+          The published site opens on your own domain <strong className="text-[var(--text)]">tapone.store</strong>{" "}
+          (registered at Hostinger), not on the host's default address. Three pieces:
+        </p>
+        <dl className="mt-4 grid gap-2 text-sm sm:grid-cols-2">
+          <div className="rounded-xl bg-[var(--surface-2)] px-4 py-3">
+            <dt className="font-mono font-bold">CNAME file (repo root)</dt>
+            <dd className="mt-0.5 text-[var(--dim)]">
+              Already prepared — one line: <span className="font-mono font-semibold text-[var(--text)]">tapone.store</span>.
+              It is GitHub's custom-domain declaration for the repo; keep it in the push (Step 1).
+            </dd>
+          </div>
+          <div className="rounded-xl bg-[var(--surface-2)] px-4 py-3">
+            <dt className="font-mono font-bold">DNS records — Hostinger</dt>
+            <dd className="mt-0.5 text-[var(--dim)]">
+              hPanel → Domains → tapone.store → DNS Zone Editor: an{" "}
+              <strong className="text-[var(--text)]">A record</strong> (name{" "}
+              <span className="font-mono">@</span>) to the Bun host's IP and a{" "}
+              <strong className="text-[var(--text)]">CNAME record</strong> (name{" "}
+              <span className="font-mono">www</span>) to the host's hostname — the exact values
+              come from the host's custom-domain screen. Delete old @/www records pointing at a
+              previous host. Changes can take a few hours to spread.
+            </dd>
+          </div>
+          <div className="rounded-xl bg-[var(--surface-2)] px-4 py-3">
+            <dt className="font-mono font-bold">HTTPS</dt>
+            <dd className="mt-0.5 text-[var(--dim)]">
+              Enable HTTPS on the host so the site opens as{" "}
+              <span className="font-mono font-semibold text-[var(--text)]">https://tapone.store</span>{" "}
+              — Google sign-in only works on the exact registered HTTPS origin.
+            </dd>
+          </div>
+          <div className="rounded-xl bg-[var(--surface-2)] px-4 py-3">
+            <dt className="font-mono font-bold">Google OAuth for the domain</dt>
+            <dd className="mt-0.5 text-[var(--dim)]">
+              Authorized JavaScript origins:{" "}
+              <span className="font-mono font-semibold text-[var(--text)]">https://tapone.store</span>;
+              Authorized redirect URIs:{" "}
+              <span className="font-mono font-semibold text-[var(--text)]">https://tapone.store/</span>{" "}
+              (Step 3). Both must be present or sign-in fails on the live domain.
+            </dd>
+          </div>
+        </dl>
+        <p className="mt-3 text-sm leading-relaxed text-[var(--dim)]">
+          Note: a <code className="font-semibold text-[var(--text)]">CNAME</code> file + GitHub
+          Pages alone would only serve static files — the live app still needs the Bun host from
+          Step 2, with the DNS records above pointing tapone.store at that host.
+        </p>
+      </section>
+
+      <section className="mt-6 rounded-3xl bg-[var(--surface)] p-5 ring-1 ring-[var(--border)] sm:p-6" aria-label="After deploy">
+        <h2 className="font-display text-lg font-bold">Step 5 — After deploy</h2>
+        <ol className="mt-3 list-decimal space-y-2 pl-5 text-sm leading-relaxed text-[var(--dim)]">
+          <li>Attach <strong className="text-[var(--text)]">tapone.store</strong> (Step 4) and confirm the site opens at <strong className="text-[var(--text)]">https://tapone.store</strong>.</li>
+          <li>Register <strong className="text-[var(--text)]">https://tapone.store</strong> in Google Cloud Console (origin + redirect URI) and publish the OAuth app.</li>
+          <li>Change the admin password in the Settings tab.</li>
+          <li>Set a postback secret, then give partners the postback parameters from the Overview tab.</li>
+          <li>Test: Google sign-in creates an account, a test postback credits 70% once, a withdrawal approves from the Withdrawals tab.</li>
+        </ol>
+      </section>
+    </div>
+  );
+}
+
+// ------------------------------------------------------------------ users
+
+function UsersTab({ token }: { token: string }) {
+  const queryClient = useQueryClient();
+  const [search, setSearch] = useState("");
+  const [adjustFor, setAdjustFor] = useState<number | null>(null);
+  const [adjustAmount, setAdjustAmount] = useState("");
+  const [adjustNote, setAdjustNote] = useState("");
+  const [rowError, setRowError] = useState<string | null>(null);
+  const [rowOk, setRowOk] = useState<string | null>(null);
+
+  const users = useQuery({
+    queryKey: ["admin-users", token],
+    queryFn: () => api.adminListUsers({ adminToken: token, limit: 200 }),
+  });
+
+  const refresh = () => {
+    void queryClient.invalidateQueries({ queryKey: ["admin-users", token] });
+    void queryClient.invalidateQueries({ queryKey: ["admin-overview", token] });
+  };
+
+  const block = useMutation({
+    mutationFn: async (input: { userId: number; blocked: boolean }) =>
+      api.adminSetUserBlocked({ adminToken: token, ...input }),
+    onSuccess: refresh,
+    onError: (e) => setRowError(e.message),
+  });
+
+  const adjust = useMutation({
+    mutationFn: async (userId: number) => {
+      const dollars = Number.parseFloat(adjustAmount);
+      if (!Number.isFinite(dollars) || dollars === 0)
+        throw new Error("Enter an amount (use a minus sign to debit).");
+      return api.adminAdjustBalance({
+        adminToken: token,
+        userId,
+        amountCents: Math.round(dollars * 100),
+        note: adjustNote.trim() || "Admin adjustment",
+      });
+    },
+    onSuccess: () => {
+      setRowOk("Balance updated — it is already in the user's history.");
+      setAdjustFor(null);
+      setAdjustAmount("");
+      setAdjustNote("");
+      refresh();
+    },
+    onError: (e) => setRowError(e.message),
+  });
+
+  const filtered = (users.data?.users ?? []).filter((u) => {
+    const q = search.trim().toLowerCase();
+    if (!q) return true;
+    return (
+      u.name.toLowerCase().includes(q) ||
+      u.email.toLowerCase().includes(q) ||
+      u.userCode.toLowerCase().includes(q)
+    );
+  });
+
+  return (
+    <div>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h1 className="font-display text-2xl font-extrabold">Users</h1>
+        <input
+          aria-label="Search users"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search name, email or ID…"
+          className="w-full max-w-xs rounded-full border border-[var(--border)] bg-[var(--surface)] px-4 py-2.5 text-sm outline-none focus:border-[var(--brand)]"
+        />
+      </div>
+      {rowError && (
+        <p role="alert" className="mt-3 text-sm font-medium text-red-600 dark:text-red-400">{rowError}</p>
+      )}
+      {rowOk && (
+        <p role="status" className="mt-3 text-sm font-medium text-[var(--brand-deep)] dark:text-[var(--brand)]">{rowOk}</p>
+      )}
+      {users.isPending ? (
+        <p className="mt-4 text-sm text-[var(--dim)]">Loading…</p>
+      ) : filtered.length === 0 ? (
+        <p className="mt-6 rounded-2xl border-2 border-dashed border-[var(--border)] bg-[var(--surface)] px-5 py-10 text-center text-sm text-[var(--dim)]">
+          No users yet. Accounts appear here the moment someone signs in with Google.
+        </p>
+      ) : (
+        <ul className="mt-4 space-y-3">
+          {filtered.map((u) => (
+            <li key={u.id} className="rounded-2xl bg-[var(--surface)] p-4 ring-1 ring-[var(--border)] sm:p-5">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  {u.pictureUrl ? (
+                    <img src={u.pictureUrl} alt="" className="h-11 w-11 rounded-full object-cover" />
+                  ) : (
+                    <span className="flex h-11 w-11 items-center justify-center rounded-full bg-[var(--avatar)] font-display text-lg font-extrabold text-white">
+                      {u.name.charAt(0).toUpperCase()}
+                    </span>
+                  )}
+                  <div>
+                    <p className="font-display font-bold">
+                      {u.name}{" "}
+                      {u.blocked && (
+                        <span className="ml-1 rounded-full bg-red-500/10 px-2 py-0.5 text-xs font-bold text-red-600 dark:text-red-400">
+                          BLOCKED
+                        </span>
+                      )}
+                    </p>
+                    <p className="text-sm text-[var(--dim)]">{u.email}</p>
+                  </div>
+                </div>
+                <div className="text-right">
+                  <p className="font-display text-lg font-extrabold">{fmt(u.balanceCents)}</p>
+                  <p className="text-xs text-[var(--dim)]">earned {fmt(u.totalEarnedCents)}</p>
+                </div>
+              </div>
+              <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs sm:grid-cols-4">
+                {[
+                  ["User ID", u.userCode],
+                  ["Offer Token", u.offerToken],
+                  ["Level", `Level ${u.level}`],
+                  ["Country", `${u.flagEmoji ?? "🌍"} ${u.countryName ?? "—"}`],
+                  ["IP address", u.ip ?? "—"],
+                  ["ISP", u.isp ?? "—"],
+                  ["Login method", "Google"],
+                  ["Referral code", u.referralCode],
+                  ["Invited by", u.referredByCode ?? "—"],
+                  ["Joined", fmtDate(u.createdAt)],
+                  ["Last seen", fmtDateTime(u.lastSeenAt)],
+                ].map(([k, v]) => (
+                  <div key={k}>
+                    <dt className="font-semibold uppercase tracking-wide text-[var(--dim)]">{k}</dt>
+                    <dd className="mt-0.5 break-all font-semibold">{v}</dd>
+                  </div>
+                ))}
+              </dl>
+              <div className="mt-4 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setRowError(null);
+                    block.mutate({ userId: u.id, blocked: !u.blocked });
+                  }}
+                  className={`flex items-center gap-1.5 rounded-full px-4 py-2 text-sm font-bold ${
+                    u.blocked
+                      ? "bg-[var(--brand)]/15 text-[var(--brand-deep)] dark:text-[var(--brand)]"
+                      : "bg-red-500/10 text-red-600 dark:text-red-400"
+                  }`}
+                >
+                  {Icons.ban("h-4 w-4")} {u.blocked ? "Unblock account" : "Block account"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAdjustFor(adjustFor === u.id ? null : u.id)}
+                  className="flex items-center gap-1.5 rounded-full bg-[var(--surface-2)] px-4 py-2 text-sm font-bold"
+                >
+                  {Icons.dollar("h-4 w-4")} Adjust balance
+                </button>
+              </div>
+              {adjustFor === u.id && (
+                <form
+                  className="mt-3 flex flex-col gap-2 rounded-xl bg-[var(--surface-2)] p-3 sm:flex-row"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    setRowError(null);
+                    setRowOk(null);
+                    adjust.mutate(u.id);
+                  }}
+                >
+                  <input
+                    aria-label="Adjustment amount in dollars"
+                    value={adjustAmount}
+                    onChange={(e) => setAdjustAmount(e.target.value)}
+                    inputMode="decimal"
+                    placeholder="Amount $ (e.g. 5 or -2.50)"
+                    className="flex-1 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm outline-none focus:border-[var(--brand)]"
+                  />
+                  <input
+                    aria-label="Adjustment note"
+                    {...FIELDS.adminAdjustBalance.note}
+                    value={adjustNote}
+                    onChange={(e) => setAdjustNote(e.target.value)}
+                    placeholder="Note (shows in user history)"
+                    className="flex-1 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm outline-none focus:border-[var(--brand)]"
+                  />
+                  <button
+                    type="submit"
+                    disabled={adjust.isPending}
+                    className="rounded-full bg-[var(--brand)] px-4 py-2 text-sm font-bold text-white disabled:opacity-60"
+                  >
+                    Apply
+                  </button>
+                </form>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+// ------------------------------------------------------------- withdrawals
+
+function ContestPayoutsTab({ token }: { token: string }) {
+  const queryClient = useQueryClient();
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  const list = useQuery({
+    queryKey: ["admin-contest-payouts", token],
+    queryFn: () => api.adminListContestPayouts({ adminToken: token }),
+  });
+
+  const invalidate = () => {
+    void queryClient.invalidateQueries({ queryKey: ["admin-contest-payouts", token] });
+    void queryClient.invalidateQueries({ queryKey: ["admin-overview", token] });
+  };
+
+  const payOne = useMutation({
+    mutationFn: async (input: { awardId: number }) =>
+      api.adminPayContestAward({ adminToken: token, awardId: input.awardId }),
+    onSuccess: (r) => {
+      setNotice(
+        r.status === "paid"
+          ? `Paid ${fmt(r.amountCents)} to ${r.userName} — it is in their balance and history now.`
+          : `${r.userName}'s prize was already paid.`,
+      );
+      invalidate();
+    },
+    onError: (e) => setError(e.message),
+  });
+
+  const payAll = useMutation({
+    mutationFn: async (input: { contest: "daily" | "affiliate"; periodKey: string }) =>
+      api.adminPayAllContestAwards({
+        adminToken: token,
+        contest: input.contest,
+        periodKey: input.periodKey,
+      }),
+    onSuccess: (r) => {
+      setNotice(
+        r.paidCount > 0
+          ? `Paid ${r.paidCount} ${r.paidCount === 1 ? "prize" : "prizes"} — ${fmt(r.totalCents)} in total.`
+          : "Nothing pending to pay for that period.",
+      );
+      invalidate();
+    },
+    onError: (e) => setError(e.message),
+  });
+
+  const busy = payOne.isPending || payAll.isPending;
+  const d = list.data;
+
+  const renderGroup = (
+    contest: "daily" | "affiliate",
+    g: NonNullable<typeof d>["daily"][number],
+  ) => {
+    const pendingCount = g.awards.filter((a) => a.status === "pending").length;
+    const title =
+      contest === "daily"
+        ? g.periodKey
+        : new Date(`${g.periodKey}-01T00:00:00`).toLocaleString("en-US", {
+            month: "long",
+            year: "numeric",
+          });
+    return (
+      <div key={`${contest}-${g.periodKey}`} className="rounded-2xl bg-[var(--surface)] p-4 ring-1 ring-[var(--border)] sm:p-5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="font-display text-base font-extrabold">{title}</p>
+            <p className="text-xs font-semibold text-[var(--dim)]">
+              {pendingCount > 0
+                ? `${pendingCount} ${pendingCount === 1 ? "prize" : "prizes"} waiting — ${fmt(g.pendingCents)}`
+                : "All prizes paid"}
+            </p>
+          </div>
+          {pendingCount > 0 && (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => payAll.mutate({ contest, periodKey: g.periodKey })}
+              className="rounded-full bg-[var(--brand)] px-4 py-2 text-sm font-bold text-white transition hover:bg-[var(--brand-deep)] disabled:opacity-60"
+            >
+              Pay all ({fmt(g.pendingCents)})
+            </button>
+          )}
+        </div>
+        <ul className="mt-3 divide-y divide-[var(--border)]">
+          {g.awards.map((a) => (
+            <li key={a.id} className="flex items-center gap-3 py-2.5">
+              <span
+                className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full font-display text-xs font-extrabold ${
+                  a.rank === 1
+                    ? "bg-[var(--gold)] text-[var(--ink)]"
+                    : a.rank === 2
+                      ? "bg-slate-300 text-[var(--ink)]"
+                      : a.rank === 3
+                        ? "bg-amber-700 text-white"
+                        : "bg-[var(--surface-2)] text-[var(--dim)]"
+                }`}
+              >
+                {a.rank}
+              </span>
+              <span className="min-w-0 flex-1 truncate text-sm font-semibold">{a.userName}</span>
+              <span className="font-display text-sm font-bold">{fmt(a.amountCents)}</span>
+              {a.status === "pending" ? (
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => payOne.mutate({ awardId: a.id })}
+                  className="rounded-full bg-[var(--brand)] px-4 py-1.5 text-xs font-bold text-white transition hover:bg-[var(--brand-deep)] disabled:opacity-60"
+                >
+                  Pay
+                </button>
+              ) : (
+                <span className="rounded-full bg-[var(--brand)]/15 px-3 py-1 text-xs font-bold text-[var(--brand-deep)] dark:text-[var(--brand)]">
+                  PAID
+                </span>
+              )}
+            </li>
+          ))}
+        </ul>
+      </div>
+    );
+  };
+
+  return (
+    <div>
+      <h1 className="font-display text-2xl font-extrabold">Contest Payouts</h1>
+      <p className="mt-1 max-w-xl text-sm text-[var(--dim)]">
+        Contest prizes are never paid automatically. When a day (Daily) or a
+        month (Affiliate) ends, its winners appear here — press Pay on a
+        winner, or Pay all for the whole period, and the prize lands in that
+        winner's balance and history right away.
+      </p>
+      {error && (
+        <p role="alert" className="mt-3 text-sm font-medium text-red-600 dark:text-red-400">{error}</p>
+      )}
+      {notice && (
+        <p role="status" className="mt-3 text-sm font-semibold text-[var(--brand-deep)] dark:text-[var(--brand)]">{notice}</p>
+      )}
+      {list.isPending ? (
+        <p className="mt-4 text-sm text-[var(--dim)]">Loading…</p>
+      ) : d ? (
+        <>
+          <h2 className="mt-6 font-display text-lg font-bold">🏆 Daily contest winners</h2>
+          {d.daily.length > 0 ? (
+            <div className="mt-3 space-y-3">{d.daily.map((g) => renderGroup("daily", g))}</div>
+          ) : (
+            <p className="mt-2 text-sm text-[var(--dim)]">No finished days yet — yesterday's winners will appear here.</p>
+          )}
+          <h2 className="mt-8 font-display text-lg font-bold">👥 Affiliate contest winners</h2>
+          {d.affiliate.length > 0 ? (
+            <div className="mt-3 space-y-3">{d.affiliate.map((g) => renderGroup("affiliate", g))}</div>
+          ) : (
+            <p className="mt-2 text-sm text-[var(--dim)]">No finished months yet — last month's winners will appear here when the month ends.</p>
+          )}
+          {d.recentPaid.length > 0 && (
+            <>
+              <h2 className="mt-8 font-display text-lg font-bold">Recently paid</h2>
+              <ul className="mt-3 divide-y divide-[var(--border)] rounded-2xl bg-[var(--surface)] px-4 ring-1 ring-[var(--border)]">
+                {d.recentPaid.map((p, i) => (
+                  <li key={i} className="flex items-center justify-between gap-3 py-2.5 text-sm">
+                    <span className="font-semibold">
+                      {p.userName}{" "}
+                      <span className="font-normal text-[var(--dim)]">
+                        · {p.contest === "affiliate" ? "Affiliate" : "Daily"} · rank #{p.rank} · {p.periodKey}
+                      </span>
+                    </span>
+                    <span className="font-display font-bold text-[var(--brand-deep)] dark:text-[var(--brand)]">
+                      {fmt(p.amountCents)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+function WithdrawalsTab({ token }: { token: string }) {
+  const queryClient = useQueryClient();
+  const [status, setStatus] = useState<"pending" | "approved" | "rejected" | "all">("pending");
+  const [notes, setNotes] = useState<Record<number, string>>({});
+  const [error, setError] = useState<string | null>(null);
+
+  const list = useQuery({
+    queryKey: ["admin-withdrawals", token, status],
+    queryFn: () => api.adminListWithdrawals({ adminToken: token, status, limit: 100 }),
+  });
+
+  const decide = useMutation({
+    mutationFn: async (input: { id: number; decision: "approved" | "rejected" }) =>
+      api.adminDecideWithdrawal({
+        adminToken: token,
+        withdrawalId: input.id,
+        decision: input.decision,
+        note: notes[input.id]?.trim() ?? "",
+      }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["admin-withdrawals", token] });
+      void queryClient.invalidateQueries({ queryKey: ["admin-overview", token] });
+    },
+    onError: (e) => setError(e.message),
+  });
+
+  return (
+    <div>
+      <h1 className="font-display text-2xl font-extrabold">Withdrawals</h1>
+      <p className="mt-1 text-sm text-[var(--dim)]">
+        Pay the user first, then Approve — the user sees the new status immediately. Reject
+        returns the amount to their balance.
+      </p>
+      <div className="mt-4 flex flex-wrap gap-2" role="tablist" aria-label="Status filter">
+        {(["pending", "approved", "rejected", "all"] as const).map((s) => (
+          <button
+            key={s}
+            type="button"
+            role="tab"
+            aria-selected={status === s}
+            onClick={() => setStatus(s)}
+            className={`rounded-full px-4 py-2 text-sm font-bold capitalize ring-1 transition ${
+              status === s ? "bg-[var(--brand)] text-white ring-[var(--brand)]" : "bg-[var(--surface)] ring-[var(--border)]"
+            }`}
+          >
+            {s}
+          </button>
+        ))}
+      </div>
+      {error && (
+        <p role="alert" className="mt-3 text-sm font-medium text-red-600 dark:text-red-400">{error}</p>
+      )}
+      {list.isPending ? (
+        <p className="mt-4 text-sm text-[var(--dim)]">Loading…</p>
+      ) : list.data && list.data.withdrawals.length > 0 ? (
+        <ul className="mt-4 space-y-3">
+          {list.data.withdrawals.map((w) => (
+            <li key={w.id} className="rounded-2xl bg-[var(--surface)] p-4 ring-1 ring-[var(--border)] sm:p-5">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <p className="font-display text-xl font-extrabold">{fmt(w.amountCents)}</p>
+                  <p className="mt-0.5 text-sm font-semibold">
+                    {w.userName} <span className="font-normal text-[var(--dim)]">({w.userCode} · {w.userEmail})</span>
+                  </p>
+                  <p className="text-xs text-[var(--dim)]">
+                    {w.methodLabel} · Requested {fmtDateTime(w.createdAt)}
+                    {w.decidedAt ? ` · Decided ${fmtDateTime(w.decidedAt)}` : ""}
+                  </p>
+                </div>
+                <span
+                  className={`rounded-full px-3 py-1 text-xs font-bold ${
+                    w.status === "pending"
+                      ? "bg-[var(--gold)]/15 text-[#9a6200] dark:text-[var(--gold)]"
+                      : w.status === "approved"
+                        ? "bg-[var(--brand)]/15 text-[var(--brand-deep)] dark:text-[var(--brand)]"
+                        : "bg-red-500/10 text-red-600 dark:text-red-400"
+                  }`}
+                >
+                  {w.status.toUpperCase()}
+                </span>
+              </div>
+              <dl className="mt-3 grid gap-1.5 rounded-xl bg-[var(--surface-2)] px-4 py-3 text-sm sm:grid-cols-2">
+                {Object.entries(w.details).map(([k, v]) => (
+                  <div key={k} className="flex gap-2">
+                    <dt className="font-semibold capitalize text-[var(--dim)]">{k}:</dt>
+                    <dd className="break-all font-semibold">{v}</dd>
+                  </div>
+                ))}
+              </dl>
+              {w.status === "pending" ? (
+                <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+                  <input
+                    aria-label={`Note for withdrawal ${w.id}`}
+                    {...FIELDS.adminDecideWithdrawal.note}
+                    value={notes[w.id] ?? ""}
+                    onChange={(e) => setNotes((n) => ({ ...n, [w.id]: e.target.value }))}
+                    placeholder="Note for the user (optional)"
+                    className="flex-1 rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 text-sm outline-none focus:border-[var(--brand)]"
+                  />
+                  <button
+                    type="button"
+                    disabled={decide.isPending}
+                    onClick={() => {
+                      setError(null);
+                      decide.mutate({ id: w.id, decision: "approved" });
+                    }}
+                    className="flex items-center justify-center gap-1.5 rounded-full bg-[var(--brand)] px-5 py-2.5 text-sm font-bold text-white disabled:opacity-60"
+                  >
+                    {Icons.check("h-4 w-4")} Approve
+                  </button>
+                  <button
+                    type="button"
+                    disabled={decide.isPending}
+                    onClick={() => {
+                      setError(null);
+                      decide.mutate({ id: w.id, decision: "rejected" });
+                    }}
+                    className="flex items-center justify-center gap-1.5 rounded-full bg-red-500/10 px-5 py-2.5 text-sm font-bold text-red-600 disabled:opacity-60 dark:text-red-400"
+                  >
+                    {Icons.x("h-4 w-4")} Reject
+                  </button>
+                </div>
+              ) : (
+                w.adminNote && <p className="mt-2 text-sm"><span className="font-semibold">Your note:</span> {w.adminNote}</p>
+              )}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="mt-6 rounded-2xl border-2 border-dashed border-[var(--border)] bg-[var(--surface)] px-5 py-10 text-center text-sm text-[var(--dim)]">
+          No {status === "all" ? "" : status} withdrawals.
+        </p>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------- content
+
+type ContentItemData = ApiResponse<typeof api, "adminListContent">["items"][number];
+
+interface ContentForm {
+  id?: number;
+  kind: "offerwall" | "survey" | "game";
+  title: string;
+  provider: string;
+  description: string;
+  rewardDollars: string;
+  url: string;
+  imageUrl: string;
+  countries: string;
+  featured: boolean;
+  active: boolean;
+  sortOrder: string;
+}
+
+const EMPTY_FORM: ContentForm = {
+  kind: "offerwall",
+  title: "",
+  provider: "",
+  description: "",
+  rewardDollars: "",
+  url: "",
+  imageUrl: "",
+  countries: "ALL",
+  featured: false,
+  active: true,
+  sortOrder: "0",
+};
+
+function WithdrawMethodsTab({ token }: { token: string }) {
+  const queryClient = useQueryClient();
+  const [countryCode, setCountryCode] = useState("");
+  const [label, setLabel] = useState("");
+  const [fieldLabels, setFieldLabels] = useState<string[]>([""]);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  const inputCls =
+    "w-full rounded-xl bg-[var(--surface)] px-3.5 py-2.5 text-sm font-semibold ring-1 ring-[var(--border)] outline-none focus:ring-[var(--brand)]";
+
+  const list = useQuery({
+    queryKey: ["admin-withdraw-methods", token],
+    queryFn: () => api.adminListWithdrawMethods({ adminToken: token }),
+  });
+
+  const invalidate = () =>
+    void queryClient.invalidateQueries({ queryKey: ["admin-withdraw-methods", token] });
+
+  const add = useMutation({
+    mutationFn: async () => {
+      const country = COUNTRIES.find((c) => c.code === countryCode);
+      const usedKeys = new Set<string>();
+      const fields = fieldLabels
+        .map((f) => f.trim())
+        .filter(Boolean)
+        .map((f, i) => {
+          let key =
+            f
+              .toLowerCase()
+              .replace(/[^a-z0-9]+/g, "_")
+              .replace(/^_+|_+$/g, "")
+              .slice(0, 30) || `field${i + 1}`;
+          if (!/^[a-z]/.test(key)) key = `f_${key}`;
+          while (usedKeys.has(key)) key = `${key}_x`;
+          usedKeys.add(key);
+          return { key, label: f };
+        });
+      return api.adminAddWithdrawMethod({
+        adminToken: token,
+        countryCode,
+        countryName: country?.name ?? countryCode,
+        label: label.trim(),
+        fields,
+      });
+    },
+    onSuccess: () => {
+      setNotice(
+        `"${label.trim()}" added — it now shows on the Withdraw page of every user from the picked country.`,
+      );
+      setLabel("");
+      setFieldLabels([""]);
+      setError(null);
+      invalidate();
+    },
+    onError: (e) => setError(e.message),
+  });
+
+  const remove = useMutation({
+    mutationFn: async (input: { id: number }) =>
+      api.adminRemoveWithdrawMethod({ adminToken: token, id: input.id }),
+    onSuccess: () => {
+      setNotice("Method removed — it no longer shows to that country's users.");
+      invalidate();
+    },
+    onError: (e) => setError(e.message),
+  });
+
+  const submit = () => {
+    if (!countryCode) {
+      setError("Pick a country first.");
+      return;
+    }
+    if (!label.trim()) {
+      setError("Give the method a name, e.g. Alipay.");
+      return;
+    }
+    if (fieldLabels.every((f) => !f.trim())) {
+      setError("Add at least one detail field — what the user must type when withdrawing, e.g. Alipay account.");
+      return;
+    }
+    setError(null);
+    add.mutate();
+  };
+
+  const groups = new Map<string, NonNullable<typeof list.data>["methods"]>();
+  for (const m of list.data?.methods ?? []) {
+    const g = groups.get(m.countryCode) ?? [];
+    g.push(m);
+    groups.set(m.countryCode, g);
+  }
+
+  return (
+    <div>
+      <h1 className="font-display text-2xl font-extrabold">Withdraw Methods</h1>
+      <p className="mt-1 max-w-xl text-sm text-[var(--dim)]">
+        Every withdraw method is listed on this page: the built-in methods
+        for each country first, then the extra methods you add. Add a payment
+        method for a country and it appears on the Withdraw page of{" "}
+        <strong className="text-[var(--text)]">every user whose login country is that country</strong>,
+        next to that country's built-in methods.
+      </p>
+      {error && (
+        <p role="alert" className="mt-3 text-sm font-medium text-red-600 dark:text-red-400">{error}</p>
+      )}
+      {notice && (
+        <p role="status" className="mt-3 text-sm font-semibold text-[var(--brand-deep)] dark:text-[var(--brand)]">{notice}</p>
+      )}
+
+      <section className="mt-5 rounded-2xl bg-[var(--surface)] p-4 ring-1 ring-[var(--border)] sm:p-5" aria-label="Add a withdraw method">
+        <h2 className="font-display text-base font-extrabold">Add a method</h2>
+        <div className="mt-3 grid gap-3 sm:grid-cols-2">
+          <div>
+            <label htmlFor="wm-country" className="text-sm font-semibold">Country</label>
+            <select
+              id="wm-country"
+              value={countryCode}
+              onChange={(e) => setCountryCode(e.target.value)}
+              className={inputCls}
+            >
+              <option value="">Pick a country…</option>
+              {COUNTRIES.map((c) => (
+                <option key={c.code} value={c.code}>
+                  {flagEmojiFor(c.code)} {c.name} ({c.code})
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label htmlFor="wm-label" className="text-sm font-semibold">Method name</label>
+            <input
+              id="wm-label"
+              {...FIELDS.adminAddWithdrawMethod.label}
+              value={label}
+              onChange={(e) => setLabel(e.target.value)}
+              className={inputCls}
+              placeholder="e.g. Alipay"
+            />
+          </div>
+        </div>
+        <div className="mt-3">
+          <p className="text-sm font-semibold">Details the user must fill in</p>
+          <p className="mt-0.5 text-xs text-[var(--dim)]">
+            One field per line — all are required when the user withdraws with this method.
+          </p>
+          <div className="mt-2 space-y-2">
+            {fieldLabels.map((f, i) => (
+              <div key={i} className="flex gap-2">
+                <input
+                  aria-label={`Detail field ${i + 1}`}
+                  {...FIELDS.adminAddWithdrawMethod.fields.label}
+                  value={f}
+                  onChange={(e) =>
+                    setFieldLabels((prev) => prev.map((x, j) => (j === i ? e.target.value : x)))
+                  }
+                  className={inputCls}
+                  placeholder={i === 0 ? "e.g. Alipay account / email" : "e.g. Account holder name"}
+                />
+                {fieldLabels.length > 1 && (
+                  <button
+                    type="button"
+                    aria-label={`Remove detail field ${i + 1}`}
+                    onClick={() => setFieldLabels((prev) => prev.filter((_, j) => j !== i))}
+                    className="shrink-0 rounded-xl px-3 text-sm font-bold text-red-600 ring-1 ring-[var(--border)] dark:text-red-400"
+                  >
+                    ✕
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+          {fieldLabels.length < 5 && (
+            <button
+              type="button"
+              onClick={() => setFieldLabels((prev) => [...prev, ""])}
+              className="mt-2 rounded-full px-4 py-2 text-sm font-bold ring-1 ring-[var(--border)]"
+            >
+              + Add another field
+            </button>
+          )}
+        </div>
+        <button
+          type="button"
+          disabled={add.isPending}
+          onClick={submit}
+          className="mt-4 rounded-full bg-[var(--brand)] px-6 py-2.5 text-sm font-bold text-white transition hover:bg-[var(--brand-deep)] disabled:opacity-60"
+        >
+          {add.isPending ? "Adding…" : "Add method"}
+        </button>
+      </section>
+
+      <h2 className="mt-8 font-display text-lg font-bold">Built-in methods</h2>
+      <p className="mt-1 text-sm text-[var(--dim)]">
+        These ship with the site and show automatically by each user's login
+        country. They can't be removed.
+      </p>
+      {list.isPending ? (
+        <p className="mt-3 text-sm text-[var(--dim)]">Loading…</p>
+      ) : (
+        <div className="mt-3 space-y-3">
+          {(list.data?.builtIns ?? []).map((g) => (
+            <div key={g.countryCode} className="rounded-2xl bg-[var(--surface)] p-4 ring-1 ring-[var(--border)] sm:p-5">
+              <p className="font-display text-base font-extrabold">
+                {g.countryCode === "DEFAULT" ? "🌍" : flagEmojiFor(g.countryCode)} {g.countryName}{" "}
+                <span className="text-sm font-bold text-[var(--dim)]">({g.countryCode})</span>
+              </p>
+              <ul className="mt-2 divide-y divide-[var(--border)]">
+                {g.methods.map((m) => (
+                  <li key={m.id} className="flex flex-wrap items-center gap-3 py-2.5">
+                    <span className="min-w-0 flex-1">
+                      <span className="block text-sm font-semibold">{m.label}</span>
+                      <span className="block text-xs text-[var(--dim)]">
+                        Asks for: {m.fields.map((f) => f.label).join(" · ")}
+                      </span>
+                    </span>
+                    <span className="rounded-full bg-[var(--surface-2)] px-3 py-1 text-xs font-bold text-[var(--dim)] ring-1 ring-[var(--border)]">
+                      Built-in
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <h2 className="mt-8 font-display text-lg font-bold">Added methods</h2>
+      {list.isPending ? (
+        <p className="mt-3 text-sm text-[var(--dim)]">Loading…</p>
+      ) : groups.size > 0 ? (
+        <div className="mt-3 space-y-3">
+          {[...groups.entries()].map(([code, methods]) => (
+            <div key={code} className="rounded-2xl bg-[var(--surface)] p-4 ring-1 ring-[var(--border)] sm:p-5">
+              <p className="font-display text-base font-extrabold">
+                {flagEmojiFor(code)} {methods[0]?.countryName || code}{" "}
+                <span className="text-sm font-bold text-[var(--dim)]">({code})</span>
+              </p>
+              <ul className="mt-2 divide-y divide-[var(--border)]">
+                {methods.map((m) => (
+                  <li key={m.id} className="flex flex-wrap items-center gap-3 py-2.5">
+                    <span className="min-w-0 flex-1">
+                      <span className="block text-sm font-semibold">{m.label}</span>
+                      <span className="block text-xs text-[var(--dim)]">
+                        Asks for: {m.fields.map((f) => f.label).join(" · ")}
+                      </span>
+                    </span>
+                    <button
+                      type="button"
+                      disabled={remove.isPending}
+                      onClick={() => remove.mutate({ id: m.id })}
+                      className="rounded-full px-4 py-1.5 text-xs font-bold text-red-600 ring-1 ring-[var(--border)] transition hover:bg-red-500/10 disabled:opacity-60 dark:text-red-400"
+                    >
+                      Remove
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="mt-2 text-sm text-[var(--dim)]">
+          No added methods yet. Pick a country above and add the first one.
+        </p>
+      )}
+    </div>
+  );
+}
+
+function ContentTab({ token }: { token: string }) {
+  const queryClient = useQueryClient();
+  const [form, setForm] = useState<ContentForm | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [okMsg, setOkMsg] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<number | null>(null);
+  const [kindFilter, setKindFilter] = useState<"all" | ContentForm["kind"]>("all");
+
+  const list = useQuery({
+    queryKey: ["admin-content", token],
+    queryFn: () => api.adminListContent({ adminToken: token }),
+  });
+
+  const refresh = () => {
+    void queryClient.invalidateQueries({ queryKey: ["admin-content", token] });
+    void queryClient.invalidateQueries({ queryKey: ["public-home"] });
+  };
+
+  const save = useMutation({
+    mutationFn: async (f: ContentForm) => {
+      const rewardCents =
+        f.rewardDollars.trim() === "" ? null : toCents(f.rewardDollars.trim());
+      if (f.rewardDollars.trim() !== "" && rewardCents === null)
+        throw new Error("Reward must be a valid dollar amount.");
+      return api.adminUpsertContent({
+        adminToken: token,
+        id: f.id,
+        kind: f.kind,
+        title: f.title.trim(),
+        provider: f.provider.trim(),
+        description: f.description.trim(),
+        rewardCents,
+        url: f.url.trim(),
+        imageUrl: f.imageUrl.trim() === "" ? null : f.imageUrl.trim(),
+        countries: f.countries.trim() || "ALL",
+        featured: f.featured,
+        active: f.active,
+        sortOrder: Number.parseInt(f.sortOrder, 10) || 0,
+      });
+    },
+    onSuccess: () => {
+      setOkMsg("Saved — it is now live for every user.");
+      setForm(null);
+      refresh();
+    },
+    onError: (e) => setError(e.message),
+  });
+
+  const remove = useMutation({
+    mutationFn: async (id: number) => api.adminDeleteContent({ adminToken: token, id }),
+    onSuccess: () => {
+      setOkMsg("Removed for every user.");
+      setConfirmDelete(null);
+      refresh();
+    },
+    onError: (e) => setError(e.message),
+  });
+
+  const editForm = (item: ContentItemData): ContentForm => ({
+    id: item.id,
+    kind: item.kind,
+    title: item.title,
+    provider: item.provider,
+    description: item.description,
+    rewardDollars: item.rewardCents != null ? (item.rewardCents / 100).toFixed(2) : "",
+    url: item.url,
+    imageUrl: item.imageUrl ?? "",
+    countries: item.countries,
+    featured: item.featured,
+    active: item.active,
+    sortOrder: String(item.sortOrder),
+  });
+
+  const items = (list.data?.items ?? []).filter(
+    (i) => kindFilter === "all" || i.kind === kindFilter,
+  );
+  const kindLabel = { offerwall: "Offerwall", survey: "Survey", game: "Game" } as const;
+
+  const fieldCls =
+    "mt-1 w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 text-sm outline-none focus:border-[var(--brand)]";
+
+  return (
+    <div>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h1 className="font-display text-2xl font-extrabold">Content</h1>
+        <button
+          type="button"
+          onClick={() => {
+            setError(null);
+            setOkMsg(null);
+            setForm({ ...EMPTY_FORM });
+          }}
+          className="flex items-center gap-1.5 rounded-full bg-[var(--brand)] px-4 py-2.5 text-sm font-bold text-white"
+        >
+          {Icons.plus("h-4 w-4")} Add item
+        </button>
+      </div>
+      <p className="mt-1 text-sm text-[var(--dim)]">
+        Everything saved here goes live for all users immediately — add an offerwall,
+        survey or game when a partner approves it.
+      </p>
+      <div className="mt-4 flex flex-wrap gap-2" role="tablist" aria-label="Kind filter">
+        {(["all", "offerwall", "survey", "game"] as const).map((k) => (
+          <button
+            key={k}
+            type="button"
+            role="tab"
+            aria-selected={kindFilter === k}
+            onClick={() => setKindFilter(k)}
+            className={`rounded-full px-4 py-2 text-sm font-bold capitalize ring-1 transition ${
+              kindFilter === k ? "bg-[var(--brand)] text-white ring-[var(--brand)]" : "bg-[var(--surface)] ring-[var(--border)]"
+            }`}
+          >
+            {k === "all" ? "All" : `${kindLabel[k]}s`}
+          </button>
+        ))}
+      </div>
+      {error && (
+        <p role="alert" className="mt-3 text-sm font-medium text-red-600 dark:text-red-400">{error}</p>
+      )}
+      {okMsg && (
+        <p role="status" className="mt-3 text-sm font-medium text-[var(--brand-deep)] dark:text-[var(--brand)]">{okMsg}</p>
+      )}
+
+      {form && (
+        <form
+          className="mt-5 rounded-3xl bg-[var(--surface)] p-5 ring-1 ring-[var(--border)] sm:p-6"
+          onSubmit={(e) => {
+            e.preventDefault();
+            setError(null);
+            setOkMsg(null);
+            if (!form.title.trim()) {
+              setError("Title is required.");
+              return;
+            }
+            save.mutate(form);
+          }}
+        >
+          <p className="font-display text-lg font-bold">{form.id ? "Edit item" : "Add item"}</p>
+          <div className="mt-4 grid gap-4 sm:grid-cols-2">
+            <div>
+              <label htmlFor="ct-kind" className="text-sm font-semibold">Section</label>
+              <select
+                id="ct-kind"
+                value={form.kind}
+                onChange={(e) => setForm({ ...form, kind: e.target.value as ContentForm["kind"] })}
+                className={fieldCls}
+              >
+                <option value="offerwall">Offerwall</option>
+                <option value="survey">Survey</option>
+                <option value="game">Game</option>
+              </select>
+            </div>
+            <div>
+              <label htmlFor="ct-title" className="text-sm font-semibold">Title</label>
+              <input id="ct-title" {...FIELDS.adminUpsertContent.title} value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} className={fieldCls} placeholder="e.g. MM Wall" />
+            </div>
+            <div>
+              <label htmlFor="ct-provider" className="text-sm font-semibold">Provider / partner</label>
+              <input id="ct-provider" {...FIELDS.adminUpsertContent.provider} value={form.provider} onChange={(e) => setForm({ ...form, provider: e.target.value })} className={fieldCls} placeholder="e.g. MM Wall, Torox, CPX Research" />
+            </div>
+            <div>
+              <label htmlFor="ct-reward" className="text-sm font-semibold">Reward shown to users ($) <span className="font-normal text-[var(--dim)]">(optional)</span></label>
+              <input id="ct-reward" value={form.rewardDollars} onChange={(e) => setForm({ ...form, rewardDollars: e.target.value })} inputMode="decimal" placeholder="e.g. 2.50" className={fieldCls} />
+            </div>
+            <div className="sm:col-span-2">
+              <label htmlFor="ct-desc" className="text-sm font-semibold">Description</label>
+              <textarea id="ct-desc" {...FIELDS.adminUpsertContent.description} value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} rows={2} className={fieldCls} placeholder="What does the user do to earn?" />
+            </div>
+            <div className="sm:col-span-2">
+              <label htmlFor="ct-url" className="text-sm font-semibold">Offer URL <span className="font-normal text-[var(--dim)]">(the partner link, with the user's ID if the partner supports it)</span></label>
+              <input id="ct-url" {...FIELDS.adminUpsertContent.url} value={form.url} onChange={(e) => setForm({ ...form, url: e.target.value })} placeholder="https://…" className={fieldCls} />
+            </div>
+            <div>
+              <label htmlFor="ct-img" className="text-sm font-semibold">Image URL <span className="font-normal text-[var(--dim)]">(optional)</span></label>
+              <input id="ct-img" {...FIELDS.adminUpsertContent.imageUrl} value={form.imageUrl} onChange={(e) => setForm({ ...form, imageUrl: e.target.value })} placeholder="https://…" className={fieldCls} />
+            </div>
+            <div>
+              <label htmlFor="ct-countries" className="text-sm font-semibold">Countries <span className="font-normal text-[var(--dim)]">(ALL, or codes like PK,US,GB)</span></label>
+              <input id="ct-countries" {...FIELDS.adminUpsertContent.countries} value={form.countries} onChange={(e) => setForm({ ...form, countries: e.target.value })} className={fieldCls} />
+            </div>
+            <div>
+              <label htmlFor="ct-sort" className="text-sm font-semibold">Sort order</label>
+              <input id="ct-sort" value={form.sortOrder} onChange={(e) => setForm({ ...form, sortOrder: e.target.value })} inputMode="numeric" className={fieldCls} />
+            </div>
+            <div className="flex flex-wrap items-end gap-5 pb-1">
+              <label className="flex cursor-pointer items-center gap-2 text-sm font-semibold">
+                <input type="checkbox" checked={form.active} onChange={(e) => setForm({ ...form, active: e.target.checked })} className="h-5 w-5 accent-[var(--brand)]" />
+                Active (visible to users)
+              </label>
+              <label className="flex cursor-pointer items-center gap-2 text-sm font-semibold">
+                <input type="checkbox" checked={form.featured} onChange={(e) => setForm({ ...form, featured: e.target.checked })} className="h-5 w-5 accent-[var(--brand)]" />
+                Featured (games: home page)
+              </label>
+            </div>
+          </div>
+          <div className="mt-5 flex gap-2">
+            <button type="submit" disabled={save.isPending} className="rounded-full bg-[var(--brand)] px-6 py-2.5 font-display text-sm font-bold text-white disabled:opacity-60">
+              {save.isPending ? "Saving…" : form.id ? "Save changes" : "Add item"}
+            </button>
+            <button type="button" onClick={() => setForm(null)} className="rounded-full bg-[var(--surface-2)] px-5 py-2.5 text-sm font-bold">
+              Cancel
+            </button>
+          </div>
+        </form>
+      )}
+
+      {list.isPending ? (
+        <p className="mt-4 text-sm text-[var(--dim)]">Loading…</p>
+      ) : items.length > 0 ? (
+        <ul className="mt-5 space-y-3">
+          {items.map((item) => (
+            <li key={item.id} className="flex flex-wrap items-center gap-3 rounded-2xl bg-[var(--surface)] p-4 ring-1 ring-[var(--border)]">
+              <div className="min-w-0 flex-1">
+                <p className="font-display font-bold">
+                  {item.title}{" "}
+                  <span className="ml-1 rounded-full bg-[var(--surface-2)] px-2 py-0.5 text-xs font-bold text-[var(--dim)]">
+                    {kindLabel[item.kind]}
+                  </span>
+                  {item.featured && (
+                    <span className="ml-1 rounded-full bg-[var(--gold)]/20 px-2 py-0.5 text-xs font-bold text-[#9a6200] dark:text-[var(--gold)]">Featured</span>
+                  )}
+                  {!item.active && (
+                    <span className="ml-1 rounded-full bg-red-500/10 px-2 py-0.5 text-xs font-bold text-red-600 dark:text-red-400">Hidden</span>
+                  )}
+                </p>
+                <p className="truncate text-sm text-[var(--dim)]">
+                  {item.provider || "—"} · {item.rewardCents != null ? fmt(item.rewardCents) : "no set reward"} · {item.countries}
+                </p>
+              </div>
+              <button type="button" onClick={() => setForm(editForm(item))} className="flex items-center gap-1.5 rounded-full bg-[var(--surface-2)] px-4 py-2 text-sm font-bold">
+                {Icons.edit("h-4 w-4")} Edit
+              </button>
+              {confirmDelete === item.id ? (
+                <span className="flex gap-2">
+                  <button type="button" disabled={remove.isPending} onClick={() => remove.mutate(item.id)} className="rounded-full bg-red-600 px-4 py-2 text-sm font-bold text-white disabled:opacity-60">
+                    Confirm delete
+                  </button>
+                  <button type="button" onClick={() => setConfirmDelete(null)} className="rounded-full bg-[var(--surface-2)] px-4 py-2 text-sm font-bold">
+                    Keep
+                  </button>
+                </span>
+              ) : (
+                <button type="button" onClick={() => setConfirmDelete(item.id)} className="flex items-center gap-1.5 rounded-full bg-red-500/10 px-4 py-2 text-sm font-bold text-red-600 dark:text-red-400">
+                  {Icons.trash("h-4 w-4")} Remove
+                </button>
+              )}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="mt-6 rounded-2xl border-2 border-dashed border-[var(--border)] bg-[var(--surface)] px-5 py-10 text-center text-sm text-[var(--dim)]">
+          Nothing here yet. When an offerwall, survey network or game partner approves
+          TapOne, add it with the Add item button — it shows to every user right away.
+        </p>
+      )}
+    </div>
+  );
+}
+
+// ------------------------------------------------------------------ inbox
+
+function InboxTab({ token }: { token: string }) {
+  const queryClient = useQueryClient();
+  const [openUserId, setOpenUserId] = useState<number | null>(null);
+  const [reply, setReply] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const threads = useQuery({
+    queryKey: ["admin-threads", token],
+    queryFn: () => api.adminListThreads({ adminToken: token }),
+  });
+  const thread = useQuery({
+    queryKey: ["admin-thread", token, openUserId],
+    queryFn: () => api.adminGetThread({ adminToken: token, userId: openUserId ?? 0 }),
+    enabled: openUserId != null,
+  });
+
+  const send = useMutation({
+    mutationFn: async () => {
+      if (openUserId == null) throw new Error("Open a conversation first.");
+      return api.adminReply({ adminToken: token, userId: openUserId, body: reply.trim() });
+    },
+    onSuccess: () => {
+      setReply("");
+      void queryClient.invalidateQueries({ queryKey: ["admin-thread", token, openUserId] });
+      void queryClient.invalidateQueries({ queryKey: ["admin-threads", token] });
+    },
+    onError: (e) => setError(e.message),
+  });
+
+  if (openUserId != null) {
+    const meta = threads.data?.threads.find((t) => t.userId === openUserId);
+    return (
+      <div>
+        <button type="button" onClick={() => setOpenUserId(null)} className="text-sm font-semibold text-[var(--dim)]">
+          ← All conversations
+        </button>
+        <h1 className="mt-2 font-display text-2xl font-extrabold">
+          {meta?.userName ?? "User"} <span className="text-base font-semibold text-[var(--dim)]">({meta?.userCode ?? ""})</span>
+        </h1>
+        <p className="text-sm text-[var(--dim)]">{meta?.userEmail ?? ""}</p>
+        <section className="mt-5 space-y-3" aria-label="Thread">
+          {thread.isPending ? (
+            <p className="text-sm text-[var(--dim)]">Loading…</p>
+          ) : (
+            thread.data?.messages.map((m) => (
+              <div key={m.id} className={`flex ${m.sender === "admin" ? "justify-end" : "justify-start"}`}>
+                <div
+                  className={`max-w-[85%] rounded-2xl px-4 py-3 sm:max-w-[70%] ${
+                    m.sender === "admin" ? "bg-[var(--brand)] text-white" : "bg-[var(--surface)] ring-1 ring-[var(--border)]"
+                  }`}
+                >
+                  {m.subject && <p className="text-sm font-bold">{m.subject}</p>}
+                  <p className="whitespace-pre-wrap text-sm leading-relaxed">{m.body}</p>
+                  <p className={`mt-1.5 text-[11px] ${m.sender === "admin" ? "text-white/60" : "text-[var(--dim)]"}`}>
+                    {m.sender === "admin" ? "You (admin)" : meta?.userName ?? "User"} · {fmtDateTime(m.createdAt)}
+                  </p>
+                </div>
+              </div>
+            ))
+          )}
+        </section>
+        <form
+          className="mt-5 rounded-3xl bg-[var(--surface)] p-5 ring-1 ring-[var(--border)]"
+          onSubmit={(e) => {
+            e.preventDefault();
+            setError(null);
+            if (!reply.trim()) {
+              setError("Write a reply first.");
+              return;
+            }
+            send.mutate();
+          }}
+        >
+          <label htmlFor="adm-reply" className="font-display text-base font-bold">
+            Reply — the user sees it in their Mailbox
+          </label>
+          <textarea
+            id="adm-reply"
+            {...FIELDS.adminReply.body}
+            value={reply}
+            onChange={(e) => setReply(e.target.value)}
+            rows={3}
+            className="mt-2 w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 text-sm outline-none focus:border-[var(--brand)]"
+          />
+          {error && (
+            <p role="alert" className="mt-2 text-sm font-medium text-red-600 dark:text-red-400">{error}</p>
+          )}
+          <button type="submit" disabled={send.isPending} className="mt-3 flex items-center gap-2 rounded-full bg-[var(--brand)] px-6 py-2.5 font-display text-sm font-bold text-white disabled:opacity-60">
+            {Icons.send("h-4 w-4")} {send.isPending ? "Sending…" : "Send reply"}
+          </button>
+        </form>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <h1 className="font-display text-2xl font-extrabold">Inbox</h1>
+      <p className="mt-1 text-sm text-[var(--dim)]">Help messages from users. Open one to reply — replies land in the user's Mailbox.</p>
+      {threads.isPending ? (
+        <p className="mt-4 text-sm text-[var(--dim)]">Loading…</p>
+      ) : threads.data && threads.data.threads.length > 0 ? (
+        <ul className="mt-4 divide-y divide-[var(--border)] rounded-2xl bg-[var(--surface)] px-4 ring-1 ring-[var(--border)]">
+          {threads.data.threads.map((t) => (
+            <li key={t.userId}>
+              <button type="button" onClick={() => setOpenUserId(t.userId)} className="flex w-full items-center gap-3 py-4 text-left">
+                <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[var(--avatar)] font-display font-extrabold text-white">
+                  {t.userName.charAt(0).toUpperCase()}
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="flex items-center gap-2 font-display text-sm font-bold">
+                    {t.userName}
+                    {t.unread > 0 && (
+                      <span className="rounded-full bg-[var(--gold)] px-2 py-0.5 text-xs font-bold text-[var(--ink)]">{t.unread} new</span>
+                    )}
+                  </span>
+                  <span className="block truncate text-sm text-[var(--dim)]">{t.lastBody}</span>
+                </span>
+                <span className="shrink-0 text-xs text-[var(--dim)]">{fmtDateTime(t.lastAt)}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="mt-6 rounded-2xl border-2 border-dashed border-[var(--border)] bg-[var(--surface)] px-5 py-10 text-center text-sm text-[var(--dim)]">
+          No messages yet. User help requests will appear here.
+        </p>
+      )}
+    </div>
+  );
+}
+
+// --------------------------------------------------------- challenge stats
+
+function StatsTab({ token }: { token: string }) {
+  const stats = useQuery({
+    queryKey: ["admin-user-stats", token],
+    queryFn: () => api.adminGetUserStats({ adminToken: token, limit: 200 }),
+  });
+  const totals = stats.data?.totals;
+  return (
+    <div>
+      <h1 className="font-display text-2xl font-extrabold">Challenge stats</h1>
+      <p className="mt-1 max-w-2xl text-sm leading-relaxed text-[var(--dim)]">
+        Per user: how many challenges and surveys each person has completed
+        (counted from credited partner postbacks — survey networks count as
+        surveys, everything else as challenges), their check-ins and how much
+        they have earned in total.
+      </p>
+      {totals && (
+        <div className="mt-5 grid grid-cols-2 gap-3 lg:grid-cols-5">
+          {[
+            ["Users", String(totals.users)],
+            ["Challenges done", String(totals.challenges)],
+            ["Surveys done", String(totals.surveys)],
+            ["Check-ins", String(totals.checkins)],
+            ["Total earned by users", fmt(totals.earnedCents)],
+          ].map(([label, value]) => (
+            <div key={label} className="rounded-2xl bg-[var(--surface)] p-4 ring-1 ring-[var(--border)]">
+              <p className="font-display text-xl font-extrabold">{value}</p>
+              <p className="mt-0.5 text-xs font-semibold text-[var(--dim)]">{label}</p>
+            </div>
+          ))}
+        </div>
+      )}
+      {stats.isPending ? (
+        <p className="mt-4 text-sm text-[var(--dim)]">Loading…</p>
+      ) : stats.data && stats.data.users.length > 0 ? (
+        <ul className="mt-5 space-y-3">
+          {stats.data.users.map((u, i) => (
+            <li key={u.userId} className="rounded-2xl bg-[var(--surface)] p-4 ring-1 ring-[var(--border)] sm:p-5">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <p className="font-display font-bold">
+                    <span className="text-[var(--dim)]">#{i + 1}</span> {u.flagEmoji ?? "🌍"} {u.name}{" "}
+                    <span className="font-normal text-[var(--dim)]">({u.userCode})</span>
+                  </p>
+                  <p className="break-all text-sm text-[var(--dim)]">{u.email} · {u.countryName ?? "—"}</p>
+                </div>
+                <div className="text-right">
+                  <p className="font-display text-lg font-extrabold text-[var(--brand)]">{fmt(u.totalEarnedCents)}</p>
+                  <p className="text-xs text-[var(--dim)]">total earned · balance {fmt(u.balanceCents)}</p>
+                </div>
+              </div>
+              <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs sm:grid-cols-3 lg:grid-cols-6">
+                {[
+                  ["Challenges completed", String(u.challengesCompleted)],
+                  ["Surveys completed", String(u.surveysCompleted)],
+                  ["All offers completed", String(u.offersCompleted)],
+                  ["Check-ins", `${u.checkins} (${fmt(u.checkinCents)})`],
+                  ["Contest prizes won", fmt(u.contestPrizeCents)],
+                  ["Referrals", String(u.referrals)],
+                ].map(([k, v]) => (
+                  <div key={k}>
+                    <dt className="font-semibold uppercase tracking-wide text-[var(--dim)]">{k}</dt>
+                    <dd className="mt-0.5 font-display text-base font-extrabold">{v}</dd>
+                  </div>
+                ))}
+              </dl>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="mt-6 rounded-2xl border-2 border-dashed border-[var(--border)] bg-[var(--surface)] px-5 py-10 text-center text-sm text-[var(--dim)]">
+          No users yet — stats appear here as people join and complete
+          challenges and surveys.
+        </p>
+      )}
+    </div>
+  );
+}
+
+// ------------------------------------------------------------ countries
+
+const COMMON_COUNTRIES: { code: string; name: string; flag: string }[] = [
+  { code: "PK", name: "Pakistan", flag: "🇵🇰" },
+  { code: "IN", name: "India", flag: "🇮🇳" },
+  { code: "BD", name: "Bangladesh", flag: "🇧🇩" },
+  { code: "US", name: "United States", flag: "🇺🇸" },
+  { code: "GB", name: "United Kingdom", flag: "🇬🇧" },
+  { code: "AE", name: "United Arab Emirates", flag: "🇦🇪" },
+  { code: "SA", name: "Saudi Arabia", flag: "🇸🇦" },
+  { code: "NG", name: "Nigeria", flag: "🇳🇬" },
+  { code: "PH", name: "Philippines", flag: "🇵🇭" },
+  { code: "ID", name: "Indonesia", flag: "🇮🇩" },
+  { code: "BR", name: "Brazil", flag: "🇧🇷" },
+  { code: "TR", name: "Turkey", flag: "🇹🇷" },
+  { code: "EG", name: "Egypt", flag: "🇪🇬" },
+  { code: "KE", name: "Kenya", flag: "🇰🇪" },
+  { code: "ZA", name: "South Africa", flag: "🇿🇦" },
+  { code: "CA", name: "Canada", flag: "🇨🇦" },
+  { code: "AU", name: "Australia", flag: "🇦🇺" },
+  { code: "DE", name: "Germany", flag: "🇩🇪" },
+  { code: "FR", name: "France", flag: "🇫🇷" },
+  { code: "NP", name: "Nepal", flag: "🇳🇵" },
+  { code: "LK", name: "Sri Lanka", flag: "🇱🇰" },
+  { code: "MM", name: "Myanmar", flag: "🇲🇲" },
+  { code: "VN", name: "Vietnam", flag: "🇻🇳" },
+  { code: "MX", name: "Mexico", flag: "🇲🇽" },
+];
+
+function CountriesTab({ token }: { token: string }) {
+  const queryClient = useQueryClient();
+  const [code, setCode] = useState("");
+  const [name, setName] = useState("");
+  const [flag, setFlag] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [okMsg, setOkMsg] = useState<string | null>(null);
+  const [confirmCode, setConfirmCode] = useState<string | null>(null);
+
+  const list = useQuery({
+    queryKey: ["admin-banned-countries", token],
+    queryFn: () => api.adminListBannedCountries({ adminToken: token }),
+  });
+
+  const refresh = () => {
+    void queryClient.invalidateQueries({ queryKey: ["admin-banned-countries", token] });
+    void queryClient.invalidateQueries({ queryKey: ["admin-overview", token] });
+  };
+
+  const ban = useMutation({
+    mutationFn: async (input: { countryCode: string; countryName: string; flagEmoji?: string }) =>
+      api.adminBanCountry({ adminToken: token, ...input }),
+    onSuccess: (_r, input) => {
+      setOkMsg(`${input.countryName || input.countryCode} is now banned — no new account can be created from there.`);
+      setConfirmCode(null);
+      setCode("");
+      setName("");
+      setFlag("");
+      refresh();
+    },
+    onError: (e) => setError(e.message),
+  });
+
+  const unban = useMutation({
+    mutationFn: async (countryCode: string) =>
+      api.adminUnbanCountry({ adminToken: token, countryCode }),
+    onSuccess: (_r, countryCode) => {
+      setOkMsg(`${countryCode} is unbanned — signups from there work again right away.`);
+      setConfirmCode(null);
+      refresh();
+    },
+    onError: (e) => setError(e.message),
+  });
+
+  const banned = list.data?.banned ?? [];
+  const known = list.data?.knownCountries ?? [];
+  const bannedCodes = new Set(banned.map((b) => b.countryCode.toUpperCase()));
+  const fieldCls =
+    "mt-1 w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 text-sm outline-none focus:border-[var(--brand)]";
+
+  return (
+    <div>
+      <h1 className="font-display text-2xl font-extrabold">Countries — ban / unban</h1>
+      <p className="mt-1 max-w-2xl text-sm leading-relaxed text-[var(--dim)]">
+        Banning a country stops <strong className="text-[var(--text)]">new account creation</strong> from
+        that country completely — anyone signing up from a banned country&apos;s IP sees a clear
+        message and no account is made. Existing accounts are not deleted. Unbanning lets
+        signups from that country through again immediately. The list is stored on the
+        server, so it applies to every visitor.
+      </p>
+      {error && (
+        <p role="alert" className="mt-3 text-sm font-medium text-red-600 dark:text-red-400">{error}</p>
+      )}
+      {okMsg && (
+        <p role="status" className="mt-3 text-sm font-medium text-[var(--brand-deep)] dark:text-[var(--brand)]">{okMsg}</p>
+      )}
+
+      {/* currently banned */}
+      <section className="mt-5" aria-label="Banned countries">
+        <h2 className="font-display text-lg font-bold">Banned right now ({banned.length})</h2>
+        {list.isPending ? (
+          <p className="mt-3 text-sm text-[var(--dim)]">Loading…</p>
+        ) : banned.length > 0 ? (
+          <ul className="mt-3 space-y-2.5">
+            {banned.map((b) => (
+              <li key={b.id} className="flex flex-wrap items-center gap-3 rounded-2xl bg-[var(--surface)] p-4 ring-1 ring-red-300 dark:ring-red-900">
+                <span className="text-2xl" aria-hidden="true">{b.flagEmoji ?? "🌍"}</span>
+                <span className="min-w-0 flex-1">
+                  <span className="block font-display font-bold">{b.countryName} ({b.countryCode})</span>
+                  <span className="block text-xs text-[var(--dim)]">Banned since {fmtDate(b.createdAt)} · No new signups from here</span>
+                </span>
+                {confirmCode === `unban-${b.countryCode}` ? (
+                  <span className="flex gap-2">
+                    <button type="button" disabled={unban.isPending} onClick={() => { setError(null); unban.mutate(b.countryCode); }} className="rounded-full bg-[var(--brand)] px-4 py-2 text-sm font-bold text-white disabled:opacity-60">
+                      Confirm unban
+                    </button>
+                    <button type="button" onClick={() => setConfirmCode(null)} className="rounded-full bg-[var(--surface-2)] px-4 py-2 text-sm font-bold">Keep banned</button>
+                  </span>
+                ) : (
+                  <button type="button" onClick={() => setConfirmCode(`unban-${b.countryCode}`)} className="rounded-full bg-[var(--brand)]/15 px-4 py-2 text-sm font-bold text-[var(--brand-deep)] dark:text-[var(--brand)]">
+                    Unban country
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="mt-3 rounded-2xl border-2 border-dashed border-[var(--border)] bg-[var(--surface)] px-5 py-8 text-center text-sm text-[var(--dim)]">
+            No country is banned. Signups are open worldwide (except VPN connections).
+          </p>
+        )}
+      </section>
+
+      {/* countries seen from users */}
+      {known.length > 0 && (
+        <section className="mt-6" aria-label="Countries from your users">
+          <h2 className="font-display text-lg font-bold">Countries your users come from</h2>
+          <ul className="mt-3 space-y-2.5">
+            {known.map((k) => (
+              <li key={k.countryCode} className="flex flex-wrap items-center gap-3 rounded-2xl bg-[var(--surface)] p-4 ring-1 ring-[var(--border)]">
+                <span className="text-2xl" aria-hidden="true">{k.flagEmoji ?? "🌍"}</span>
+                <span className="min-w-0 flex-1">
+                  <span className="block font-display font-bold">
+                    {k.countryName} ({k.countryCode})
+                    {k.banned && <span className="ml-2 rounded-full bg-red-500/10 px-2 py-0.5 text-xs font-bold text-red-600 dark:text-red-400">BANNED</span>}
+                  </span>
+                  <span className="block text-xs text-[var(--dim)]">{k.userCount} existing account{k.userCount === 1 ? "" : "s"}</span>
+                </span>
+                {k.banned ? (
+                  <button type="button" disabled={unban.isPending} onClick={() => { setError(null); unban.mutate(k.countryCode); }} className="rounded-full bg-[var(--brand)]/15 px-4 py-2 text-sm font-bold text-[var(--brand-deep)] disabled:opacity-60 dark:text-[var(--brand)]">
+                    Unban
+                  </button>
+                ) : confirmCode === `ban-${k.countryCode}` ? (
+                  <span className="flex gap-2">
+                    <button type="button" disabled={ban.isPending} onClick={() => { setError(null); ban.mutate({ countryCode: k.countryCode, countryName: k.countryName, flagEmoji: k.flagEmoji ?? undefined }); }} className="rounded-full bg-red-600 px-4 py-2 text-sm font-bold text-white disabled:opacity-60">Confirm ban</button>
+                    <button type="button" onClick={() => setConfirmCode(null)} className="rounded-full bg-[var(--surface-2)] px-4 py-2 text-sm font-bold">Cancel</button>
+                  </span>
+                ) : (
+                  <button type="button" onClick={() => setConfirmCode(`ban-${k.countryCode}`)} className="flex items-center gap-1.5 rounded-full bg-red-500/10 px-4 py-2 text-sm font-bold text-red-600 dark:text-red-400">
+                    {Icons.ban("h-4 w-4")} Ban country
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {/* quick ban list */}
+      <section className="mt-6" aria-label="Ban a country">
+        <h2 className="font-display text-lg font-bold">Ban a country</h2>
+        <p className="mt-1 text-sm text-[var(--dim)]">Tap a country to ban it, or enter any country below.</p>
+        <div className="mt-3 flex flex-wrap gap-2">
+          {COMMON_COUNTRIES.filter((c) => !bannedCodes.has(c.code)).map((c) => (
+            <button
+              key={c.code}
+              type="button"
+              disabled={ban.isPending}
+              onClick={() => { setError(null); setOkMsg(null); ban.mutate({ countryCode: c.code, countryName: c.name, flagEmoji: c.flag }); }}
+              className="rounded-full bg-[var(--surface)] px-3.5 py-2 text-sm font-bold ring-1 ring-[var(--border)] transition hover:ring-red-400 disabled:opacity-60"
+            >
+              {c.flag} {c.name}
+            </button>
+          ))}
+        </div>
+        <form
+          className="mt-4 grid gap-3 rounded-3xl bg-[var(--surface)] p-5 ring-1 ring-[var(--border)] sm:grid-cols-3"
+          onSubmit={(e) => {
+            e.preventDefault();
+            setError(null);
+            setOkMsg(null);
+            const cc = code.trim().toUpperCase();
+            if (cc.length !== 2) {
+              setError("Country code must be exactly 2 letters, e.g. PK, IN, US, GB.");
+              return;
+            }
+            if (!name.trim()) {
+              setError("Please enter the country name.");
+              return;
+            }
+            ban.mutate({ countryCode: cc, countryName: name.trim(), flagEmoji: flag.trim() || undefined });
+          }}
+        >
+          <div>
+            <label htmlFor="ban-code" className="text-sm font-semibold">Country code</label>
+            <input id="ban-code" {...FIELDS.adminBanCountry.countryCode} value={code} onChange={(e) => setCode(e.target.value.toUpperCase())} placeholder="e.g. PK" className={fieldCls} />
+          </div>
+          <div>
+            <label htmlFor="ban-name" className="text-sm font-semibold">Country name</label>
+            <input id="ban-name" {...FIELDS.adminBanCountry.countryName} value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Pakistan" className={fieldCls} />
+          </div>
+          <div>
+            <label htmlFor="ban-flag" className="text-sm font-semibold">Flag emoji <span className="font-normal text-[var(--dim)]">(optional)</span></label>
+            <input id="ban-flag" {...FIELDS.adminBanCountry.flagEmoji} value={flag} onChange={(e) => setFlag(e.target.value)} placeholder="🇵🇰" className={fieldCls} />
+          </div>
+          <button type="submit" disabled={ban.isPending} className="flex items-center justify-center gap-1.5 rounded-full bg-red-600 px-5 py-2.5 text-sm font-bold text-white disabled:opacity-60 sm:col-span-3 sm:w-fit">
+            {Icons.ban("h-4 w-4")} {ban.isPending ? "Banning…" : "Ban this country"}
+          </button>
+        </form>
+      </section>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------- notifications
+
+function NotificationsTab({ token }: { token: string }) {
+  const queryClient = useQueryClient();
+  const [error, setError] = useState<string | null>(null);
+  const list = useQuery({
+    queryKey: ["admin-notifications", token],
+    queryFn: () => api.adminListNotifications({ adminToken: token, limit: 100 }),
+  });
+  const mark = useMutation({
+    mutationFn: async (notificationId?: number) =>
+      api.adminMarkNotificationsRead({ adminToken: token, notificationId }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["admin-notifications", token] });
+      void queryClient.invalidateQueries({ queryKey: ["admin-overview", token] });
+    },
+    onError: (e) => setError(e.message),
+  });
+
+  return (
+    <div>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h1 className="font-display text-2xl font-extrabold">Notifications</h1>
+        {list.data && list.data.unreadCount > 0 && (
+          <button type="button" disabled={mark.isPending} onClick={() => { setError(null); mark.mutate(undefined); }} className="rounded-full bg-[var(--surface)] px-4 py-2 text-sm font-bold ring-1 ring-[var(--border)] disabled:opacity-60">
+            Mark all as read ({list.data.unreadCount} new)
+          </button>
+        )}
+      </div>
+      <p className="mt-1 text-sm text-[var(--dim)]">
+        Every new registration lands here the moment the account is created — with the
+        user&apos;s name, email, country, flag and IP address.
+      </p>
+      {error && (
+        <p role="alert" className="mt-3 text-sm font-medium text-red-600 dark:text-red-400">{error}</p>
+      )}
+      {list.isPending ? (
+        <p className="mt-4 text-sm text-[var(--dim)]">Loading…</p>
+      ) : list.data && list.data.notifications.length > 0 ? (
+        <ul className="mt-4 space-y-3">
+          {list.data.notifications.map((n) => (
+            <li key={n.id} className={`rounded-2xl bg-[var(--surface)] p-4 ring-1 sm:p-5 ${n.read ? "ring-[var(--border)]" : "ring-[var(--gold)]"}`}>
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[var(--avatar)] font-display text-lg font-extrabold text-white">
+                    {n.userName.charAt(0).toUpperCase() || "?"}
+                  </span>
+                  <div className="min-w-0">
+                    <p className="font-display font-bold">
+                      New registration — {n.userName}{" "}
+                      {!n.read && <span className="ml-1 rounded-full bg-[var(--gold)] px-2 py-0.5 text-xs font-bold text-[var(--ink)]">NEW</span>}
+                    </p>
+                    <p className="break-all text-sm text-[var(--dim)]">{n.userEmail}</p>
+                  </div>
+                </div>
+                {!n.read && (
+                  <button type="button" disabled={mark.isPending} onClick={() => { setError(null); mark.mutate(n.id); }} className="rounded-full bg-[var(--surface-2)] px-4 py-2 text-sm font-bold disabled:opacity-60">
+                    Mark read
+                  </button>
+                )}
+              </div>
+              <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs sm:grid-cols-4">
+                {[
+                  ["User ID", n.userCode || "—"],
+                  ["Country", `${n.flagEmoji ?? "🌍"} ${n.countryName ?? "—"}${n.countryCode ? ` (${n.countryCode})` : ""}`],
+                  ["IP address", n.ip ?? "—"],
+                  ["Registered", fmtDateTime(n.createdAt)],
+                ].map(([k, v]) => (
+                  <div key={k}>
+                    <dt className="font-semibold uppercase tracking-wide text-[var(--dim)]">{k}</dt>
+                    <dd className="mt-0.5 break-all font-semibold">{v}</dd>
+                  </div>
+                ))}
+              </dl>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="mt-6 rounded-2xl border-2 border-dashed border-[var(--border)] bg-[var(--surface)] px-5 py-10 text-center text-sm text-[var(--dim)]">
+          No registrations yet. As soon as someone creates an account, their details
+          will appear here.
+        </p>
+      )}
+    </div>
+  );
+}
+
+// -------------------------------------------------------------- postbacks
+
+function PostbacksTab({ token }: { token: string }) {
+  const list = useQuery({
+    queryKey: ["admin-postbacks", token],
+    queryFn: () => api.adminListPostbacks({ adminToken: token, limit: 100 }),
+  });
+  return (
+    <div>
+      <h1 className="font-display text-2xl font-extrabold">Postbacks</h1>
+      <p className="mt-1 text-sm text-[var(--dim)]">
+        Every conversion partners send. Credited = 70% of the payout, paid to the user.
+      </p>
+      {list.isPending ? (
+        <p className="mt-4 text-sm text-[var(--dim)]">Loading…</p>
+      ) : list.data && list.data.postbacks.length > 0 ? (
+        <ul className="mt-4 space-y-2.5">
+          {list.data.postbacks.map((p) => (
+            <li key={p.id} className="flex flex-wrap items-center justify-between gap-2 rounded-2xl bg-[var(--surface)] px-4 py-3.5 ring-1 ring-[var(--border)]">
+              <div className="min-w-0">
+                <p className="truncate text-sm font-bold">
+                  {p.network || "Partner"} · <span className="font-mono font-semibold">{p.txnId}</span>
+                </p>
+                <p className="text-xs text-[var(--dim)]">
+                  User {p.userCode ?? "unknown"} · {fmtDateTime(p.createdAt)}
+                </p>
+              </div>
+              <div className="text-right">
+                <p className="font-display text-sm font-bold">
+                  payout ${p.payout.toFixed(2)} → credited {fmt(p.creditedCents)}
+                </p>
+                <p className={`text-xs font-bold ${p.status === "credited" ? "text-[var(--brand-deep)] dark:text-[var(--brand)]" : "text-[#9a6200] dark:text-[var(--gold)]"}`}>
+                  {p.status}
+                </p>
+              </div>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="mt-6 rounded-2xl border-2 border-dashed border-[var(--border)] bg-[var(--surface)] px-5 py-10 text-center text-sm text-[var(--dim)]">
+          No postbacks received yet. They will appear here when a partner sends a conversion.
+        </p>
+      )}
+    </div>
+  );
+}
+
+// --------------------------------------------------------------- settings
+
+function SettingsTab({ token }: { token: string }) {
+  const queryClient = useQueryClient();
+  const overview = useQuery({
+    queryKey: ["admin-overview", token],
+    queryFn: () => api.adminGetOverview({ adminToken: token }),
+  });
+  const s = overview.data?.settings;
+
+  const [googleClientId, setGoogleClientId] = useState("");
+  const [dailyPool, setDailyPool] = useState("");
+  const [affiliatePool, setAffiliatePool] = useState("");
+  const [minWithdraw, setMinWithdraw] = useState("");
+  const [userSharePct, setUserSharePct] = useState("");
+  const [affiliateEarningPct, setAffiliateEarningPct] = useState("");
+  const [affiliateSpendingPct, setAffiliateSpendingPct] = useState("");
+  const [postbackSecret, setPostbackSecret] = useState("");
+  const [social, setSocial] = useState<Record<string, string>>({});
+  const [adminUsername, setAdminUsername] = useState("");
+  const [adminPassword, setAdminPassword] = useState("");
+  const [loginMsg, setLoginMsg] = useState<string | null>(null);
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [hydrated, setHydrated] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [okMsg, setOkMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (s && !hydrated) {
+      setGoogleClientId(s.googleClientId);
+      setDailyPool((s.dailyPoolCents / 100).toFixed(2));
+      setAffiliatePool((s.affiliatePoolCents / 100).toFixed(2));
+      setMinWithdraw((s.minWithdrawCents / 100).toFixed(2));
+      setUserSharePct(String(s.userSharePct));
+      setAffiliateEarningPct(String(s.affiliateEarningPct));
+      setAffiliateSpendingPct(String(s.affiliateSpendingPct));
+      setAdminUsername(s.adminUsername);
+      setSocial(s.socialLinks ?? {});
+      setHydrated(true);
+    }
+  }, [s, hydrated]);
+
+  const save = useMutation({
+    mutationFn: async () => {
+      const dailyPoolCents = toCents(dailyPool);
+      const affiliatePoolCents = toCents(affiliatePool);
+      const minWithdrawCents = toCents(minWithdraw);
+      if (dailyPoolCents === null || affiliatePoolCents === null || minWithdrawCents === null)
+        throw new Error("Pool and minimum amounts must be valid dollar amounts.");
+      const pct = (raw: string, label: string) => {
+        const n = Number.parseInt(raw, 10);
+        if (!Number.isFinite(n) || n < 0 || n > 100)
+          throw new Error(`${label} must be between 0 and 100.`);
+        return n;
+      };
+      return api.adminUpdateSettings({
+        adminToken: token,
+        googleClientId: googleClientId.trim(),
+        dailyPoolCents,
+        affiliatePoolCents,
+        minWithdrawCents,
+        userSharePct: pct(userSharePct, "User share"),
+        affiliateEarningPct: pct(affiliateEarningPct, "Affiliate earning commission"),
+        affiliateSpendingPct: pct(affiliateSpendingPct, "Affiliate spending commission"),
+        postbackSecret: postbackSecret.trim() === "" ? undefined : postbackSecret.trim(),
+        socialDiscord: (social["discord"] ?? "").trim(),
+        socialYoutube: (social["youtube"] ?? "").trim(),
+        socialTiktok: (social["tiktok"] ?? "").trim(),
+        socialTwitter: (social["twitter"] ?? "").trim(),
+        socialFacebook: (social["facebook"] ?? "").trim(),
+        socialInstagram: (social["instagram"] ?? "").trim(),
+        socialTelegram: (social["telegram"] ?? "").trim(),
+        adminUsername: adminUsername.trim() || undefined,
+        adminPassword: adminPassword === "" ? undefined : adminPassword,
+      });
+    },
+    onSuccess: () => {
+      setOkMsg("Settings saved — they apply across the whole site right away.");
+      setPostbackSecret("");
+      setAdminPassword("");
+      void queryClient.invalidateQueries({ queryKey: ["admin-overview", token] });
+      void queryClient.invalidateQueries({ queryKey: ["public-home"] });
+    },
+    onError: (e) => setError(e.message),
+  });
+
+  // Dedicated save for the Admin login section ONLY: writes the new
+  // username/password to the server settings, where adminLogin checks
+  // them — so after saving, the old credentials stop working and the
+  // next admin login works only with the new ones. The current admin
+  // session stays signed in.
+  const saveLogin = useMutation({
+    mutationFn: async () => {
+      const u = adminUsername.trim();
+      if (u.length < 3)
+        throw new Error("Admin username must be at least 3 characters.");
+      if (adminPassword !== "" && adminPassword.length < 6)
+        throw new Error(
+          "New admin password must be at least 6 characters — or leave it blank to keep the current password.",
+        );
+      return api.adminUpdateSettings({
+        adminToken: token,
+        adminUsername: u,
+        adminPassword: adminPassword === "" ? undefined : adminPassword,
+      });
+    },
+    onSuccess: () => {
+      setLoginError(null);
+      setLoginMsg(
+        "Admin login saved on the server. Next time, sign in with the new username and password — the old ones no longer work.",
+      );
+      setAdminPassword("");
+      void queryClient.invalidateQueries({ queryKey: ["admin-overview", token] });
+    },
+    onError: (e) => {
+      setLoginMsg(null);
+      setLoginError(e.message);
+    },
+  });
+
+  const fieldCls =
+    "mt-1 w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 text-sm outline-none focus:border-[var(--brand)]";
+
+  if (overview.isPending) return <p className="text-sm text-[var(--dim)]">Loading…</p>;
+
+  return (
+    <div>
+      <h1 className="font-display text-2xl font-extrabold">Settings</h1>
+      {error && (
+        <p role="alert" className="mt-3 text-sm font-medium text-red-600 dark:text-red-400">{error}</p>
+      )}
+      {okMsg && (
+        <p role="status" className="mt-3 text-sm font-medium text-[var(--brand-deep)] dark:text-[var(--brand)]">{okMsg}</p>
+      )}
+      <form
+        className="mt-5 space-y-6"
+        onSubmit={(e) => {
+          e.preventDefault();
+          setError(null);
+          setOkMsg(null);
+          save.mutate();
+        }}
+      >
+        <section className="rounded-3xl bg-[var(--surface)] p-5 ring-1 ring-[var(--border)] sm:p-6">
+          <h2 className="font-display text-lg font-bold">Google sign-in</h2>
+          <div className="mt-3">
+            <label htmlFor="set-gcid" className="text-sm font-semibold">Google OAuth Client ID</label>
+            <input id="set-gcid" {...FIELDS.adminUpdateSettings.googleClientId} value={googleClientId} onChange={(e) => setGoogleClientId(e.target.value)} className={fieldCls} />
+            <p className="mt-1.5 text-xs leading-relaxed text-[var(--dim)]">
+              Project TapOne (tapone-515305). Sign-in verifies against this ID, and Google
+              only allows it from web addresses approved in Google Cloud Console.
+            </p>
+            <div className="mt-3 rounded-xl bg-[var(--surface-2)] p-3 ring-1 ring-[var(--border)]">
+              <p className="text-xs font-semibold">
+                This version's address — add it in Google Cloud Console → Credentials → the
+                TapOne OAuth client, or Google refuses sign-in here:
+              </p>
+              <p className="mt-2 text-xs text-[var(--dim)]">Authorized JavaScript origins:</p>
+              <p className="mt-0.5 select-all break-all font-mono text-xs">{getSiteOrigin()}</p>
+              <p className="mt-2 text-xs text-[var(--dim)]">Authorized redirect URIs (for the full-page sign-in):</p>
+              <p className="mt-0.5 select-all break-all font-mono text-xs">{getGoogleRedirectUri()}</p>
+              <p className="mt-2 text-xs leading-relaxed text-[var(--dim)]">
+                https://tapone.store is already approved. The test version runs on the
+                address above, so its Google button stays empty until this address is
+                added too. While the OAuth app is in Testing mode, the Google account
+                must also be listed under Test users in the consent screen.
+              </p>
+            </div>
+          </div>
+        </section>
+
+        <section className="rounded-3xl bg-[var(--surface)] p-5 ring-1 ring-[var(--border)] sm:p-6">
+          <h2 className="font-display text-lg font-bold">Social links — shown in the footer to all users</h2>
+          <p className="mt-1 text-sm leading-relaxed text-[var(--dim)]">
+            Paste the full link for each page and press “Save settings” at the
+            bottom. Saved links are stored in the database and appear in the
+            footer of the homepage and the dashboard for every user right
+            away. Leave a field blank to hide that platform.
+          </p>
+          <div className="mt-3 grid gap-4 sm:grid-cols-2">
+            {(
+              [
+                ["youtube", "YouTube", "socialYoutube"],
+                ["tiktok", "TikTok", "socialTiktok"],
+                ["facebook", "Facebook", "socialFacebook"],
+                ["discord", "Discord", "socialDiscord"],
+                ["twitter", "X (Twitter)", "socialTwitter"],
+                ["telegram", "Telegram", "socialTelegram"],
+                ["instagram", "Instagram", "socialInstagram"],
+              ] as const
+            ).map(([id, label, field]) => (
+              <div key={id}>
+                <label htmlFor={`set-${id}`} className="text-sm font-semibold">{label} link</label>
+                <input
+                  id={`set-${id}`}
+                  {...FIELDS.adminUpdateSettings[field]}
+                  value={social[id] ?? ""}
+                  onChange={(e) => setSocial((prev) => ({ ...prev, [id]: e.target.value }))}
+                  placeholder={`https://… your ${label} page`}
+                  inputMode="url"
+                  className={fieldCls}
+                />
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section className="rounded-3xl bg-[var(--surface)] p-5 ring-1 ring-[var(--border)] sm:p-6">
+          <h2 className="font-display text-lg font-bold">Money</h2>
+          <div className="mt-3 grid gap-4 sm:grid-cols-3">
+            <div>
+              <label htmlFor="set-daily" className="text-sm font-semibold">Daily contest pool ($)</label>
+              <input id="set-daily" value={dailyPool} onChange={(e) => setDailyPool(e.target.value)} inputMode="decimal" className={fieldCls} />
+            </div>
+            <div>
+              <label htmlFor="set-aff" className="text-sm font-semibold">Affiliate contest pool ($)</label>
+              <input id="set-aff" value={affiliatePool} onChange={(e) => setAffiliatePool(e.target.value)} inputMode="decimal" className={fieldCls} />
+            </div>
+            <div>
+              <label htmlFor="set-min" className="text-sm font-semibold">Minimum withdrawal ($)</label>
+              <input id="set-min" value={minWithdraw} onChange={(e) => setMinWithdraw(e.target.value)} inputMode="decimal" className={fieldCls} />
+            </div>
+            <div>
+              <p className="text-sm font-semibold">Weekly check-in</p>
+              <p className="mt-1 text-xs leading-relaxed text-[var(--dim)]">
+                Fixed schedule, not set here: a day completes automatically
+                when the user earns $1 that day (offers, surveys or invite
+                commissions). Each calendar day pays its own amount —
+                Monday $0.20, Tuesday $0.25, Wednesday $0.30, Thursday
+                $0.40, Friday $0.50, Saturday $0.65, Sunday $0.70 ($3.00
+                per week in total). A missed day loses only that day;
+                the next day still pays its own full amount.
+              </p>
+            </div>
+
+            <div>
+              <label htmlFor="set-share" className="text-sm font-semibold">User share of payouts (%)</label>
+              <input id="set-share" {...FIELDS.adminUpdateSettings.userSharePct} value={userSharePct} onChange={(e) => setUserSharePct(e.target.value)} inputMode="numeric" className={fieldCls} />
+            </div>
+            <div>
+              <label htmlFor="set-aep" className="text-sm font-semibold">Affiliate earning commission (%)</label>
+              <input id="set-aep" {...FIELDS.adminUpdateSettings.affiliateEarningPct} value={affiliateEarningPct} onChange={(e) => setAffiliateEarningPct(e.target.value)} inputMode="numeric" className={fieldCls} />
+            </div>
+            <div>
+              <label htmlFor="set-asp" className="text-sm font-semibold">Affiliate spending commission (%)</label>
+              <input id="set-asp" {...FIELDS.adminUpdateSettings.affiliateSpendingPct} value={affiliateSpendingPct} onChange={(e) => setAffiliateSpendingPct(e.target.value)} inputMode="numeric" className={fieldCls} />
+            </div>
+          </div>
+        </section>
+
+        <section className="rounded-3xl bg-[var(--surface)] p-5 ring-1 ring-[var(--border)] sm:p-6">
+          <h2 className="font-display text-lg font-bold">Postback security</h2>
+          <div className="mt-3">
+            <label htmlFor="set-secret" className="text-sm font-semibold">
+              Postback secret {s?.postbackSecretSet ? <span className="text-[var(--brand-deep)] dark:text-[var(--brand)]">(currently set)</span> : <span className="text-[var(--dim)]">(not set — postbacks are open)</span>}
+            </label>
+            <input id="set-secret" {...FIELDS.adminUpdateSettings.postbackSecret} value={postbackSecret} onChange={(e) => setPostbackSecret(e.target.value)} placeholder="Type a new secret to change it" className={fieldCls} />
+          </div>
+        </section>
+
+        <section className="rounded-3xl bg-[var(--surface)] p-5 ring-1 ring-[var(--border)] sm:p-6">
+          <h2 className="font-display text-lg font-bold">Admin login — change username &amp; password</h2>
+          <p className="mt-1.5 text-sm leading-relaxed text-[var(--dim)]">
+            Change the username and password for this admin panel. The
+            change is saved on the server: after saving, the old username
+            and password stop working, and the next admin login works only
+            with the new ones. You stay signed in here.
+          </p>
+          <div className="mt-3 grid gap-4 sm:grid-cols-2">
+            <div>
+              <label htmlFor="set-admuser" className="text-sm font-semibold">Admin username</label>
+              <input id="set-admuser" {...FIELDS.adminUpdateSettings.adminUsername} value={adminUsername} onChange={(e) => setAdminUsername(e.target.value)} className={fieldCls} />
+            </div>
+            <div>
+              <label htmlFor="set-admpass" className="text-sm font-semibold">New admin password <span className="font-normal text-[var(--dim)]">(blank = keep current)</span></label>
+              <input id="set-admpass" type="password" {...FIELDS.adminUpdateSettings.adminPassword} value={adminPassword} onChange={(e) => setAdminPassword(e.target.value)} className={fieldCls} />
+            </div>
+          </div>
+          {loginError && (
+            <p role="alert" className="mt-3 text-sm font-medium text-red-600 dark:text-red-400">{loginError}</p>
+          )}
+          {loginMsg && (
+            <p role="status" className="mt-3 text-sm font-medium text-[var(--brand-deep)] dark:text-[var(--brand)]">{loginMsg}</p>
+          )}
+          <button
+            type="button"
+            disabled={saveLogin.isPending}
+            onClick={() => { setLoginMsg(null); setLoginError(null); saveLogin.mutate(); }}
+            className="mt-4 rounded-full bg-[var(--brand)] px-6 py-2.5 font-display text-sm font-bold text-white transition hover:bg-[var(--brand-deep)] disabled:opacity-60"
+          >
+            {saveLogin.isPending ? "Saving…" : "Save admin login"}
+          </button>
+        </section>
+
+        <button type="submit" disabled={save.isPending} className="rounded-full bg-[var(--brand)] px-8 py-3 font-display text-base font-bold text-white transition hover:bg-[var(--brand-deep)] disabled:opacity-60">
+          {save.isPending ? "Saving…" : "Save settings"}
+        </button>
+      </form>
+    </div>
+  );
+}

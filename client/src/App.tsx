@@ -1,0 +1,1058 @@
+import { useEffect, useRef, useState } from "react";
+import { useMutation, useQuery } from "@tanstack/react-query";
+import { SafeAreaTopScrim } from "@hatch/space-sdk/client";
+import { actionFields } from "@hatch/space-sdk/fields" with { type: "macro" };
+import { api, type ApiResponse } from "./api";
+import type { Actions } from "../../server/src/actions";
+import {
+Icons,
+captureReferralCode,
+clearReferralCode,
+applyThemeMode,
+consumeGoogleRedirectResult,
+detectNetworkClient,
+getGoogleRedirectUri,
+getSiteOrigin,
+getThemeMode,
+isAuthError,
+fmt,
+getSessionToken,
+loadGoogleIdentity,
+renderGoogleButton,
+setSessionToken,
+startGoogleRedirectSignIn,
+type NetworkInfo,
+} from "./lib";
+import { Dashboard, type DashboardTab } from "./Dashboard";
+import { Admin } from "./Admin";
+import squirrelMascot from "./assets/squirrel-mascot.png";
+
+const FIELDS = actionFields<typeof Actions>();
+
+type HomeData = ApiResponse<typeof api, "getPublicHome">;
+type ContentItem = HomeData["featuredGames"][number];
+
+export type StaticPage = "about" | "privacy" | "terms" | "contact" | "faq" | "cookies" | "forum" | "testimonials" | "careers";
+
+// ------------------------------------------------------------- sign-in card
+
+export function SignInCard({
+  googleClientId,
+  onSignedIn,
+  compact,
+}: {
+  googleClientId: string;
+  onSignedIn: (token: string) => void;
+  compact?: boolean;
+}) {
+  const [network, setNetwork] = useState<NetworkInfo | null>(null);
+  const [formError, setFormError] = useState<string | null>(null);
+  const [blockedMsg, setBlockedMsg] = useState<string | null>(null);
+  const gisRef = useRef<HTMLDivElement>(null);
+  // The Google button's load state is always visible: "loading" shows a
+  // note, "failed" shows the setup help panel — never a silent empty box.
+  const [gisState, setGisState] = useState<"loading" | "ready" | "failed">("loading");
+  const [gisAttempt, setGisAttempt] = useState(0);
+  const [siteOrigin] = useState(() => getSiteOrigin());
+  const [redirectUri] = useState(() => getGoogleRedirectUri());
+
+  useEffect(() => {
+    let alive = true;
+    void detectNetworkClient().then((info) => {
+      if (alive) setNetwork(info);
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const signIn = useMutation({
+    mutationFn: async (input: { idToken: string }) => {
+      const referralCode = captureReferralCode() ?? undefined;
+      return api.signInWithGoogle({
+        ...input,
+        ip: network?.ip ?? undefined,
+        referralCode,
+      });
+    },
+    onSuccess: (result) => {
+      if (result.status === "ok" && result.token) {
+        setSessionToken(result.token);
+        clearReferralCode();
+        onSignedIn(result.token);
+      } else if (result.status === "vpn_blocked") {
+        setBlockedMsg("vpn");
+      } else if (result.status === "blocked") {
+        setBlockedMsg("blocked");
+      } else if (result.status === "country_banned") {
+        setBlockedMsg("country_banned");
+      }
+    },
+    onError: (error) => setFormError(error.message),
+  });
+
+  // Returning from the full-page Google sign-in: the credential (or an
+  // error) arrives in the URL fragment. Consume it once on mount.
+  useEffect(() => {
+    const result = consumeGoogleRedirectResult();
+    if (result.idToken) {
+      signIn.mutate({ idToken: result.idToken });
+    } else if (result.error) {
+      setGisState("failed");
+      setFormError(
+        result.error === "state_mismatch"
+          ? "Google sign-in could not be verified. Please try again."
+          : `Google refused the sign-in (${result.error}). This test version's address must be approved in Google Cloud Console first — the steps are shown below.`,
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (!googleClientId) return;
+    let cancelled = false;
+    let timer: number | undefined;
+    setGisState("loading");
+    void loadGoogleIdentity(gisAttempt > 0).then((ok) => {
+      if (cancelled) return;
+      if (!ok || !gisRef.current) {
+        setGisState("failed");
+        return;
+      }
+      const rendered = renderGoogleButton(gisRef.current, googleClientId, (idToken) =>
+        signIn.mutate({ idToken }),
+      );
+      if (!rendered) {
+        setGisState("failed");
+        return;
+      }
+      // Google inserts the button iframe asynchronously; if this address
+      // is not an authorized origin it inserts nothing at all. Poll
+      // briefly, then declare failure so the help panel appears instead
+      // of an empty box.
+      let checks = 0;
+      timer = window.setInterval(() => {
+        if (cancelled) {
+          window.clearInterval(timer);
+          return;
+        }
+        checks += 1;
+        if (gisRef.current && gisRef.current.childElementCount > 0) {
+          window.clearInterval(timer);
+          setGisState("ready");
+        } else if (checks >= 10) {
+          window.clearInterval(timer);
+          setGisState("failed");
+        }
+      }, 300);
+    });
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearInterval(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [googleClientId, gisAttempt]);
+
+  const startRedirect = () => {
+    if (!startGoogleRedirectSignIn(googleClientId)) {
+      setFormError("Google sign-in could not be started in this browser. Please try again.");
+    }
+  };
+
+  if (blockedMsg === "vpn" || network?.vpnSuspected) {
+    // VPN = direct ban: NO login path is offered on this screen at all
+    // (no Google button) and the server also refuses to issue any
+    // session to a VPN connection.
+    return (
+      <div className="rounded-2xl border border-red-300 bg-red-50 p-5 text-left dark:border-red-900 dark:bg-red-950/40">
+        <div className="flex items-start gap-3">
+          <span className="text-red-600 dark:text-red-400">{Icons.shield("h-7 w-7")}</span>
+          <div>
+            <p className="font-display text-base font-bold text-red-700 dark:text-red-300">
+              You use VPN
+            </p>
+            <p className="mt-1 text-sm text-red-700/90 dark:text-red-200/90">
+              You use VPN, so entry is not allowed. VPN and proxy
+              connections are banned on TapOne — you cannot log in while
+              using one. Please disconnect your VPN or proxy and try again.
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+  if (blockedMsg === "blocked") {
+    return (
+      <div className="rounded-2xl border border-red-300 bg-red-50 p-5 text-left dark:border-red-900 dark:bg-red-950/40">
+        <p className="font-display text-base font-bold text-red-700 dark:text-red-300">
+          Account blocked
+        </p>
+        <p className="mt-1 text-sm text-red-700/90 dark:text-red-200/90">
+          This account has been blocked. If you think this is a mistake, sign
+          in and contact us from the Help section.
+        </p>
+      </div>
+    );
+  }
+  if (blockedMsg === "country_banned") {
+    // Generic on purpose: no country is ever named or shown to users,
+    // even here — the server enforces the ban without sending which
+    // country it is.
+    return (
+      <div className="rounded-2xl border border-red-300 bg-red-50 p-5 text-left dark:border-red-900 dark:bg-red-950/40">
+        <div className="flex items-start gap-3">
+          <span className="text-red-600 dark:text-red-400">{Icons.ban("h-7 w-7")}</span>
+          <div>
+            <p className="font-display text-base font-bold text-red-700 dark:text-red-300">
+              Signups are not available right now
+            </p>
+            <p className="mt-1 text-sm text-red-700/90 dark:text-red-200/90">
+              New accounts cannot be created from your current connection
+              right now. If you already have an account, please try signing
+              in — this block only stops new signups.
+            </p>
+            <button
+              type="button"
+              onClick={() => setBlockedMsg(null)}
+              className="mt-3 rounded-full bg-red-600 px-4 py-2 text-sm font-bold text-white"
+            >
+              Try again
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className={compact ? "" : "rounded-3xl bg-[var(--surface)] p-5 shadow-xl shadow-black/5 ring-1 ring-[var(--border)] sm:p-6"}>
+      {!compact && (
+        <>
+          <p className="font-display text-lg font-bold text-[var(--text)]">
+            Start earning in seconds
+          </p>
+          <p className="mt-1 text-sm text-[var(--dim)]">
+            One Google button for both sign up and login. No password, no
+            forms to remember.
+          </p>
+        </>
+      )}
+      <div className="mt-4 flex min-h-[44px] justify-center" ref={gisRef} aria-label="Continue with Google" />
+      {formError && (
+        <p role="alert" className="mt-3 text-center text-sm font-medium text-red-600 dark:text-red-400">
+          {formError}
+        </p>
+      )}
+      {!googleClientId && (
+        <p className="mt-3 text-center text-sm leading-relaxed text-[var(--dim)]">
+          Google sign-in is being set up — please check back shortly.
+        </p>
+      )}
+      {googleClientId && gisState === "loading" && (
+        <p className="mt-2 text-center text-sm text-[var(--dim)]" role="status">
+          Loading the Google button…
+        </p>
+      )}
+      {googleClientId && gisState === "ready" && (
+        <button
+          type="button"
+          onClick={startRedirect}
+          className="mt-3 block w-full text-center text-xs font-semibold text-[var(--dim)] underline underline-offset-2 transition hover:text-[var(--text)]"
+        >
+          Button not working? Use the full-page Google sign-in
+        </button>
+      )}
+      {googleClientId && gisState === "failed" && (
+        <div className="mt-4 rounded-2xl border border-amber-300 bg-amber-50 p-4 text-left dark:border-amber-900 dark:bg-amber-950/40">
+          <p className="font-display text-sm font-bold text-amber-800 dark:text-amber-200">
+            The Google button didn't load on this test version
+          </p>
+          <p className="mt-1 text-sm leading-relaxed text-amber-800/90 dark:text-amber-100/90">
+            Google only shows its sign-in button on web addresses approved in
+            Google Cloud Console. Right now only https://tapone.store is
+            approved — this test version runs on the address below, so Google
+            refuses its button until the address is added:
+          </p>
+          {siteOrigin && (
+            <p className="mt-2 select-all break-all rounded-lg bg-white/70 px-3 py-2 font-mono text-xs text-amber-900 dark:bg-black/30 dark:text-amber-100">
+              {siteOrigin}
+            </p>
+          )}
+          <ol className="mt-2 list-decimal space-y-1 pl-5 text-sm leading-relaxed text-amber-800/90 dark:text-amber-100/90">
+            <li>Open Google Cloud Console → APIs &amp; Services → Credentials.</li>
+            <li>Open the TapOne OAuth client → “Authorized JavaScript origins” → Add URI → paste the address above → Save.</li>
+            <li>Come back here and tap “Try again”.</li>
+          </ol>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                setFormError(null);
+                setGisAttempt((a) => a + 1);
+              }}
+              className="rounded-full bg-amber-600 px-4 py-2 text-sm font-bold text-white transition hover:bg-amber-700"
+            >
+              Try again
+            </button>
+            <button
+              type="button"
+              onClick={startRedirect}
+              className="rounded-full bg-white px-4 py-2 text-sm font-bold text-amber-800 ring-1 ring-amber-300 transition hover:bg-amber-100 dark:bg-transparent dark:text-amber-100 dark:ring-amber-700"
+            >
+              Continue with Google (full page)
+            </button>
+          </div>
+          <p className="mt-2 text-xs leading-relaxed text-amber-800/80 dark:text-amber-100/80">
+            For the full-page option, also add this exact Redirect URI under
+            “Authorized redirect URIs” in the same client settings:
+          </p>
+          {redirectUri && (
+            <p className="mt-1 select-all break-all rounded-lg bg-white/70 px-3 py-2 font-mono text-xs text-amber-900 dark:bg-black/30 dark:text-amber-100">
+              {redirectUri}
+            </p>
+          )}
+        </div>
+      )}
+      <p className="mt-3 text-center text-xs leading-relaxed text-[var(--dim)]">
+        Sign up and login happen with this one Google button — TapOne has no
+        email or password form. VPN connections are not allowed.
+      </p>
+    </div>
+  );
+}
+
+export function GoogleMark() {
+  return (
+    <svg viewBox="0 0 24 24" className="h-5 w-5" aria-hidden="true">
+      <path fill="#fff" d="M21.6 12.2c0-.7-.1-1.4-.2-2H12v3.9h5.4a4.6 4.6 0 0 1-2 3v2.6h3.2c1.9-1.8 3-4.4 3-7.5z" opacity=".95" />
+      <path fill="#fff" d="M12 22c2.7 0 5-.9 6.6-2.4l-3.2-2.5c-.9.6-2 1-3.4 1-2.6 0-4.8-1.8-5.6-4.2H3.1v2.6A10 10 0 0 0 12 22z" opacity=".8" />
+      <path fill="#fff" d="M6.4 13.9a6 6 0 0 1 0-3.8V7.5H3.1a10 10 0 0 0 0 9l3.3-2.6z" opacity=".65" />
+      <path fill="#fff" d="M12 5.9c1.5 0 2.8.5 3.8 1.5L18.6 4A10 10 0 0 0 3.1 7.5l3.3 2.6C7.2 7.7 9.4 5.9 12 5.9z" opacity=".5" />
+    </svg>
+  );
+}
+
+
+// ---------------------------------------------------------- theme toggle
+
+export function ThemeToggle() {
+  const [mode, setMode] = useState<"light" | "dark">(() => getThemeMode());
+  return (
+    <button
+      type="button"
+      aria-label={mode === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+      title={mode === "dark" ? "Light mode" : "Dark mode"}
+      onClick={() => {
+        const next = mode === "dark" ? "light" : "dark";
+        applyThemeMode(next);
+        setMode(next);
+      }}
+      className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[var(--surface)] text-[var(--dim)] ring-1 ring-[var(--border)] transition hover:text-[var(--text)]"
+    >
+      {mode === "dark" ? Icons.sun("h-5 w-5") : Icons.moon("h-5 w-5")}
+    </button>
+  );
+}
+
+
+// ------------------------------------------- footer dark/light pill
+// RewardJoy places the single Dark/Light control at the footer bottom-left.
+
+export function FooterThemePill({ token }: { token?: string | null }) {
+  const [mode, setMode] = useState<"light" | "dark">(() => getThemeMode());
+  return (
+    <button
+      type="button"
+      aria-label={mode === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+      onClick={() => {
+        const next = mode === "dark" ? "light" : "dark";
+        applyThemeMode(next);
+        setMode(next);
+        if (token) {
+          void api.setThemePreference({ token, mode: next }).catch(() => undefined);
+        }
+      }}
+      className="flex items-center gap-2 rounded-full bg-[#57493e] px-4 py-2 text-sm font-bold text-white ring-1 ring-white/15 transition hover:bg-[#6a594c]"
+    >
+      {Icons.moon("h-4 w-4")} {mode === "dark" ? "Light" : "Dark"}
+    </button>
+  );
+}
+
+// --------------------------------------------------------- owner entry
+
+// THE hidden owner entry (owner decision 2026-11-19): the small
+// RSS/WiFi icon at the end of the footer's Follow Us row — and nothing
+// else. The old 5-tap-on-the-logo/mascot gesture is REMOVED at the
+// owner's explicit order. The icon looks like an ordinary feed icon
+// among the social links — no label, no tooltip, nothing that hints at
+// admin — but a single tap on it opens the admin login (#/admin). It is
+// a real <button> with a full-size touch target: the previous version
+// was a bare 16px <span aria-hidden onClick>, which is why the owner's
+// taps "did nothing" on his phone. Rendered ONLY in the pre-login
+// homepage footer (owner order 2026-11-20): the signed-in dashboard
+// footer must NOT carry it — once a user is inside their account there
+// is no Wi-Fi/RSS admin entry anywhere. #/admin keeps working for
+// anyone who can type it.
+export const OPEN_ADMIN_EVENT = "tapone:open-admin";
+
+/** Opens the admin login: updates the address AND notifies the app
+    shell directly. Navigation must never rely on the `hashchange`
+    event alone — the webview can swallow it (see `navigate` in App),
+    which is exactly what made this entry look dead. */
+export function openAdminLogin(): void {
+  if (window.location.hash !== "#/admin") {
+    window.location.hash = "#/admin";
+  }
+  window.dispatchEvent(new Event(OPEN_ADMIN_EVENT));
+}
+
+export const GO_HOME_EVENT = "tapone:go-home";
+
+/** Returns to the public homepage (the pre-login page with "Start
+    earning now" / "Sign in"). Used when the owner logs out of the
+    admin panel: logout must land on the homepage, NOT drop straight
+    back onto the admin login screen (owner order 2026-11-20). Like
+    openAdminLogin, it notifies the shell directly instead of relying
+    on a `hashchange` the webview might swallow. */
+export function goHome(): void {
+  if (window.location.hash !== "") {
+    window.location.hash = "";
+  }
+  window.dispatchEvent(new Event(GO_HOME_EVENT));
+}
+
+export function FollowRssIcon() {
+  return (
+    <button
+      type="button"
+      aria-label="RSS feed"
+      onClick={openAdminLogin}
+      className="ml-1 inline-flex min-h-11 min-w-11 items-center justify-center rounded-full text-white/50 transition hover:text-white"
+    >
+      <svg viewBox="0 0 24 24" fill="currentColor" className="h-4 w-4" focusable="false" aria-hidden="true">
+        <circle cx="5" cy="19" r="2" />
+        <path d="M4 4v3c6.6 0 12 5.4 12 12h3C19 10.7 12.3 4 4 4z" />
+        <path d="M4 10v3c3.3 0 6 2.7 6 6h3c0-5-4-9-9-9z" />
+      </svg>
+    </button>
+  );
+}
+
+// --------------------------------------------------------------- wordmark
+
+export function Wordmark({ light }: { light?: boolean }) {
+  return (
+    <span className="flex items-center gap-2">
+      <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-[var(--brand)] font-display text-lg font-extrabold text-white shadow-md shadow-[var(--brand)]/30">
+        T
+      </span>
+      <span
+        className={`font-display text-xl font-extrabold tracking-tight ${
+          light ? "text-white" : "text-[var(--text)]"
+        }`}
+      >
+        Tap<span className="text-[var(--brand)]">One</span>
+      </span>
+    </span>
+  );
+}
+
+// ------------------------------------------------------------ game cards
+
+export function ContentCard({ item, big }: { item: ContentItem; big?: boolean }) {
+  const [imgOk, setImgOk] = useState(true);
+  return (
+    <article
+      className={`flex flex-col overflow-hidden rounded-2xl bg-[var(--surface)] ring-1 ring-[var(--border)] ${
+        big ? "sm:flex-row" : ""
+      }`}
+    >
+      <div
+        className={`relative flex items-center justify-center bg-[var(--surface-2)] text-[var(--brand)] ${
+          big ? "h-36 sm:h-auto sm:w-56" : "h-32"
+        }`}
+      >
+        {item.imageUrl && imgOk ? (
+          <img
+            src={item.imageUrl}
+            alt={item.title}
+            className="absolute inset-0 h-full w-full object-cover"
+            onError={() => setImgOk(false)}
+          />
+        ) : item.kind === "game" ? (
+          Icons.game("h-12 w-12")
+        ) : item.kind === "survey" ? (
+          Icons.survey("h-12 w-12")
+        ) : (
+          Icons.grid("h-12 w-12")
+        )}
+        {item.featured === true && (
+          <span className="absolute left-3 top-3 rounded-full bg-[var(--gold)] px-2.5 py-1 text-xs font-bold text-[var(--ink)]">
+            Featured
+          </span>
+        )}
+      </div>
+      <div className="flex flex-1 flex-col p-4">
+        <h3 className="font-display text-base font-bold text-[var(--text)]">{item.title}</h3>
+        {item.provider && (
+          <p className="mt-0.5 text-xs font-semibold uppercase tracking-wide text-[var(--dim)]">
+            {item.provider}
+          </p>
+        )}
+        {item.description && (
+          <p className="mt-2 line-clamp-3 text-sm leading-relaxed text-[var(--dim)]">
+            {item.description}
+          </p>
+        )}
+        <div className="mt-auto flex items-center justify-between pt-4">
+          <span className="text-xs font-semibold text-[var(--dim)]">
+            {item.countries === "ALL" ? "🌍 Worldwide" : `Available in ${item.countries}`}
+          </span>
+          {item.url ? (
+            <a
+              href={item.url}
+              target="_blank"
+              rel="noreferrer"
+              className="rounded-full bg-[var(--brand)] px-4 py-2 text-sm font-bold text-white transition hover:bg-[var(--brand-deep)]"
+            >
+              Open
+            </a>
+          ) : (
+            <span className="rounded-full bg-[var(--surface-2)] px-4 py-2 text-sm font-bold text-[var(--dim)]">
+              Coming soon
+            </span>
+          )}
+        </div>
+      </div>
+    </article>
+  );
+}
+
+// ------------------------------------------------------------ static text
+
+const STATIC_PAGES: Record<StaticPage, { title: string; body: string[] }> = {
+  about: {
+    title: "About Us",
+    body: [
+      "TapOne is a rewards website. Members play games, complete offers and answer surveys from our partner networks, and earn real dollars for every completed task.",
+      "You keep 70% of every offer payout — TapOne keeps 30%. Earnings are tracked in dollars only, and you can cash out to the payment methods shown in your account once you reach the minimum withdrawal.",
+      "New offerwalls, surveys and games are added as our partners approve them, so the catalogue keeps growing over time.",
+    ],
+  },
+  privacy: {
+    title: "Privacy Policy",
+    body: [
+      "When you sign in with Google we store your name, email address and profile picture so we can run your account.",
+      "We record the IP address of your sign-in connection. It decides which offers and payment methods you see, and it cannot be changed manually. Connections through a VPN or proxy are not allowed.",
+      "We keep a record of your earnings, withdrawals and the messages you send us through Help, so payments can be reviewed and paid correctly.",
+      "We do not sell your personal information. Partner offerwalls receive only your TapOne user ID so completed offers can be credited to your account.",
+    ],
+  },
+  terms: {
+    title: "Terms & Conditions",
+    body: [
+      "One person, one account. Using a VPN, proxy, emulator or fake details to fake your location or complete offers is not allowed and leads to a blocked account.",
+      "Offer payouts are credited when our partner confirms completion through the postback system. Reversed or fraudulent completions are removed from the balance.",
+      "Withdrawals are reviewed and paid manually. Make sure your payment details are correct — payments sent to wrong details entered by you cannot be recovered.",
+      "TapOne has no deposits and no gambling. You can only withdraw money you earned.",
+    ],
+  },
+  faq: {
+    title: "FAQ",
+    body: [
+      "How do I earn? Sign in with Google, complete offers, surveys and games from our partners, and 70% of every payout lands in your TapOne balance in dollars.",
+      "How do I withdraw? Reach the minimum withdrawal and request a payout to one of the payment methods shown in your account. Requests are reviewed and paid manually.",
+      "Why do I see these payment methods? Offers and payment methods are matched to your account from your sign-in connection, so what you see is picked for you automatically. VPN and proxy connections are not allowed.",
+    ],
+  },
+  cookies: {
+    title: "Cookie Policy",
+    body: [
+      "TapOne uses only the cookies and local storage needed to keep you signed in, remember your dark/light choice and keep your referral code when you arrive from an invite link.",
+      "Partner offerwalls may set their own cookies when you open them, so completed offers can be credited to your account through the postback system.",
+      "We do not sell cookie data. You can clear cookies in your browser at any time; you will simply need to sign in again.",
+    ],
+  },
+  forum: {
+    title: "Forum",
+    body: [
+      "Our community forum is not open yet. Until it launches, the fastest way to reach the TapOne team and other members is the Help & Mailbox inside your account — sign in, open Help, and send your message.",
+    ],
+  },
+  testimonials: {
+    title: "Testimonials",
+    body: [
+      "Member stories will appear here as TapOne members share them. TapOne launched on 19 November 2026, so this page is just getting started.",
+    ],
+  },
+  careers: {
+    title: "Careers",
+    body: [
+      "There are no open roles at TapOne right now. When a position opens it will be posted on this page.",
+    ],
+  },
+  contact: {
+    title: "Contact Us",
+    body: [
+      "The fastest way to reach us is the Help option inside your account — messages go straight to the TapOne team and replies land in your Mailbox.",
+      "Sign in with Google, open Help & Mailbox from the menu, and send your message. We usually reply within a couple of days.",
+    ],
+  },
+};
+
+// ------------------------------------------------------------------- app
+
+export function App() {
+  const [hash, setHash] = useState(() => window.location.hash);
+  const [token, setToken] = useState<string | null>(() => getSessionToken());
+  const [staticPage, setStaticPage] = useState<StaticPage | null>(null);
+  const tokenRef = useRef(token);
+  tokenRef.current = token;
+
+  // Navigation NEVER relies on the `hashchange` event alone: the hash
+  // state is set directly in the same tap handler that changes the
+  // address. An earlier version only assigned `window.location.hash`
+  // and waited for the event — on the owner's phone the event could be
+  // swallowed by the webview, so a successful sign-in left the page
+  // sitting on the homepage and the tap read as "does nothing". The
+  // listener below still handles back/forward and pasted links.
+  const navigate = (next: string) => {
+    if (window.location.hash !== next) {
+      window.location.hash = next;
+    }
+    setHash(next);
+  };
+
+  useEffect(() => {
+    captureReferralCode();
+    const onHash = () => setHash(window.location.hash);
+    window.addEventListener("hashchange", onHash);
+    // The footer's Wi-Fi/RSS owner entry notifies the shell directly —
+    // the route state is set here, in the same tap, never left waiting
+    // on a `hashchange` the webview might swallow.
+    const onOpenAdmin = () => setHash("#/admin");
+    window.addEventListener(OPEN_ADMIN_EVENT, onOpenAdmin);
+    // Admin logout lands here: back on the public homepage.
+    const onGoHome = () => setHash("");
+    window.addEventListener(GO_HOME_EVENT, onGoHome);
+    return () => {
+      window.removeEventListener("hashchange", onHash);
+      window.removeEventListener(OPEN_ADMIN_EVENT, onOpenAdmin);
+      window.removeEventListener(GO_HOME_EVENT, onGoHome);
+    };
+  }, []);
+
+  // Verify the active session token against the server. A stored token
+  // may be a dead session left over from an older build: if the server
+  // no longer knows it, drop it so the page returns to the true
+  // signed-out state — header shows "Sign in" next to "Start earning
+  // now" and the signed-in bottom bar (Home / Account) disappears.
+  //
+  // RACE GUARD: this check is keyed on the token it verified, and
+  // before clearing anything it confirms that token is STILL the
+  // active one. An earlier version cleared unconditionally when the
+  // check settled — so a slow check of a dead token could land AFTER
+  // a fresh sign-in, wiping the brand-new session (and resetting the
+  // hash) a split second after it was created. The dashboard flashed
+  // and vanished, or never appeared at all.
+  useEffect(() => {
+    if (!token) return;
+    const verifiedToken = token;
+    let alive = true;
+    api
+      .getMe({ token: verifiedToken })
+      .then(() => {
+        /* session confirmed — nothing to update */
+      })
+      .catch((e: unknown) => {
+        if (!alive) return;
+        if (!isAuthError(e)) return; // transient failure — keep the session
+        if (tokenRef.current !== verifiedToken) return; // a newer sign-in won
+        if (getSessionToken() !== verifiedToken) return; // storage moved on
+        setSessionToken(null);
+        setToken(null);
+        if (window.location.hash.startsWith("#/app")) {
+          navigate("");
+        }
+      });
+    return () => {
+      alive = false;
+    };
+  }, [token]);
+
+  const home = useQuery({
+    queryKey: ["public-home"],
+    queryFn: () => api.getPublicHome({}),
+  });
+
+  if (hash.startsWith("#/admin")) {
+    return <Admin />;
+  }
+
+  if (hash.startsWith("#/app")) {
+    if (!token) {
+      return (
+        <div className="min-h-screen bg-[var(--bg)]">
+          <SafeAreaTopScrim backgroundColor="var(--bg)" />
+          <main className="mx-auto max-w-md px-4 py-10">
+            <button
+              type="button"
+              onClick={() => navigate("")}
+              className="mb-6 text-sm font-semibold text-[var(--dim)]"
+            >
+              ← Back to home
+            </button>
+            <SignInCard
+              googleClientId={home.data?.googleClientId ?? ""}
+              onSignedIn={(t) => setToken(t)}
+            />
+          </main>
+        </div>
+      );
+    }
+    return (
+      <Dashboard
+        token={token}
+        onSignOut={() => {
+          void api.signOut({ token }).catch(() => undefined);
+          setSessionToken(null);
+          setToken(null);
+          navigate("");
+        }}
+      />
+    );
+  }
+
+  // Signed-in chrome (header "Open dashboard", the Home/Account bottom
+  // bar) shows only with a session token. Before login there is no
+  // bottom bar: Sign in lives in the header, next to "Start earning
+  // now" (owner order). The token is verified against the server
+  // above, so a dead leftover token is cleared and the chrome goes.
+  const memberChrome = Boolean(token);
+
+  const goApp = (tab?: DashboardTab) => {
+    if (tab) {
+      try {
+        window.localStorage.setItem("tapone3.tab", tab);
+      } catch {
+        /* ignore */
+      }
+    }
+    navigate("#/app");
+  };
+
+  return (
+    <div className="min-h-screen bg-[var(--bg)] text-[var(--text)]">
+      <SafeAreaTopScrim backgroundColor="#ffffff" />
+
+      {/* header — white, like RewardJoy */}
+      <header className="border-b border-[var(--border)] bg-[var(--surface)]">
+        <div className="mx-auto flex w-full max-w-6xl items-center justify-between gap-3 px-4 py-3">
+          <Wordmark />
+          {memberChrome ? (
+            <button
+              type="button"
+              onClick={() => goApp()}
+              className="flex items-center rounded-full bg-[var(--brand)] px-4 py-2 font-display text-sm font-bold text-white transition hover:bg-[var(--brand-deep)]"
+            >
+              Open dashboard
+            </button>
+          ) : (
+            <div className="flex items-center gap-2">
+              <a
+                href="#signup"
+                className="flex shrink-0 items-center whitespace-nowrap rounded-full bg-[var(--surface)] px-4 py-2 font-display text-sm font-bold text-[var(--text)] ring-1 ring-[var(--border)] transition hover:ring-[var(--brand)]"
+              >
+                Sign in
+              </a>
+              <a
+                href="#signup"
+                className="flex shrink-0 items-center whitespace-nowrap rounded-full bg-[var(--brand)] px-4 py-2 font-display text-sm font-bold text-white transition hover:bg-[var(--brand-deep)]"
+              >
+                Start earning now
+              </a>
+            </div>
+          )}
+        </div>
+      </header>
+
+      {/* hero — centred Earn Smarter, mascot, sign-up / login right here */}
+      <section className="mx-auto grid w-full max-w-6xl gap-6 px-4 pb-10 pt-6 sm:pb-12 lg:grid-cols-2 lg:items-center" aria-label="Earn Smarter">
+        <div className="text-center lg:col-start-2 lg:text-left">
+          <p aria-hidden="true" className="text-lg tracking-[0.5em] text-[var(--gold)]">✦ ✦ ✦</p>
+          <h1 className="mt-2 font-display text-[40px] font-extrabold leading-[1.05] text-[var(--ink)] sm:text-6xl">
+            Earn Smarter
+          </h1>
+          <p className="mx-auto mt-4 max-w-md text-base leading-relaxed text-[var(--dim)] lg:mx-0">
+            Earn more with high-paying games, apps, and surveys — built for
+            real users
+          </p>
+          <p className="mx-auto mt-3 max-w-md text-sm leading-relaxed text-[var(--dim)] lg:mx-0">
+            You keep <strong className="text-[var(--text)]">70% of every payout</strong>,
+            in dollars only — no coins, no confusing points.
+          </p>
+          <a
+            href="#signup"
+            className="mt-6 inline-flex items-center rounded-full bg-[var(--brand)] px-8 py-3.5 font-display text-base font-bold text-white shadow-lg shadow-[var(--brand)]/30 transition hover:bg-[var(--brand-deep)]"
+          >
+            Start earning now
+          </a>
+          <div className="mt-6 flex flex-wrap justify-center gap-2 text-[13px] font-semibold lg:justify-start">
+            <span className="rounded-full bg-[var(--pill)] px-3 py-1.5 text-[var(--text)] ring-1 ring-[var(--border)]">
+              🏆 Daily pool {home.data ? fmt(home.data.dailyPoolCents) : "…"}
+            </span>
+            <span className="rounded-full bg-[var(--pill)] px-3 py-1.5 text-[var(--text)] ring-1 ring-[var(--border)]">
+              👥 Affiliate pool {home.data ? fmt(home.data.affiliatePoolCents) : "…"}
+            </span>
+            <span className="rounded-full bg-[var(--pill)] px-3 py-1.5 text-[var(--text)] ring-1 ring-[var(--border)]">
+              💵 Min. withdrawal {home.data ? fmt(home.data.minWithdrawCents) : "…"}
+            </span>
+          </div>
+        </div>
+        <div id="signup" className="lg:col-start-2">
+          <p className="mb-2 text-center font-display text-sm font-bold uppercase tracking-wide text-[var(--dim)] lg:text-left">
+            Sign up / Log in
+          </p>
+          <SignInCard
+            googleClientId={home.data?.googleClientId ?? ""}
+            onSignedIn={(t) => {
+              setToken(t);
+              goApp();
+            }}
+          />
+        </div>
+        <div className="lg:col-start-1 lg:row-start-1 lg:row-span-2">
+          <img
+            src={squirrelMascot}
+            alt="TapOne squirrel mascot waving, with gold coins floating around it"
+            className="mx-auto w-full max-w-sm rounded-3xl lg:max-w-md"
+          />
+        </div>
+      </section>
+
+      <main className="mx-auto w-full max-w-6xl px-3 sm:px-4">
+        {staticPage ? (
+          <section className="py-10">
+            <button
+              type="button"
+              onClick={() => setStaticPage(null)}
+              className="mb-5 text-sm font-semibold text-[var(--dim)]"
+            >
+              ← Back
+            </button>
+            <h1 className="font-display text-3xl font-extrabold">{STATIC_PAGES[staticPage].title}</h1>
+            <div className="mt-5 max-w-2xl space-y-4">
+              {STATIC_PAGES[staticPage].body.map((para) => (
+                <p key={para.slice(0, 24)} className="leading-relaxed text-[var(--dim)]">
+                  {para}
+                </p>
+              ))}
+            </div>
+          </section>
+        ) : (
+          <>
+            {/* Offers, Surveys, Playtime/Games and Leaderboard live ONLY
+                inside the signed-in dashboard — never on this pre-login
+                page (owner order). The public page is: hero + sign-in,
+                how it works, redeem, FAQ, recent payouts. */}
+
+            {/* how it works */}
+            <section className="pb-10" aria-label="How it works">
+              <h2 className="font-display text-2xl font-extrabold sm:text-3xl">How TapOne works</h2>
+              <div className="mt-6 grid gap-4 sm:grid-cols-3">
+                {[
+                  {
+                    n: "1",
+                    title: "Sign in with Google",
+                    text: "One button signs you up and logs you in. Offers and payment methods are matched to your account automatically.",
+                  },
+                  {
+                    n: "2",
+                    title: "Complete offers & play",
+                    text: "Pick an offerwall, survey or game and finish the task. When the partner confirms, 70% of the payout lands in your balance.",
+                  },
+                  {
+                    n: "3",
+                    title: "Withdraw your dollars",
+                    text: "Reach the minimum and cash out to Easypaisa, JazzCash, PayPal, bank, Wise, Payoneer, UPI or Binance USDT — whichever one you use.",
+                  },
+                ].map((step) => (
+                  <div key={step.n} className="rounded-3xl bg-[var(--surface)] p-6 ring-1 ring-[var(--border)]">
+                    <span className="font-display text-4xl font-extrabold text-[var(--brand)]">{step.n}</span>
+                    <h3 className="mt-3 font-display text-lg font-bold">{step.title}</h3>
+                    <p className="mt-1.5 text-sm leading-relaxed text-[var(--dim)]">{step.text}</p>
+                  </div>
+                ))}
+              </div>
+            </section>
+
+            {/* redeem — Start earning now (2nd place, like RewardJoy) */}
+            <section className="pb-10" aria-label="Redeem">
+              <div className="rounded-3xl bg-[var(--pill)] p-6 ring-1 ring-[var(--border)] sm:p-8">
+                <h2 className="font-display text-2xl font-extrabold sm:text-3xl">Redeem your earnings</h2>
+                <p className="mt-2 max-w-xl text-sm leading-relaxed text-[var(--dim)]">
+                  When your balance reaches the minimum withdrawal
+                  ({home.data ? fmt(home.data.minWithdrawCents) : "$5"}),
+                  cash out to Easypaisa, JazzCash, PayPal, bank transfer, Wise,
+                  Payoneer, UPI or Binance USDT — the methods available to you
+                  are shown in your account. No deposits, ever: you only redeem
+                  what you earned.
+                </p>
+                <a
+                  href="#signup"
+                  className="mt-5 inline-flex items-center rounded-full bg-[var(--brand)] px-8 py-3.5 font-display text-base font-bold text-white shadow-lg shadow-[var(--brand)]/30 transition hover:bg-[var(--brand-deep)]"
+                >
+                  Start earning now
+                </a>
+              </div>
+            </section>
+
+            {/* FAQ — Start earning now (3rd place, like RewardJoy) */}
+            <section className="pb-12" aria-label="FAQ">
+              <h2 className="font-display text-2xl font-extrabold sm:text-3xl">Frequently asked questions</h2>
+              <div className="mt-5 space-y-3">
+                {[
+                  {
+                    q: "How do I sign up?",
+                    a: "With the Google button at the top of this page — one button for both sign up and login. There is no email or password form.",
+                  },
+                  {
+                    q: "How much of each payout do I keep?",
+                    a: "You keep 70% of every offer, survey and game payout, in dollars. TapOne keeps 30%.",
+                  },
+                  {
+                    q: "When can I withdraw?",
+                    a: "As soon as your balance reaches the minimum withdrawal. Requests are reviewed and paid to the method you choose.",
+                  },
+                  {
+                    q: "Why do I see these payment methods?",
+                    a: "Payment methods are matched to your account automatically when you sign in. VPN connections are not allowed.",
+                  },
+                ].map((item) => (
+                  <details key={item.q} className="rounded-2xl bg-[var(--surface)] px-5 py-4 ring-1 ring-[var(--border)]">
+                    <summary className="cursor-pointer font-display text-base font-bold">{item.q}</summary>
+                    <p className="mt-2 text-sm leading-relaxed text-[var(--dim)]">{item.a}</p>
+                  </details>
+                ))}
+              </div>
+              <a
+                href="#signup"
+                className="mt-6 inline-flex items-center rounded-full bg-[var(--brand)] px-8 py-3.5 font-display text-base font-bold text-white shadow-lg shadow-[var(--brand)]/30 transition hover:bg-[var(--brand-deep)]"
+              >
+                Start earning now
+              </a>
+            </section>
+
+            {/* recent payouts */}
+            {home.data && home.data.recentPayouts.length > 0 && (
+              <section className="pb-12" aria-label="Recent payouts">
+                <h2 className="font-display text-2xl font-extrabold">Recent payouts</h2>
+                <ul className="mt-4 divide-y divide-[var(--border)] rounded-3xl bg-[var(--surface)] px-5 ring-1 ring-[var(--border)]">
+                  {home.data.recentPayouts.map((p, i) => (
+                    <li key={i} className="flex items-center justify-between py-3.5">
+                      <span className="text-sm font-semibold">
+                        {p.name} <span className="font-normal text-[var(--dim)]">via {p.methodLabel}</span>
+                      </span>
+                      <span className="font-display text-base font-bold text-[var(--brand-deep)] dark:text-[var(--brand)]">
+                        {fmt(p.amountCents)}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            )}
+          </>
+        )}
+      </main>
+
+      {/* footer — dark #3E342D, RewardJoy column layout */}
+      <footer className="bg-[var(--ink-soft)] text-white">
+        <div className="mx-auto grid max-w-6xl gap-8 px-4 py-10 sm:grid-cols-2 lg:grid-cols-[1.3fr_1fr_1fr_1fr]">
+          <div>
+            <Wordmark light />
+            <p className="mt-3 max-w-sm text-sm leading-relaxed text-white/65">
+              Play games, complete offers and surveys, and withdraw real
+              dollars. No deposits, no gambling — you only ever cash out what
+              you earned.
+            </p>
+          </div>
+          <nav aria-label="About">
+            <p className="font-display text-sm font-bold uppercase tracking-wide text-white/50">About</p>
+            <ul className="mt-3 space-y-2.5 text-sm font-semibold text-white/85">
+              <li><button type="button" className="hover:text-white" onClick={() => setStaticPage("faq")}>FAQ</button></li>
+              <li><button type="button" className="hover:text-white" onClick={() => setStaticPage("privacy")}>Privacy Policy</button></li>
+              <li><button type="button" className="hover:text-white" onClick={() => setStaticPage("cookies")}>Cookie Policy</button></li>
+              <li><button type="button" className="hover:text-white" onClick={() => setStaticPage("terms")}>Terms of Service</button></li>
+            </ul>
+          </nav>
+          <nav aria-label="Services">
+            <p className="font-display text-sm font-bold uppercase tracking-wide text-white/50">Services</p>
+            <ul className="mt-3 space-y-2.5 text-sm font-semibold text-white/85">
+              <li><button type="button" className="hover:text-white" onClick={() => goApp("help")}>Support</button></li>
+              <li><button type="button" className="hover:text-white" onClick={() => goApp("leaderboard")}>Challenge</button></li>
+              <li><button type="button" className="hover:text-white" onClick={() => goApp("invite")}>Affiliate</button></li>
+            </ul>
+          </nav>
+          <nav aria-label="Info">
+            <p className="font-display text-sm font-bold uppercase tracking-wide text-white/50">Info</p>
+            <ul className="mt-3 space-y-2.5 text-sm font-semibold text-white/85">
+              <li><button type="button" className="hover:text-white" onClick={() => setStaticPage("forum")}>Forum</button></li>
+              <li><button type="button" className="hover:text-white" onClick={() => setStaticPage("testimonials")}>Testimonials</button></li>
+              <li><button type="button" className="hover:text-white" onClick={() => goApp("cashout")}>Live Cashout</button></li>
+              <li><button type="button" className="hover:text-white" onClick={() => setStaticPage("careers")}>Careers</button></li>
+            </ul>
+          </nav>
+        </div>
+        {/* Follow Us row — always rendered (like the TapOne blog) so
+            the small RSS icon at its end is always present, with or
+            without social links set. That icon is the ONLY hidden
+            owner entry (see FollowRssIcon in App.tsx). */}
+        <div className="border-t border-white/10 px-4 py-5">
+          <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-2" aria-label="Follow us">
+            <span className="font-display text-sm font-bold text-white">Follow us</span>
+            {(home.data?.socialLinks ?? []).map((s) => (
+              <a
+                key={s.platform}
+                href={s.url}
+                target="_blank"
+                rel="noreferrer"
+                className="rounded-full bg-white/10 px-4 py-2 text-sm font-bold text-white ring-1 ring-white/15 transition hover:bg-[var(--brand)]"
+              >
+                {s.label}
+              </a>
+            ))}
+            <FollowRssIcon />
+          </div>
+        </div>
+        <div className={`border-t border-white/10 px-4 py-4 lg:pb-4 ${memberChrome ? "pb-24" : ""}`}>
+          <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-3">
+            <FooterThemePill token={token} />
+            <p className="text-xs text-white/45">
+              © 2026 TapOne. All rights reserved. · Launched 19 November 2026 · All amounts in USD.
+            </p>
+          </div>
+        </div>
+      </footer>
+
+      {/* mobile bottom navigation — signed-in members only. Before
+          login there is NO bottom bar: Sign in lives in the header,
+          next to "Start earning now" (owner order). */}
+      {memberChrome && (
+        <nav
+          className="fixed inset-x-0 bottom-0 z-30 border-t border-[var(--border)] bg-[var(--surface)] pb-safe text-[var(--text)] lg:hidden"
+          aria-label="Mobile"
+        >
+          <div className="grid grid-cols-2">
+            <button type="button" onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })} className="flex flex-col items-center gap-1 py-2.5 text-[11px] font-semibold text-[var(--brand-deep)]">
+              {Icons.home("h-6 w-6")} Home
+            </button>
+            <button type="button" onClick={() => goApp()} className="flex flex-col items-center gap-1 py-2.5 text-[11px] font-semibold text-[var(--dim)]">
+              {Icons.user("h-6 w-6")} Account
+            </button>
+          </div>
+        </nav>
+      )}
+    </div>
+  );
+}

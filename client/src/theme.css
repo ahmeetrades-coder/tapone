@@ -1,0 +1,109 @@
+@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Sora:wght@600;700;800&display=swap');
+@import "tailwindcss";
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+@import "tailwindcss-safe-area";
+
+@theme {
+  --text-xs: 12px;
+  --text-xs--line-height: 16px;
+  --text-sm: 14px;
+  --text-sm--line-height: 20px;
+  --text-base: 16px;
+  --text-base--line-height: 24px;
+  --text-lg: 18px;
+  --text-lg--line-height: 28px;
+  --text-xl: 20px;
+  --text-xl--line-height: 28px;
+  --text-2xl: 24px;
+  --text-2xl--line-height: 32px;
+  --text-3xl: 30px;
+  --text-3xl--line-height: 36px;
+  --text-4xl: 36px;
+  --text-4xl--line-height: 40px;
+  --text-5xl: 48px;
+  --text-5xl--line-height: 52px;
+
+  --font-sans: "Manrope", ui-sans-system, system-ui, sans-serif;
+  --font-display: "Sora", "Manrope", ui-sans-system, system-ui, sans-serif;
+
+  /* Mirrors of the RewardJoy-verified palette in :root below. */
+  --color-ink: #333333;
+  --color-ink-soft: #3e342d;
+  --color-earn: #ff8d32;
+  --color-earn-deep: #e8761a;
+  --color-gold: #f7cb05;
+  --color-paper: #fffbf8;
+}
+
+:root {
+  color-scheme: light;
+  /* === RewardJoy exact colours (pixel-verified 2026-11-19) ===
+     These tokens are the SINGLE SOURCE for the whole site — homepage,
+     dashboard and admin all read them via var(--…). */
+  --brand: #ff8d32;        /* buttons, logo, prices, active sidebar pill */
+  --brand-deep: #e8761a;   /* derived darker orange: hover + small link text */
+  --gold: #f7cb05;         /* rating stars */
+  --ink: #333333;          /* headings & body text charcoal */
+  --ink-soft: #3e342d;     /* dashboard footer dark warm brown-grey */
+  --pill: #fff6ef;         /* balance pill pale peach */
+  --avatar: #0288d1;       /* user avatar blue */
+  --dash-bg: #fbfaf9;      /* dashboard content background */
+  /* === app surfaces === */
+  --bg: #fffbf8;           /* page / hero pale warm cream */
+  --surface: #ffffff;      /* header & cards white */
+  --surface-2: #f9f9f9;    /* sidebar light grey */
+  --text: #333333;
+  --dim: #7a6f66;
+  --border: #f1e6da;
+  --accent: var(--brand-deep);
+  --radius: 14px;
+  --space-surface: var(--surface);
+  --space-surface-alt: var(--surface-2);
+  --space-muted: var(--dim);
+  --space-border: var(--border);
+  --space-accent: var(--accent);
+}
+
+/* Mobile-first base: the phone layout is the default; wider screens
+   only add columns via sm:/lg: classes in the components. */
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+  body {
+    font-family: var(--font-sans);
+    overflow-x: clip;
+  }
+  img, svg, video {
+    max-width: 100%;
+  }
+  button, [role="button"], select, summary, input:not([type="checkbox"], [type="radio"]) {
+    min-height: 2rem;
+  }
+  /* Touch-sized targets on phones / touch devices. */
+  @media (pointer: coarse) {
+    button, [role="button"], a, select, summary {
+      min-height: 2.75rem;
+    }
+    input:not([type="checkbox"], [type="radio"]), textarea {
+      min-height: 2.75rem;
+      font-size: 16px; /* stops iOS zoom-on-focus */
+    }
+  }
+}
+
+/* Dark mode — same warm palette inverted; brand orange unchanged.
+   Activated by the Dark/Light toggle (data-theme="dark" on <html>). */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #171310;
+  --surface: #241d18;
+  --surface-2: #1d1713;
+  --text: #f5efe9;
+  --dim: #b3a294;
+  --border: #3d332a;
+  --ink: #f5efe9;
+  --dash-bg: #14100d;
+  --pill: #332619;
+  --brand-deep: #ffa25e;
+}
