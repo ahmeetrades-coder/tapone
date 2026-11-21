@@ -1,0 +1,97 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1795154493446,
+      "tag": "0001_initial",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1795154493446,
+      "tag": "0002_tapone_core_tables",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1795155092559,
+      "tag": "0003_banned_countries_and_admin_notifications",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1795155395328,
+      "tag": "0004_checkins_table",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1795155395328,
+      "tag": "0005_contest_joins_table",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1795155480419,
+      "tag": "0006_contest_payouts_table",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1795155576429,
+      "tag": "0007_user_level_column",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1795155979150,
+      "tag": "0008_contest_awards_and_title_bonus",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1795155979150,
+      "tag": "0009_user_theme_preference",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1795159260547,
+      "tag": "0010_add_offer_token",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1795160365001,
+      "tag": "0011_drop_twofa_column",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "6",
+      "when": 1795161108261,
+      "tag": "0012_withdraw_methods_per_country",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1795162209714,
+      "tag": "0013_remove_temporary_preview_account",
+      "breakpoints": true
+    }
+  ]
+}
