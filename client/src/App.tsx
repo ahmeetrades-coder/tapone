@@ -11,7 +11,6 @@ clearReferralCode,
 applyThemeMode,
 consumeGoogleRedirectResult,
 detectNetworkClient,
-getGoogleRedirectUri,
 getSiteOrigin,
 getThemeMode,
 isAuthError,
@@ -20,7 +19,6 @@ getSessionToken,
 loadGoogleIdentity,
 renderGoogleButton,
 setSessionToken,
-startGoogleRedirectSignIn,
 type NetworkInfo,
 } from "./lib";
 import { Dashboard, type DashboardTab } from "./Dashboard";
@@ -54,7 +52,6 @@ export function SignInCard({
   const [gisState, setGisState] = useState<"loading" | "ready" | "failed">("loading");
   const [gisAttempt, setGisAttempt] = useState(0);
   const [siteOrigin] = useState(() => getSiteOrigin());
-  const [redirectUri] = useState(() => getGoogleRedirectUri());
 
   useEffect(() => {
     let alive = true;
@@ -153,12 +150,6 @@ export function SignInCard({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [googleClientId, gisAttempt]);
 
-  const startRedirect = () => {
-    if (!startGoogleRedirectSignIn(googleClientId)) {
-      setFormError("Google sign-in could not be started in this browser. Please try again.");
-    }
-  };
-
   if (blockedMsg === "vpn" || network?.vpnSuspected) {
     // VPN = direct ban: NO login path is offered on this screen at all
     // (no Google button) and the server also refuses to issue any
@@ -253,15 +244,6 @@ export function SignInCard({
           Loading the Google button…
         </p>
       )}
-      {googleClientId && gisState === "ready" && (
-        <button
-          type="button"
-          onClick={startRedirect}
-          className="mt-3 block w-full text-center text-xs font-semibold text-[var(--dim)] underline underline-offset-2 transition hover:text-[var(--text)]"
-        >
-          Button not working? Use the full-page Google sign-in
-        </button>
-      )}
       {googleClientId && gisState === "failed" && (
         <div className="mt-4 rounded-2xl border border-amber-300 bg-amber-50 p-4 text-left dark:border-amber-900 dark:bg-amber-950/40">
           <p className="font-display text-sm font-bold text-amber-800 dark:text-amber-200">
@@ -294,23 +276,7 @@ export function SignInCard({
             >
               Try again
             </button>
-            <button
-              type="button"
-              onClick={startRedirect}
-              className="rounded-full bg-white px-4 py-2 text-sm font-bold text-amber-800 ring-1 ring-amber-300 transition hover:bg-amber-100 dark:bg-transparent dark:text-amber-100 dark:ring-amber-700"
-            >
-              Continue with Google (full page)
-            </button>
           </div>
-          <p className="mt-2 text-xs leading-relaxed text-amber-800/80 dark:text-amber-100/80">
-            For the full-page option, also add this exact Redirect URI under
-            “Authorized redirect URIs” in the same client settings:
-          </p>
-          {redirectUri && (
-            <p className="mt-1 select-all break-all rounded-lg bg-white/70 px-3 py-2 font-mono text-xs text-amber-900 dark:bg-black/30 dark:text-amber-100">
-              {redirectUri}
-            </p>
-          )}
         </div>
       )}
       <p className="mt-3 text-center text-xs leading-relaxed text-[var(--dim)]">
