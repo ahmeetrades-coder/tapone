@@ -2053,24 +2053,22 @@ async function theoremReachSignature(
 
 /**
  * Hex HMAC (SHA-1 or SHA-256) for owner-configured partner callbacks
- * (Admin → Partner Callbacks). The signed string is every callback
- * parameter EXCEPT the signature parameter itself, sorted by parameter
- * name and joined as `name=value&name=value` with the values exactly as
- * received — the scheme the admin panel documents for the owner, so a
- * partner (or the owner, testing by hand) can reproduce it from the
- * config alone.
+ * (Admin → Partner Callbacks). Two signature formats are supported:
+ *   params — the signed string is every callback parameter EXCEPT the
+ *            signature parameter itself, sorted by parameter name and
+ *            joined as `name=value&name=value` with the values exactly
+ *            as received — the scheme the admin panel documents for the
+ *            owner, so a partner (or the owner, testing by hand) can
+ *            reproduce it from the config alone.
+ *   colon  — the signed string is "{user}:{txn}:{payout}" — the user ID,
+ *            transaction ID and payout values joined with colons, in
+ *            that order (the scheme Offerwall.GG uses).
  */
-async function partnerHmacHex(
+async function partnerHmacHexRaw(
   secret: string,
-  params: Record<string, string>,
-  signatureParam: string,
+  canonical: string,
   hash: "SHA-1" | "SHA-256",
 ): Promise<string> {
-  const canonical = Object.keys(params)
-    .filter((k) => k !== signatureParam)
-    .sort()
-    .map((k) => `${k}=${params[k] ?? ""}`)
-    .join("&");
   const enc = new TextEncoder();
   const key = await globalThis.crypto.subtle.importKey(
     "raw",
@@ -2083,6 +2081,20 @@ async function partnerHmacHex(
     await globalThis.crypto.subtle.sign("HMAC", key, enc.encode(canonical)),
   );
   return [...raw].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function partnerHmacHex(
+  secret: string,
+  params: Record<string, string>,
+  signatureParam: string,
+  hash: "SHA-1" | "SHA-256",
+): Promise<string> {
+  const canonical = Object.keys(params)
+    .filter((k) => k !== signatureParam)
+    .sort()
+    .map((k) => `${k}=${params[k] ?? ""}`)
+    .join("&");
+  return partnerHmacHexRaw(secret, canonical, hash);
 }
 
 /** Constant-time string compare for secrets and signatures. */
@@ -2103,6 +2115,8 @@ const partnerCallbackShape = z.object({
   txnParam: z.string(),
   payoutParam: z.string(),
   payoutInCents: z.boolean(),
+  sigFormat: z.enum(["params", "colon"]),
+  payoutDivisor: z.number(),
   authMethod: z.enum(["none", "secret", "hmac_sha1", "hmac_sha256"]),
   secretParam: z.string(),
   // The secret value itself is NEVER sent back to the client — only
@@ -2123,6 +2137,8 @@ function publicPartnerCallback(
     txnParam: row.txnParam,
     payoutParam: row.payoutParam,
     payoutInCents: row.payoutInCents === 1,
+    sigFormat: row.sigFormat,
+    payoutDivisor: row.payoutDivisor,
     authMethod: row.authMethod,
     secretParam: row.secretParam,
     secretSet: row.secret !== "",
@@ -4085,12 +4101,24 @@ export const Actions = {
           if (!secretsEqual(given, config.secret))
             throw new Error("Invalid callback secret.");
         } else {
-          const expected = await partnerHmacHex(
-            config.secret,
-            params,
-            config.secretParam,
-            config.authMethod === "hmac_sha1" ? "SHA-1" : "SHA-256",
-          );
+          const hash = config.authMethod === "hmac_sha1" ? "SHA-1" : "SHA-256";
+          // "colon" partners (e.g. Offerwall.GG) sign
+          // "{user}:{txn}:{payout}" — the three values joined with
+          // colons, in that order. Every other HMAC partner signs the
+          // sorted name=value&name=value pairs.
+          const expected =
+            config.sigFormat === "colon"
+              ? await partnerHmacHexRaw(
+                  config.secret,
+                  `${userId}:${txId}:${payoutRaw}`,
+                  hash,
+                )
+              : await partnerHmacHex(
+                  config.secret,
+                  params,
+                  config.secretParam,
+                  hash,
+                );
           if (!secretsEqual(given.toLowerCase(), expected))
             throw new Error("Invalid callback signature.");
         }
@@ -4099,8 +4127,15 @@ export const Actions = {
       const payoutNumber = Number.parseFloat(payoutRaw);
       if (!Number.isFinite(payoutNumber))
         throw new Error("Invalid payout amount.");
-      const payout =
+      let payout =
         config.payoutInCents === 1 ? payoutNumber / 100 : payoutNumber;
+      // Partners that price in units (e.g. Offerwall.GG: 1000 units per
+      // $1) divide by the configured divisor to reach dollars.
+      const divisor =
+        Number.isFinite(config.payoutDivisor) && config.payoutDivisor > 0
+          ? config.payoutDivisor
+          : 1;
+      payout = payout / divisor;
       // Negative or zero payouts (reversals/chargebacks) never credit
       // and never debit automatically — same rule as TheoremReach.
       if (payout <= 0) {
@@ -5361,7 +5396,7 @@ export const Actions = {
 
   adminUpsertPartnerCallback: defineAction({
     description:
-      "Adds or edits a partner callback config: partner name + callback key, which parameters carry the user ID, transaction ID and payout (and whether the payout is in cents), and how callbacks are authenticated — no secret, a shared secret parameter, or an HMAC-SHA1 / HMAC-SHA256 signature — with the secret value. Saved configs take effect on the very next callback; no redeploy. Leaving the secret blank while editing keeps the stored one.",
+      "Adds or edits a partner callback config: partner name + callback key, which parameters carry the user ID, transaction ID and payout (and whether the payout is in cents, and how many payout units make $1), and how callbacks are authenticated — no secret, a shared secret parameter, or an HMAC-SHA1 / HMAC-SHA256 signature — with the secret value and, for HMAC partners, which signature format they use (sorted name=value pairs, or the user:transaction:amount colon format Offerwall.GG uses). Saved configs take effect on the very next callback; no redeploy. Leaving the secret blank while editing keeps the stored one.",
     request: z.object({
       adminToken: z.string().min(1).max(200),
       id: z.number().int().positive().optional(),
@@ -5378,6 +5413,14 @@ export const Actions = {
       txnParam: z.string().trim().min(1).max(60),
       payoutParam: z.string().trim().min(1).max(60),
       payoutInCents: z.boolean().default(false),
+      // How many payout units make $1 (1 = the payout already arrives
+      // in dollars; e.g. 1000 for a partner whose wall prices in 1000
+      // units per $1). Applied after the cents conversion.
+      payoutDivisor: z.number().positive().max(1000000).default(1),
+      // Which string an HMAC partner signs: the sorted name=value pairs
+      // ("params") or "{user}:{txn}:{payout}" ("colon", Offerwall.GG).
+      // Only used for HMAC auth methods.
+      sigFormat: z.enum(["params", "colon"]).default("params"),
       authMethod: z
         .enum(["none", "secret", "hmac_sha1", "hmac_sha256"])
         .default("none"),
@@ -5435,6 +5478,8 @@ export const Actions = {
         txnParam: args.txnParam,
         payoutParam: args.payoutParam,
         payoutInCents: args.payoutInCents ? 1 : 0,
+        sigFormat: args.sigFormat,
+        payoutDivisor: args.payoutDivisor,
         authMethod: args.authMethod,
         secretParam: args.authMethod === "none" ? "" : args.secretParam,
         active: args.active ? 1 : 0,

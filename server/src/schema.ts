@@ -298,6 +298,19 @@ export const partnerCallbacks = sqliteTable("partner_callbacks", {
   // 1 = the payout parameter arrives in cents (divided by 100 before
   // crediting); 0 = it arrives in dollars.
   payoutInCents: integer("payout_in_cents").notNull().default(0),
+  // How an HMAC signature is computed (HMAC partners only):
+  //   params — hex HMAC of every other parameter, sorted by name and
+  //            joined as name=value&name=value (the original scheme)
+  //   colon  — hex HMAC of "{user}:{txn}:{payout}" — the user ID,
+  //            transaction ID and payout values joined with colons, in
+  //            that order (the scheme Offerwall.GG uses).
+  sigFormat: text("sig_format", { enum: ["params", "colon"] })
+    .notNull()
+    .default("params"),
+  // Units of the partner's payout that make $1 (1 = the payout already
+  // arrives in dollars; e.g. 1000 for a partner whose wall prices in
+  // 1000 units per $1). Applied after the cents conversion.
+  payoutDivisor: real("payout_divisor").notNull().default(1),
   // How the partner proves the callback is genuine:
   //   none        — no check (not recommended for live partners)
   //   secret      — a parameter (secretParam) must equal the secret
