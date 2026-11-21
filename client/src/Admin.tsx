@@ -335,6 +335,9 @@ function Overview({
                       {p.name}{" "}
                       <span className="font-semibold text-[var(--dim)]">
                         · {AUTH_METHOD_LABELS[p.authMethod]}
+                        {(p.authMethod === "hmac_sha1" || p.authMethod === "hmac_sha256") && (
+                          <> ({SIG_FORMAT_LABELS[p.sigFormat]})</>
+                        )}
                         {p.active ? "" : " · switched off"}
                       </span>
                     </p>
@@ -2699,6 +2702,11 @@ const AUTH_METHOD_LABELS: Record<PartnerCallbackRow["authMethod"], string> = {
   hmac_sha256: "HMAC-SHA256 signature",
 };
 
+const SIG_FORMAT_LABELS: Record<PartnerCallbackRow["sigFormat"], string> = {
+  params: "sorted name=value pairs",
+  colon: "user:transaction:amount",
+};
+
 /**
  * The exact callback address to paste into a partner's dashboard: the
  * site's own address + /partner-callback/<key> + the parameter names
@@ -2778,6 +2786,8 @@ type PartnerCallbackForm = {
   txnParam: string;
   payoutParam: string;
   payoutInCents: boolean;
+  sigFormat: PartnerCallbackRow["sigFormat"];
+  payoutDivisor: number;
   authMethod: PartnerCallbackRow["authMethod"];
   secretParam: string;
   secret: string;
@@ -2792,6 +2802,8 @@ const EMPTY_PARTNER_FORM: PartnerCallbackForm = {
   txnParam: "txn_id",
   payoutParam: "payout",
   payoutInCents: false,
+  sigFormat: "params",
+  payoutDivisor: 1,
   authMethod: "none",
   secretParam: "",
   secret: "",
@@ -2831,6 +2843,8 @@ function PartnerCallbacksTab({ token }: { token: string }) {
         throw new Error("Give the partner a callback key — it is the end of its callback address.");
       if (!f.userParam.trim() || !f.txnParam.trim() || !f.payoutParam.trim())
         throw new Error("Fill in all three parameter names: user ID, transaction ID and payout.");
+      if (!Number.isFinite(f.payoutDivisor) || f.payoutDivisor <= 0)
+        throw new Error("Units per $1 must be a number above 0.");
       if (f.authMethod !== "none") {
         if (!f.secretParam.trim())
           throw new Error("Name the parameter that carries the secret / signature.");
@@ -2846,6 +2860,8 @@ function PartnerCallbacksTab({ token }: { token: string }) {
         txnParam: f.txnParam.trim(),
         payoutParam: f.payoutParam.trim(),
         payoutInCents: f.payoutInCents,
+        sigFormat: f.sigFormat,
+        payoutDivisor: f.payoutDivisor,
         authMethod: f.authMethod,
         secretParam: f.secretParam.trim(),
         secret: f.secret.trim() === "" ? undefined : f.secret.trim(),
@@ -2904,6 +2920,8 @@ function PartnerCallbacksTab({ token }: { token: string }) {
       txnParam: p.txnParam,
       payoutParam: p.payoutParam,
       payoutInCents: p.payoutInCents,
+      sigFormat: p.sigFormat,
+      payoutDivisor: p.payoutDivisor,
       authMethod: p.authMethod,
       secretParam: p.secretParam,
       secret: "",
@@ -2947,8 +2965,9 @@ function PartnerCallbacksTab({ token }: { token: string }) {
         <code className="font-semibold text-[var(--text)]">{"{user_id}"}</code> in the
         partner link you add under Offerwalls / Surveys / Games). For an HMAC partner,
         the signature is the lowercase hex HMAC of every other parameter sorted by
-        name and joined as <code className="font-semibold text-[var(--text)]">name=value&amp;name=value</code>,
-        keyed with the secret below.
+        name and joined as <code className="font-semibold text-[var(--text)]">name=value&amp;name=value</code> —
+        unless the partner signs the <em>user:transaction:amount</em> format instead
+        (Offerwall.GG does), in which case pick that format when you add it.
       </p>
 
       {error && (
@@ -3029,6 +3048,22 @@ function PartnerCallbacksTab({ token }: { token: string }) {
               </select>
             </div>
             <div>
+              <label htmlFor="pc-payout-divisor" className="text-sm font-semibold">Units per $1 <span className="font-normal text-[var(--dim)]">(1 = payout is already dollars)</span></label>
+              <input
+                id="pc-payout-divisor"
+                {...FIELDS.adminUpsertPartnerCallback.payoutDivisor}
+                type="number"
+                inputMode="decimal"
+                min="0"
+                step="any"
+                value={form.payoutDivisor}
+                onChange={(e) => setForm({ ...form, payoutDivisor: Number(e.target.value) })}
+                className={fieldCls}
+                placeholder="e.g. 1000"
+              />
+              <p className="mt-1 text-xs text-[var(--dim)]">How many payout units make $1 — e.g. 1000 for a wall that prices in 1000 units per $1.</p>
+            </div>
+            <div>
               <label htmlFor="pc-auth" className="text-sm font-semibold">Signature / secret check</label>
               <select
                 id="pc-auth"
@@ -3057,6 +3092,21 @@ function PartnerCallbacksTab({ token }: { token: string }) {
             </div>
             {form.authMethod !== "none" && (
               <>
+                {(form.authMethod === "hmac_sha1" || form.authMethod === "hmac_sha256") && (
+                  <div>
+                    <label htmlFor="pc-sig-format" className="text-sm font-semibold">Signature format</label>
+                    <select
+                      id="pc-sig-format"
+                      value={form.sigFormat}
+                      onChange={(e) => setForm({ ...form, sigFormat: e.target.value as PartnerCallbackForm["sigFormat"] })}
+                      className={fieldCls}
+                    >
+                      <option value="params">Parameters — HMAC of sorted name=value&amp;name=value pairs</option>
+                      <option value="colon">User:transaction:amount — HMAC of &quot;{"{user}"}:{"{txn}"}:{"{payout}"}&quot; (Offerwall.GG)</option>
+                    </select>
+                    <p className="mt-1 text-xs text-[var(--dim)]">Pick the one the partner&apos;s docs describe — Offerwall.GG signs the three values joined with colons.</p>
+                  </div>
+                )}
                 <div>
                   <label htmlFor="pc-secret-param" className="text-sm font-semibold">Secret / signature parameter name</label>
                   <input id="pc-secret-param" {...FIELDS.adminUpsertPartnerCallback.secretParam} value={form.secretParam} onChange={(e) => setForm({ ...form, secretParam: e.target.value })} className={fieldCls} placeholder={form.authMethod === "secret" ? "e.g. secret" : "e.g. signature"} />
@@ -3127,8 +3177,12 @@ function PartnerCallbacksTab({ token }: { token: string }) {
                   <p className="mt-1 text-xs leading-relaxed text-[var(--dim)]">
                     User ID in <code className="font-semibold text-[var(--text)]">{p.userParam}</code> ·
                     transaction in <code className="font-semibold text-[var(--text)]">{p.txnParam}</code> ·
-                    payout in <code className="font-semibold text-[var(--text)]">{p.payoutParam}</code> ({p.payoutInCents ? "cents" : "dollars"}) ·{" "}
+                    payout in <code className="font-semibold text-[var(--text)]">{p.payoutParam}</code> ({p.payoutInCents ? "cents" : "dollars"}
+                    {p.payoutDivisor !== 1 ? `, ${p.payoutDivisor} units per $1` : ""}) ·{" "}
                     {AUTH_METHOD_LABELS[p.authMethod]}
+                    {(p.authMethod === "hmac_sha1" || p.authMethod === "hmac_sha256") && (
+                      <> ({SIG_FORMAT_LABELS[p.sigFormat]})</>
+                    )}
                     {p.authMethod !== "none" && (
                       <>
                         {" "}in <code className="font-semibold text-[var(--text)]">{p.secretParam}</code> ·{" "}
