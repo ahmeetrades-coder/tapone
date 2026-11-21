@@ -49,10 +49,19 @@ export const users = sqliteTable("users", {
   balanceCents: integer("balance_cents").notNull().default(0),
   totalEarnedCents: integer("total_earned_cents").notNull().default(0),
   // Current level: every $1 of lifetime earnings = 1 level (RewardJoy
-  // rule). Title Bonuses are paid by checkLevelUps in actions.ts.
+  // rule). One-time per-title Level Rewards are paid by checkLevelUps
+  // in actions.ts.
   level: integer("level").notNull().default(0),
   // Highest 10-level milestone whose Title Bonus has been settled.
+  // Legacy: the per-10-levels Title Bonus was replaced by the one-time
+  // per-title Level Rewards (owner scheme 2026-11-21); the column is
+  // kept so old rows keep parsing, but nothing pays from it any more.
   titleBonusPaidLevel: integer("title_bonus_paid_level").notNull().default(0),
+  // JSON array of title names whose one-time Level Reward this user
+  // has already been paid (e.g. ["Bronze","Silver"]). A title is paid
+  // at most once per user, ever — checkLevelUps in actions.ts is the
+  // only writer.
+  titleRewardsPaidJson: text("title_rewards_paid_json").notNull().default("[]"),
   // Dark/light choice, saved per user so it persists across devices.
   theme: text("theme").notNull().default("light"),
   referralCode: text("referral_code").notNull().unique(),

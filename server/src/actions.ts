@@ -41,9 +41,10 @@ const DEFAULT_SETTINGS: Record<string, string> = {
   checkin_goal_cents: "100",
   checkin_rewards_cents: "20,25,30,40,50,65,70",
   // Levels (owner-editable in Admin → Settings → Levels & Title
-  // Bonuses): cents of lifetime earnings per level, and the title
-  // table as JSON [{name, level, standardPct, enhancedPct}]. Empty
-  // JSON = the built-in RewardJoy-verified table below.
+  // Rewards): cents of lifetime earnings per level, and the title
+  // table as JSON [{name, level, standardPct, enhancedPct,
+  // rewardCents}]. Empty JSON = the built-in table below (unlock
+  // levels RewardJoy-verified; rewards the owner's $1,000 split).
   level_cents_per_level: "100",
   level_titles_json: "",
   // Contest prize tiers by rank, comma-separated cents. Empty = the
@@ -511,38 +512,60 @@ async function customMethodLabels(db: DB): Promise<Map<string, string>> {
 }
 
 // ------------------------------------------------------------ levels
-// RewardJoy Title Bonus system (verified by inspection 2026-11-19):
-// every $1 earned = +1 level. Titles: Bronze L5, Silver L31, Gold L101,
-// (the pace and the title table below are the DEFAULTS — the owner can
-// change both in Admin → Settings → Levels & Title Bonuses, stored in
+// Levels (pace + title unlock levels verified against RewardJoy
+// 2026-11-19): every $1 earned = +1 level. Titles: Bronze L5, Silver
+// L31, Gold L101, Diamond L501, Champion L2001, Master L10001.
+// (The pace and the title table below are the DEFAULTS — the owner can
+// change both in Admin → Settings → Levels & Title Rewards, stored in
 // the level_cents_per_level / level_titles_json settings and read live
 // by levelConfigFrom on every use.)
-// Diamond L501, Champion L2001, Master L10001. A Title Bonus is settled
-// automatically at every 10 new levels (first settled after Level 15,
-// i.e. at Level 20): the title's percentage of the $10 earned in that
-// 10-level block. Rate is Enhanced when the user's chargeback rate is
-// under 3%, Standard at 3-5%, and no bonus above 5%. TapOne records no
-// partner chargebacks yet, so the recorded rate is 0% (Enhanced) until a
-// chargeback source exists. Because the level derives from lifetime
-// earnings, a negative adjustment (chargeback) lowers it again.
+//
+// LEVEL REWARDS (owner-confirmed scheme, 2026-11-21): each title pays a
+// ONE-TIME cash reward the moment a user reaches it — automatically,
+// for every user, exactly once per title per user (tracked in
+// users.title_rewards_paid_json). The six default rewards total
+// exactly $1,000: Bronze $5, Silver $5, Gold $15, Diamond $25,
+// Champion $50, Master $900. This REPLACES the old per-10-levels
+// percentage Title Bonus — that bonus is gone, so a user can never
+// collect more than the title rewards. A user who passed a title
+// before this scheme existed is paid that title's reward on their
+// next earning (checkLevelUps pays every reached-but-unpaid title).
+// The standardPct / enhancedPct fields survive only so title tables
+// saved by the older admin panel keep parsing; nothing pays from them.
+// Because the level derives from lifetime earnings, a negative
+// adjustment (chargeback) lowers it again — but a reward already paid
+// is never taken back and never paid twice.
 
 interface TitleDef {
   name: string;
   level: number;
   standardPct: number;
   enhancedPct: number;
+  /** One-time reward (cents) credited when a user first reaches this
+   *  title. 0 = the title pays no reward. */
+  rewardCents: number;
 }
 
-/** Built-in title table (RewardJoy-verified) — used until the owner
- *  saves his own in Admin → Settings → Levels & Title Bonuses. */
+/** Built-in title table — used until the owner saves his own in
+ *  Admin → Settings → Levels & Title Rewards. */
 const DEFAULT_TITLES: TitleDef[] = [
-  { name: "Bronze", level: 5, standardPct: 1, enhancedPct: 2 },
-  { name: "Silver", level: 31, standardPct: 3, enhancedPct: 4 },
-  { name: "Gold", level: 101, standardPct: 5, enhancedPct: 6 },
-  { name: "Diamond", level: 501, standardPct: 7, enhancedPct: 8 },
-  { name: "Champion", level: 2001, standardPct: 9, enhancedPct: 10 },
-  { name: "Master", level: 10001, standardPct: 11, enhancedPct: 12 },
+  { name: "Bronze", level: 5, standardPct: 1, enhancedPct: 2, rewardCents: 500 },
+  { name: "Silver", level: 31, standardPct: 3, enhancedPct: 4, rewardCents: 500 },
+  { name: "Gold", level: 101, standardPct: 5, enhancedPct: 6, rewardCents: 1500 },
+  { name: "Diamond", level: 501, standardPct: 7, enhancedPct: 8, rewardCents: 2500 },
+  { name: "Champion", level: 2001, standardPct: 9, enhancedPct: 10, rewardCents: 5000 },
+  { name: "Master", level: 10001, standardPct: 11, enhancedPct: 12, rewardCents: 90000 },
 ];
+
+/** The built-in one-time reward for a title name (case-insensitive),
+ *  or 0 when the name is not one of the built-in titles. Used when a
+ *  stored title table predates the reward field. */
+function defaultRewardForTitle(name: string): number {
+  const found = DEFAULT_TITLES.find(
+    (t) => t.name.toLowerCase() === name.trim().toLowerCase(),
+  );
+  return found?.rewardCents ?? 0;
+}
 
 interface LevelConfig {
   titles: TitleDef[];
@@ -553,8 +576,11 @@ interface LevelConfig {
  * The live level configuration: the owner's title table from settings
  * (`level_titles_json`) when it is present and valid — 1–8 titles with
  * strictly increasing levels and 0–100 percentages — otherwise the
- * built-in table. `level_cents_per_level` is how many cents of
- * lifetime earnings make one level (default 100 = $1 per level).
+ * built-in table. A stored entry without a valid `rewardCents` (a
+ * table saved before Level Rewards existed) falls back to the
+ * built-in reward for a title of the same name, else 0.
+ * `level_cents_per_level` is how many cents of lifetime earnings make
+ * one level (default 100 = $1 per level).
  */
 function levelConfigFrom(settings: Record<string, string>): LevelConfig {
   const centsRaw = settingInt(settings, "level_cents_per_level");
@@ -580,6 +606,13 @@ function levelConfigFrom(settings: Record<string, string>): LevelConfig {
             typeof r.standardPct === "number" ? r.standardPct : Number.NaN;
           const enhancedPct =
             typeof r.enhancedPct === "number" ? r.enhancedPct : Number.NaN;
+          const rewardCents =
+            typeof r.rewardCents === "number" &&
+            Number.isInteger(r.rewardCents) &&
+            r.rewardCents >= 0 &&
+            r.rewardCents <= 100_000_000
+              ? r.rewardCents
+              : defaultRewardForTitle(name);
           if (
             !name ||
             name.length > 30 ||
@@ -597,7 +630,7 @@ function levelConfigFrom(settings: Record<string, string>): LevelConfig {
             break;
           }
           prev = level;
-          out.push({ name, level, standardPct, enhancedPct });
+          out.push({ name, level, standardPct, enhancedPct, rewardCents });
         }
         if (valid && out.length > 0) return { titles: out, centsPerLevel };
       }
@@ -659,10 +692,39 @@ async function chargebackRatePct(db: DB, userId: number): Promise<number> {
   return Math.min(100, (reversed / earned) * 100);
 }
 
+/** Title names whose one-time Level Reward a user has already been
+ *  paid, parsed from users.title_rewards_paid_json. Corrupt JSON reads
+ *  as "nothing paid" — the ledger check in checkLevelUps still stops
+ *  a double payment in that case. */
+function paidTitleRewards(user: UserRow): Set<string> {
+  try {
+    const parsed: unknown = JSON.parse(user.titleRewardsPaidJson || "[]");
+    if (Array.isArray(parsed)) {
+      return new Set(
+        parsed.filter((x): x is string => typeof x === "string"),
+      );
+    }
+  } catch {
+    // fall through to the empty set
+  }
+  return new Set();
+}
+
 /**
- * Syncs a user's stored level with their lifetime earnings and pays any
- * due Title Bonuses. Called after every credit (and lazily from
- * getLevel), so level, progress and bonuses are never display-only.
+ * Syncs a user's stored level with their lifetime earnings and pays
+ * any due one-time Level Rewards. Called after every credit (and
+ * lazily from getLevel), so level, progress and rewards are never
+ * display-only.
+ *
+ * A title's reward is paid when ALL of these hold: the user's level
+ * has reached the title, the title's reward is above $0, and the
+ * title is not in the user's paid set. The paid set lives on the user
+ * row AND every payment writes a `level_reward` ledger row whose note
+ * names the title; before paying, the ledger is checked too, so even
+ * a lost/corrupt paid set can never pay a title twice. Rewards count
+ * toward lifetime earnings (and therefore the level), exactly like
+ * the old Title Bonus did — the loop re-checks after each payment
+ * because a reward can itself carry the user into the next title.
  */
 async function checkLevelUps(db: DB, userId: number): Promise<void> {
   const rows = await db
@@ -673,41 +735,54 @@ async function checkLevelUps(db: DB, userId: number): Promise<void> {
   const user = rows[0];
   if (!user) return;
   // Level pace + title table come from the owner's settings (Admin →
-  // Settings → Levels & Title Bonuses), defaulting to $1 per level and
-  // the built-in RewardJoy table.
+  // Settings → Levels & Title Rewards), defaulting to $1 per level and
+  // the built-in table with the $1,000 reward split.
   const levelCfg = levelConfigFrom(await getSettings(db));
-  const cbRate = await chargebackRatePct(db, userId);
+  const paid = paidTitleRewards(user);
+  // Belt-and-braces duplicate guard: titles already present in the
+  // ledger as a Level Reward count as paid even if the row's paid set
+  // was lost. Old per-10-levels bonus rows ("Title Bonus — Level …")
+  // do NOT match the "Level Reward — " prefix, so they never block a
+  // title's one-time reward.
+  const ledger = await db
+    .select()
+    .from(schema.transactions)
+    .where(
+      and(
+        eq(schema.transactions.userId, userId),
+        eq(schema.transactions.kind, "level_reward"),
+      ),
+    );
+  for (const row of ledger) {
+    for (const title of levelCfg.titles) {
+      if (row.note.startsWith(`Level Reward — ${title.name} `)) {
+        paid.add(title.name);
+      }
+    }
+  }
   let totalEarned = user.totalEarnedCents;
   let balance = user.balanceCents;
-  let paidLevel = user.titleBonusPaidLevel;
-  const bonusRows: { amountCents: number; note: string }[] = [];
-  for (let i = 0; i < 300; i++) {
+  const rewardRows: { amountCents: number; note: string }[] = [];
+  for (let guard = 0; guard < 20; guard++) {
     const levelNow = levelForEarned(totalEarned, levelCfg.centsPerLevel);
-    const nextMilestone = Math.floor(paidLevel / 10) * 10 + 10;
-    if (nextMilestone > levelNow) break;
-    paidLevel = nextMilestone;
-    if (nextMilestone < 20) continue; // first settled after Level 15
-    const title = titleForLevel(nextMilestone, levelCfg.titles);
-    if (!title) continue;
-    const pct =
-      cbRate < 3 ? title.enhancedPct : cbRate <= 5 ? title.standardPct : 0;
-    if (pct <= 0) continue;
-    // The 10-level block is 10 × the per-level earnings; the bonus is
-    // pct% of that block ($10 at the default $1-per-level pace).
-    const bonus = Math.round(10 * levelCfg.centsPerLevel * (pct / 100));
-    if (bonus <= 0) continue;
-    bonusRows.push({
-      amountCents: bonus,
-      note: `Title Bonus — Level ${nextMilestone} (${title.name}, ${cbRate < 3 ? "Enhanced" : "Standard"} ${pct}%)`,
+    const due = levelCfg.titles.find(
+      (t) => levelNow >= t.level && t.rewardCents > 0 && !paid.has(t.name),
+    );
+    if (!due) break;
+    paid.add(due.name);
+    rewardRows.push({
+      amountCents: due.rewardCents,
+      note: `Level Reward — ${due.name} (Level ${due.level})`,
     });
-    balance += bonus;
-    totalEarned += bonus;
+    balance += due.rewardCents;
+    totalEarned += due.rewardCents;
   }
   const newLevel = levelForEarned(totalEarned, levelCfg.centsPerLevel);
+  const paidJson = JSON.stringify([...paid]);
   if (
     newLevel === user.level &&
-    paidLevel === user.titleBonusPaidLevel &&
-    bonusRows.length === 0
+    rewardRows.length === 0 &&
+    paidJson === (user.titleRewardsPaidJson || "[]")
   ) {
     return;
   }
@@ -716,19 +791,19 @@ async function checkLevelUps(db: DB, userId: number): Promise<void> {
       .update(schema.users)
       .set({
         level: newLevel,
-        titleBonusPaidLevel: paidLevel,
+        titleRewardsPaidJson: paidJson,
         balanceCents: balance,
         totalEarnedCents: totalEarned,
       })
       .where(eq(schema.users.id, user.id)),
   ];
-  for (const b of bonusRows) {
+  for (const r of rewardRows) {
     statements.push(
       db.insert(schema.transactions).values({
         userId: user.id,
         kind: "level_reward",
-        amountCents: b.amountCents,
-        note: b.note,
+        amountCents: r.amountCents,
+        note: r.note,
       }),
     );
   }
@@ -3450,7 +3525,7 @@ export const Actions = {
 
   getLevel: defineAction({
     description:
-      "The signed-in user's Level & Privileges (Title Bonus system): level from lifetime earnings ($1 = 1 level), current and next title, progress to the next title, all titles with their bonus rates, and Title Bonus history. Syncs level and pays due bonuses first.",
+      "The signed-in user's Level & Privileges: level from lifetime earnings ($1 = 1 level), current and next title, progress to the next title, all titles with their one-time Level Reward amounts, and Level Reward history. Syncs level and pays due rewards first.",
     request: z.object({ token: z.string().min(1).max(200) }),
     response: z.object({
       level: z.number(),
@@ -3462,6 +3537,7 @@ export const Actions = {
           level: z.number(),
           standardPct: z.number(),
           enhancedPct: z.number(),
+          rewardCents: z.number(),
         })
         .nullable(),
       progressPct: z.number(),
@@ -3472,6 +3548,7 @@ export const Actions = {
           level: z.number(),
           standardPct: z.number(),
           enhancedPct: z.number(),
+          rewardCents: z.number(),
           reached: z.boolean(),
           current: z.boolean(),
         }),
@@ -3530,6 +3607,7 @@ export const Actions = {
               level: next.level,
               standardPct: next.standardPct,
               enhancedPct: next.enhancedPct,
+              rewardCents: next.rewardCents,
             }
           : null,
         progressPct,
@@ -3539,6 +3617,7 @@ export const Actions = {
           level: title.level,
           standardPct: title.standardPct,
           enhancedPct: title.enhancedPct,
+          rewardCents: title.rewardCents,
           reached: level >= title.level,
           current: current?.name === title.name,
         })),
@@ -4159,6 +4238,7 @@ export const Actions = {
             level: z.number(),
             standardPct: z.number(),
             enhancedPct: z.number(),
+            rewardCents: z.number(),
           }),
         ),
         socialLinks: z.record(z.string(), z.string()),
@@ -4230,6 +4310,7 @@ export const Actions = {
             level: t.level,
             standardPct: t.standardPct,
             enhancedPct: t.enhancedPct,
+            rewardCents: t.rewardCents,
           })),
           socialLinks: Object.fromEntries(
             SOCIAL_PLATFORMS.map((s) => [s.id, settings[s.key] ?? ""]),
@@ -5798,6 +5879,10 @@ export const Actions = {
             level: z.number().int().min(1).max(1_000_000),
             standardPct: z.number().int().min(0).max(100),
             enhancedPct: z.number().int().min(0).max(100),
+            // One-time Level Reward for reaching this title, in cents.
+            // Optional so older admin clients keep saving; a missing
+            // value is filled from the built-in table by name.
+            rewardCents: z.number().int().min(0).max(100_000_000).optional(),
           }),
         )
         .min(1)
@@ -5857,7 +5942,15 @@ export const Actions = {
           if ((args.levelTitles[i]?.level ?? 0) <= (args.levelTitles[i - 1]?.level ?? 0))
             throw new Error("Title levels must increase from one title to the next.");
         }
-        updates.push(["level_titles_json", JSON.stringify(args.levelTitles)]);
+        updates.push([
+          "level_titles_json",
+          JSON.stringify(
+            args.levelTitles.map((t) => ({
+              ...t,
+              rewardCents: t.rewardCents ?? defaultRewardForTitle(t.name),
+            })),
+          ),
+        ]);
       }
       const socialArgs: [string | undefined, string][] = [
         [args.socialDiscord, "social_discord"],
