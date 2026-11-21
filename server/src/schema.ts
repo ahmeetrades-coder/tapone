@@ -87,6 +87,13 @@ export const contentItems = sqliteTable("content_items", {
   description: text("description").notNull().default(""),
   rewardCents: integer("reward_cents"),
   url: text("url").notNull().default(""),
+  // Optional JSON feed address for this partner's INDIVIDUAL items
+  // (Admin → Content → Items feed URL). When set on a survey or game
+  // row, the server fetches it per user — {user_id} / {ip} /
+  // {country} placeholders — and lists the partner's own surveys or
+  // games in the Surveys / Games tabs. Server-only: never sent to
+  // user clients (a feed URL can carry a partner API key).
+  feedUrl: text("feed_url"),
   imageUrl: text("image_url"),
   // Optional small badge on the Offerwalls card (e.g. "+20%"), set by
   // the owner in Admin → Content. Null = no badge.

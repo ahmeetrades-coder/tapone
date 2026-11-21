@@ -1431,6 +1431,12 @@ const contentShape = z.object({
   createdAt: z.string(),
 });
 
+// Admin-only extension: the partner feed URL is never exposed to
+// user-facing payloads (it can carry a partner API key).
+const adminContentShape = contentShape.extend({
+  feedUrl: z.string().nullable(),
+});
+
 /** Parses the stored game-milestones JSON; anything malformed = none. */
 function parseMilestones(
   json: string | null | undefined,
@@ -1490,13 +1496,19 @@ function publicContent(row: typeof schema.contentItems.$inferSelect) {
   };
 }
 
+function adminContent(row: typeof schema.contentItems.$inferSelect) {
+  return { ...publicContent(row), feedUrl: row.feedUrl ?? null };
+}
+
 /**
  * Personalises a partner URL for one signed-in user: `{user_id}` becomes
  * the user's OWN Offer Token (the OT-… ID on their Profile — this is the
  * ID partners send back in their postback/callback, so it is how a
  * completed offer finds its user) and `{transaction_id}` becomes a
- * fresh unique ID for this view/click. URLs without placeholders are
- * returned unchanged.
+ * fresh unique ID for this view/click. Feed URLs may also use `{ip}`
+ * (the user's sign-in IP) and `{country}` (their locked country code)
+ * so the partner matches its items to that user. URLs without
+ * placeholders are returned unchanged.
  */
 function personalizeContentUrl(url: string, user: UserRow): string {
   if (!url) return url;
@@ -1509,20 +1521,38 @@ function personalizeContentUrl(url: string, user: UserRow): string {
   if (out.includes("{transaction_id}")) {
     out = out.split("{transaction_id}").join(newToken("txn"));
   }
+  if (out.includes("{ip}")) {
+    out = out.split("{ip}").join(encodeURIComponent(user.ip ?? ""));
+  }
+  if (out.includes("{country}")) {
+    out = out
+      .split("{country}")
+      .join(encodeURIComponent(user.countryCode ?? ""));
+  }
   return out;
 }
 
-// ------------------------------------------------------------ survey feed
+// ------------------------------------------------------------ partner feeds
 //
-// The Surveys tab shows INDIVIDUAL surveys — never partner cards and
-// never a partner's website (owner order 2026-11-21, TimeBucks model).
-// For every survey partner the admin has added, a per-partner adapter
-// below asks that partner's own survey API for the surveys matched to
-// THIS user (the partner does the IP/profile matching for the user ID
-// we send — the user's Offer Token, the same ID its callbacks use).
-// Each survey keeps its own entry link, so tapping a card opens that
-// one survey. A partner with no adapter yet, or whose API answers
-// nothing, simply contributes no surveys — nothing is invented.
+// The Surveys and Games tabs show INDIVIDUAL items — never partner
+// cards and never a partner's website (owner order 2026-11-21,
+// TimeBucks model). For every partner the admin has added, an adapter
+// below asks that partner for the items matched to THIS user (the
+// partner does the IP/profile matching for the identity we send —
+// the user's Offer Token, sign-in IP and locked country, the same
+// identity its callbacks credit). Each item keeps its own entry
+// link, so tapping a card opens that one survey/game directly, and
+// completion money arrives through the same partner-agnostic
+// postback/callback crediting as every other partner.
+//
+// Adapters, in order: a dedicated one where TapOne speaks the
+// partner's own API (TheoremReach — signed Surveys API; CPX), and
+// ONE generic JSON-feed adapter for every other partner, present or
+// future: when the admin saves an "Items feed URL" on the partner's
+// row, its individual surveys/games list automatically — no new code
+// per partner (owner order 2026-11-21: fix the feed once, for all
+// partners). A partner with neither simply contributes no items —
+// nothing is invented.
 
 const surveyFeedItemShape = z.object({
   key: z.string(),
@@ -1597,6 +1627,9 @@ function mapFeedSurvey(
   const rec = feedRecord(raw);
   if (!rec) return null;
   const url = feedStr(rec, [
+    // TheoremReach's Surveys API names the per-survey link
+    // "entry_link" — it must win over any generic field.
+    "entry_link",
     "link",
     "url",
     "offer_url",
@@ -1636,7 +1669,8 @@ function mapFeedSurvey(
     "time_required",
   ]);
   const offerId =
-    feedStr(rec, ["offer_id", "survey_id", "id"]) ?? String(index);
+    feedStr(rec, ["campaign_id", "offer_id", "survey_id", "id"]) ??
+    String(index);
   return {
     key: `${partner.name}:${offerId}:${index}`,
     provider: partner.name,
@@ -1668,17 +1702,54 @@ async function fetchFeedJson(url: string): Promise<unknown | null> {
 
 type ContentRow = typeof schema.contentItems.$inferSelect;
 
+/** Shared context every partner feed adapter receives. */
+type PartnerFeedCtx = {
+  sharePct: number;
+  // TheoremReach app Secret Key (Admin → Settings). Required to sign
+  // Surveys API requests and the per-survey entry links.
+  theoremReachSecret: string;
+};
+
 /**
- * TheoremReach Surveys API (theoremreach.com/docs/surveys_api): the
- * publisher API key is read from the entry URL the admin saved for
- * the partner (it carries ?api_key=…), and the surveys returned are
- * the ones TheoremReach has matched to this user_id.
+ * TheoremReach Surveys API (theoremreach.com/docs/surveys_api).
+ *
+ * ROOT CAUSE of the empty Surveys list (fixed 2026-11-21): the old
+ * adapter called https://theoremreach.com/api/offers/v1/offers —
+ * a path that answers 404 — unsigned, with no IP/country, and the
+ * shared mapper did not know the response's `entry_link` field, so
+ * even a good answer would have been dropped item by item. The wall
+ * worked because it is a different, browser-side product.
+ *
+ * The real API:
+ *   GET https://api.theoremreach.com/api/publishers/v1/surveys
+ *       ?api_key=…&user_id=…&ip=…&country_code=…&hash=…
+ * Every request must be SIGNED — hash = base64url(HMAC-SHA1(secret,
+ * the exact URL)), appended last; theoremReachSignature below is
+ * that scheme (the same one the reward callback uses). Matching is
+ * driven by the ip / country_code WE send, so we send the user's own
+ * sign-in IP and locked country — the identity the respondent wall
+ * sees when the user opens it. If that attempt returns nothing, we
+ * retry with user_id alone, so TheoremReach matches from the stored
+ * respondent profile it built for this user from their wall visits
+ * (the very profile the wall shows its surveys for). Each returned
+ * survey's entry_link arrives UNSIGNED and must be signed the same
+ * way before a user may open it — unsigned links fail at
+ * TheoremReach with a hash-signature error.
+ *
+ * External prerequisites on TheoremReach's side (not fixable in
+ * code): the app's Publisher API must be enabled by TheoremReach
+ * (part of the Go Live review) and the Secret Key must be saved in
+ * Admin → Settings — without the secret no signed request exists.
+ * The API key is read from the entry URL the admin saved for the
+ * partner (it carries ?api_key=…).
  */
 async function theoremReachSurveys(
   item: ContentRow,
   user: UserRow,
-  sharePct: number,
+  ctx: PartnerFeedCtx,
 ): Promise<SurveyFeedItem[]> {
+  const secret = ctx.theoremReachSecret;
+  if (!secret) return [];
   let apiKey = "";
   try {
     apiKey = new URL(item.url).searchParams.get("api_key") ?? "";
@@ -1690,19 +1761,40 @@ async function theoremReachSurveys(
     name: item.provider || item.title,
     imageUrl: item.imageUrl ?? null,
   };
-  const uid = encodeURIComponent(user.offerToken ?? user.userCode);
-  const key = encodeURIComponent(apiKey);
-  const endpoints = [
-    `https://theoremreach.com/api/offers/v1/offers?api_key=${key}&user_id=${uid}`,
-    `https://theoremreach.com/api/offers/v1/offers/all?api_key=${key}&user_id=${uid}`,
+  const uid = user.offerToken ?? user.userCode;
+  const attempts: string[][] = [
+    [
+      `api_key=${encodeURIComponent(apiKey)}`,
+      `user_id=${encodeURIComponent(uid)}`,
+      ...(user.ip ? [`ip=${encodeURIComponent(user.ip)}`] : []),
+      ...(user.countryCode
+        ? [`country_code=${encodeURIComponent(user.countryCode)}`]
+        : []),
+    ],
+    [
+      `api_key=${encodeURIComponent(apiKey)}`,
+      `user_id=${encodeURIComponent(uid)}`,
+    ],
   ];
-  for (const endpoint of endpoints) {
-    const json = await fetchFeedJson(endpoint);
+  for (const params of attempts) {
+    const base =
+      `https://api.theoremreach.com/api/publishers/v1/surveys?${params.join("&")}`;
+    const hash = await theoremReachSignature(secret, base);
+    const json = await fetchFeedJson(`${base}&hash=${hash}`);
     const list = json == null ? null : feedList(json);
     if (!list) continue;
-    return list
-      .map((raw, i) => mapFeedSurvey(raw, i, partner, sharePct))
+    const mapped = list
+      .map((raw, i) => mapFeedSurvey(raw, i, partner, ctx.sharePct))
       .filter((s): s is SurveyFeedItem => s !== null);
+    if (mapped.length === 0) continue;
+    // Sign every entry link before it reaches the client.
+    return Promise.all(
+      mapped.map(async (s) => {
+        const sep = s.url.includes("?") ? "&" : "?";
+        const sig = await theoremReachSignature(secret, s.url);
+        return { ...s, url: `${s.url}${sep}hash=${sig}` };
+      }),
+    );
   }
   return [];
 }
@@ -1715,7 +1807,7 @@ async function theoremReachSurveys(
 async function cpxSurveys(
   item: ContentRow,
   user: UserRow,
-  sharePct: number,
+  ctx: PartnerFeedCtx,
 ): Promise<SurveyFeedItem[]> {
   let appId = "";
   try {
@@ -1734,6 +1826,38 @@ async function cpxSurveys(
   const list = json == null ? null : feedList(json);
   if (!list) return [];
   return list
+    .map((raw, i) => mapFeedSurvey(raw, i, partner, ctx.sharePct))
+    .filter((s): s is SurveyFeedItem => s !== null);
+}
+
+/**
+ * Generic partner feed — the one-size adapter for every partner
+ * without a dedicated one, present or future (Prime Survey, game
+ * walls, any wall added later). When the admin saves an Items feed
+ * URL on the partner's row (Admin → Content), the server fetches
+ * that JSON feed FOR THIS USER — personalizeContentUrl substitutes
+ * {user_id} (Offer Token), {ip} and {country} — so the partner
+ * returns the items matched to this user's IP/country, and the
+ * shared mapper turns them into cards that open each item's own
+ * link. Crediting needs nothing partner-specific: completions come
+ * back through the postback / partner-callback endpoints keyed by
+ * the same Offer Token.
+ */
+async function genericFeedItems(
+  item: ContentRow,
+  user: UserRow,
+  sharePct: number,
+): Promise<SurveyFeedItem[]> {
+  const feedUrl = item.feedUrl?.trim();
+  if (!feedUrl) return [];
+  const partner = {
+    name: item.provider || item.title,
+    imageUrl: item.imageUrl ?? null,
+  };
+  const json = await fetchFeedJson(personalizeContentUrl(feedUrl, user));
+  const list = json == null ? null : feedList(json);
+  if (!list) return [];
+  return list
     .map((raw, i) => mapFeedSurvey(raw, i, partner, sharePct))
     .filter((s): s is SurveyFeedItem => s !== null);
 }
@@ -1742,16 +1866,29 @@ async function cpxSurveys(
 function surveyFeedForPartner(
   item: ContentRow,
   user: UserRow,
-  sharePct: number,
+  ctx: PartnerFeedCtx,
 ): Promise<SurveyFeedItem[]> {
   const key = partnerKeyOf(item.provider, item.title);
   if (key.includes("theoremreach") || key.includes("theorem reach"))
-    return theoremReachSurveys(item, user, sharePct);
-  if (key.includes("cpx")) return cpxSurveys(item, user, sharePct);
-  // No adapter for this partner yet: its individual surveys cannot be
-  // listed until one is added — the partner contributes nothing here
-  // (its wall card still lives in the Offerwalls tab).
-  return Promise.resolve([]);
+    return theoremReachSurveys(item, user, ctx);
+  if (key.includes("cpx")) return cpxSurveys(item, user, ctx);
+  // No dedicated adapter: the generic feed still lists this
+  // partner's individual surveys when the admin saved a Feed URL
+  // for it; otherwise it contributes nothing here (its wall card
+  // still lives in the Offerwalls tab).
+  return genericFeedItems(item, user, ctx.sharePct);
+}
+
+/** Routes one game partner to its feed adapter. */
+function gameFeedForPartner(
+  item: ContentRow,
+  user: UserRow,
+  ctx: PartnerFeedCtx,
+): Promise<SurveyFeedItem[]> {
+  // No dedicated game-wall APIs yet: the generic feed is the route —
+  // a game wall with an Items feed URL lists its individual games in
+  // the Games tab exactly like survey partners list surveys.
+  return genericFeedItems(item, user, ctx.sharePct);
 }
 
 /**
@@ -2466,16 +2603,65 @@ export const Actions = {
         seenPartners.add(k);
         return true;
       });
+      const feedCtx: PartnerFeedCtx = {
+        sharePct,
+        theoremReachSecret: settings["theoremreach_secret"] ?? "",
+      };
       const perPartner = await Promise.all(
-        partners.map((p) => surveyFeedForPartner(p, user, sharePct)),
+        partners.map((p) => surveyFeedForPartner(p, user, feedCtx)),
       );
       const byUrl = new Map<string, SurveyFeedItem>();
       for (const s of perPartner.flat())
         if (!byUrl.has(s.url)) byUrl.set(s.url, s);
-      const surveys = [...byUrl.values()]
-        .sort((a, b) => b.payoutCents - a.payoutCents)
-        .slice(0, 100);
+      // Partners return their items in the order they recommend
+      // showing them (TheoremReach is explicit about this) — keep
+      // that order; do not re-sort by payout.
+      const surveys = [...byUrl.values()].slice(0, 100);
       return { surveys };
+    },
+  }),
+
+  listGameFeed: defineAction({
+    description:
+      "The signed-in user's individual games, pulled live from every active game partner that exposes an items feed (Admin → Content → Items feed URL) and visible in the user's country: each entry carries that game's own link and the payout the user will earn (their revenue share). This is how a game WALL's own games reach the same Games tab as admin-added games (listContent), with the same per-user IP/country matching and the same callback crediting on completion.",
+    request: z.object({ token: z.string().min(1).max(200) }),
+    response: z.object({ games: z.array(surveyFeedItemShape) }),
+    async handler(ctx, args) {
+      const db = ctx.db<typeof schema>();
+      const user = await requireUser(ctx, args.token);
+      const settings = await getSettings(db);
+      const feedCtx: PartnerFeedCtx = {
+        sharePct: settingInt(settings, "user_share_pct") || 70,
+        theoremReachSecret: settings["theoremreach_secret"] ?? "",
+      };
+      const rows = await db
+        .select()
+        .from(schema.contentItems)
+        .where(
+          and(
+            eq(schema.contentItems.kind, "game"),
+            eq(schema.contentItems.active, 1),
+          ),
+        )
+        .orderBy(schema.contentItems.sortOrder, desc(schema.contentItems.id));
+      // One feed per partner, from the partners visible in the
+      // user's own (login-IP) country — the same IP rule as surveys.
+      const seenPartners = new Set<string>();
+      const partners = rows.filter((r) => {
+        if (!r.feedUrl) return false;
+        if (!visibleInCountry(r.countries, user.countryCode)) return false;
+        const k = partnerKeyOf(r.provider, r.title);
+        if (seenPartners.has(k)) return false;
+        seenPartners.add(k);
+        return true;
+      });
+      const perPartner = await Promise.all(
+        partners.map((p) => gameFeedForPartner(p, user, feedCtx)),
+      );
+      const byUrl = new Map<string, SurveyFeedItem>();
+      for (const s of perPartner.flat())
+        if (!byUrl.has(s.url)) byUrl.set(s.url, s);
+      return { games: [...byUrl.values()].slice(0, 100) };
     },
   }),
 
@@ -4636,7 +4822,7 @@ export const Actions = {
   adminListContent: defineAction({
     description: "All offerwalls, surveys and games (including inactive) for admin management.",
     request: z.object({ adminToken: z.string().min(1).max(200) }),
-    response: z.object({ items: z.array(contentShape) }),
+    response: z.object({ items: z.array(adminContentShape) }),
     async handler(ctx, args) {
       await requireAdmin(ctx, args.adminToken);
       const db = ctx.db<typeof schema>();
@@ -4644,7 +4830,7 @@ export const Actions = {
         .select()
         .from(schema.contentItems)
         .orderBy(schema.contentItems.kind, schema.contentItems.sortOrder, desc(schema.contentItems.id));
-      return { items: rows.map(publicContent) };
+      return { items: rows.map(adminContent) };
     },
   }),
 
@@ -4660,6 +4846,7 @@ export const Actions = {
       description: z.string().trim().max(600).default(""),
       rewardCents: z.number().int().nonnegative().max(100_000_000).nullable().default(null),
       url: z.string().trim().max(1000).default(""),
+      feedUrl: z.string().trim().max(2000).nullable().default(null),
       imageUrl: z.string().trim().max(1000).nullable().default(null),
       badge: z.string().trim().max(24).nullable().default(null),
       platform: z.enum(["android", "ios", "both"]).default("android"),
@@ -4688,6 +4875,7 @@ export const Actions = {
         description: args.description,
         rewardCents: args.rewardCents,
         url: args.url,
+        feedUrl: args.feedUrl,
         imageUrl: args.imageUrl,
         badge: args.badge,
         platform: args.platform,
