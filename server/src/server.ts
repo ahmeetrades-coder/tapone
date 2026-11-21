@@ -21,6 +21,9 @@
 //     non-2xx { error: { message, issues? } } on failure.
 //   GET  /blobs/<key>               — files stored through ctx.blobs
 //     (profile pictures), kept next to the database file.
+//   GET  /theoremreach-callback?…   — TheoremReach's server-to-server
+//     reward callback; dispatched to the theoremReachCallback action
+//     with the raw signed URL so the action can verify the signature.
 //   GET  /*                         — static files from CLIENT_DIR with an
 //     index.html fallback (the app is a hash-routed single page).
 //   Once a day at SETTLE_TIME it invokes the settleDailyContest action
@@ -362,6 +365,49 @@ const server = Bun.serve({
       try {
         const data = await dispatch(body.action, body.args);
         return Response.json({ data: data ?? null });
+      } catch (err) {
+        return errorResponse(err);
+      }
+    }
+    if (url.pathname === "/theoremreach-callback") {
+      // TheoremReach server-to-server reward callback (GET, query
+      // params, &hash= signature appended last by TheoremReach). The
+      // action verifies the HMAC-SHA1 signature over the exact URL
+      // string, so pass it through untouched: signed_url is the raw
+      // request URL with the trailing &hash=… removed.
+      if (req.method !== "GET") {
+        return Response.json(
+          { error: { message: "Callback is called with GET." } },
+          { status: 405 },
+        );
+      }
+      const q = url.searchParams;
+      const hash = q.get("hash") ?? undefined;
+      let signedUrl: string | undefined;
+      if (hash) {
+        const suffix = `&hash=${hash}`;
+        if (req.url.endsWith(suffix)) {
+          signedUrl = req.url.slice(0, req.url.length - suffix.length);
+        } else {
+          const rebuilt = new URL(req.url);
+          rebuilt.searchParams.delete("hash");
+          signedUrl = rebuilt.toString();
+        }
+      }
+      try {
+        const data = await dispatch("theoremReachCallback", {
+          user_id: q.get("user_id") ?? "",
+          tx_id: q.get("tx_id") ?? "",
+          reward: q.get("reward") ?? undefined,
+          reward_amount_in_dollars:
+            q.get("reward_amount_in_dollars") ?? undefined,
+          external_transaction_id:
+            q.get("external_transaction_id") ?? undefined,
+          reversal: q.get("reversal") ?? undefined,
+          hash,
+          signed_url: signedUrl,
+        });
+        return Response.json(data ?? { status: "ok" });
       } catch (err) {
         return errorResponse(err);
       }

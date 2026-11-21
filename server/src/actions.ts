@@ -29,8 +29,29 @@ const DEFAULT_SETTINGS: Record<string, string> = {
   affiliate_earning_pct: "8",
   affiliate_spending_pct: "5",
   postback_secret: "",
+  // TheoremReach app Secret Key (publisher dashboard → app details).
+  // Used ONLY to verify the HMAC-SHA1 signature on TheoremReach reward
+  // callbacks; empty = callbacks are accepted unverified (not safe).
+  theoremreach_secret: "",
   checkin_bonus_cents: "5",
   level_reward_cents: "50",
+  // Weekly check-in (owner-editable in Admin → Settings → Money): the
+  // daily earnings goal and the 7 calendar-day rewards Mon..Sun, in
+  // cents. Defaults are the owner's decided ladder ($3.00/week total).
+  checkin_goal_cents: "100",
+  checkin_rewards_cents: "20,25,30,40,50,65,70",
+  // Levels (owner-editable in Admin → Settings → Levels & Title
+  // Bonuses): cents of lifetime earnings per level, and the title
+  // table as JSON [{name, level, standardPct, enhancedPct}]. Empty
+  // JSON = the built-in RewardJoy-verified table below.
+  level_cents_per_level: "100",
+  level_titles_json: "",
+  // Contest prize tiers by rank, comma-separated cents. Empty = the
+  // built-in RewardJoy-verified tables (Daily: 100 ranks summing to
+  // $100; Affiliate: 25 ranks summing to $1,500). Owner-editable in
+  // Admin → Settings → Contest prize tiers.
+  daily_tiers_cents: "",
+  affiliate_tiers_cents: "",
 };
 
 async function getSettings(db: DB): Promise<Record<string, string>> {
@@ -81,7 +102,7 @@ function newToken(prefix: string): string {
 
 type UserRow = typeof schema.users.$inferSelect;
 
-function publicUser(u: UserRow) {
+function publicUser(u: UserRow, titles: readonly TitleDef[] = DEFAULT_TITLES) {
   return {
     id: u.id,
     userCode: u.userCode,
@@ -102,7 +123,7 @@ function publicUser(u: UserRow) {
     balanceCents: u.balanceCents,
     totalEarnedCents: u.totalEarnedCents,
     level: u.level,
-    title: titleForLevel(u.level)?.name ?? null,
+    title: titleForLevel(u.level, titles)?.name ?? null,
     theme: u.theme === "dark" ? "dark" : "light",
     referralCode: u.referralCode,
     blocked: u.blocked === 1,
@@ -243,6 +264,12 @@ interface MethodDef {
   id: string;
   label: string;
   fields: MethodField[];
+  /**
+   * Logo image link (owner-added methods). Built-in methods carry
+   * null here — the client renders their official bundled logos by
+   * method id (METHOD_LOGOS in client/src/lib.tsx).
+   */
+  imageUrl?: string | null;
 }
 
 const NAME_FIELD: MethodField = { key: "accountName", label: "Account holder name" };
@@ -354,16 +381,36 @@ function customMethodDef(row: WithdrawMethodRow): MethodDef {
   }
   if (fields.length === 0)
     fields = [{ key: "account", label: "Account details" }];
-  return { id: `custom_${row.id}`, label: row.label, fields };
+  return {
+    id: `custom_${row.id}`,
+    label: row.label,
+    fields,
+    imageUrl: row.imageUrl ?? null,
+  };
+}
+
+/** A method as sent to clients: imageUrl always present (null when
+ *  the method has no logo link — built-ins use bundled logos). */
+interface MethodDefOut {
+  id: string;
+  label: string;
+  fields: MethodField[];
+  imageUrl: string | null;
 }
 
 /** Built-in methods for the country PLUS the owner's active custom ones. */
 async function methodsForCountryWithCustom(
   db: DB,
   countryCode: string | null,
-): Promise<MethodDef[]> {
+): Promise<MethodDefOut[]> {
   const builtins = methodsForCountry(countryCode);
-  if (!countryCode) return builtins;
+  if (!countryCode)
+    return builtins.map((m) => ({
+      id: m.id,
+      label: m.label,
+      fields: m.fields,
+      imageUrl: m.imageUrl ?? null,
+    }));
   const rows = await db
     .select()
     .from(schema.withdrawMethods)
@@ -378,7 +425,14 @@ async function methodsForCountryWithCustom(
   const custom = rows
     .map(customMethodDef)
     .filter((m) => !seen.has(m.label.toLowerCase()));
-  return [...builtins, ...custom];
+  // Normalise: every method the client receives has an explicit
+  // imageUrl (null for built-ins — their logos are bundled client-side).
+  return [...builtins, ...custom].map((m) => ({
+    id: m.id,
+    label: m.label,
+    fields: m.fields,
+    imageUrl: m.imageUrl ?? null,
+  }));
 }
 
 /** id → label for every custom method ever added (incl. removed ones,
@@ -391,6 +445,10 @@ async function customMethodLabels(db: DB): Promise<Map<string, string>> {
 // ------------------------------------------------------------ levels
 // RewardJoy Title Bonus system (verified by inspection 2026-11-19):
 // every $1 earned = +1 level. Titles: Bronze L5, Silver L31, Gold L101,
+// (the pace and the title table below are the DEFAULTS — the owner can
+// change both in Admin → Settings → Levels & Title Bonuses, stored in
+// the level_cents_per_level / level_titles_json settings and read live
+// by levelConfigFrom on every use.)
 // Diamond L501, Champion L2001, Master L10001. A Title Bonus is settled
 // automatically at every 10 new levels (first settled after Level 15,
 // i.e. at Level 20): the title's percentage of the $10 earned in that
@@ -400,31 +458,108 @@ async function customMethodLabels(db: DB): Promise<Map<string, string>> {
 // chargeback source exists. Because the level derives from lifetime
 // earnings, a negative adjustment (chargeback) lowers it again.
 
-const TITLES = [
+interface TitleDef {
+  name: string;
+  level: number;
+  standardPct: number;
+  enhancedPct: number;
+}
+
+/** Built-in title table (RewardJoy-verified) — used until the owner
+ *  saves his own in Admin → Settings → Levels & Title Bonuses. */
+const DEFAULT_TITLES: TitleDef[] = [
   { name: "Bronze", level: 5, standardPct: 1, enhancedPct: 2 },
   { name: "Silver", level: 31, standardPct: 3, enhancedPct: 4 },
   { name: "Gold", level: 101, standardPct: 5, enhancedPct: 6 },
   { name: "Diamond", level: 501, standardPct: 7, enhancedPct: 8 },
   { name: "Champion", level: 2001, standardPct: 9, enhancedPct: 10 },
   { name: "Master", level: 10001, standardPct: 11, enhancedPct: 12 },
-] as const;
+];
 
-type TitleDef = (typeof TITLES)[number];
-
-function levelForEarned(totalEarnedCents: number): number {
-  return Math.max(0, Math.floor(totalEarnedCents / 100));
+interface LevelConfig {
+  titles: TitleDef[];
+  centsPerLevel: number;
 }
 
-function titleForLevel(level: number): TitleDef | null {
+/**
+ * The live level configuration: the owner's title table from settings
+ * (`level_titles_json`) when it is present and valid — 1–8 titles with
+ * strictly increasing levels and 0–100 percentages — otherwise the
+ * built-in table. `level_cents_per_level` is how many cents of
+ * lifetime earnings make one level (default 100 = $1 per level).
+ */
+function levelConfigFrom(settings: Record<string, string>): LevelConfig {
+  const centsRaw = settingInt(settings, "level_cents_per_level");
+  const centsPerLevel =
+    centsRaw >= 1 && centsRaw <= 1_000_000 ? centsRaw : 100;
+  const raw = (settings["level_titles_json"] ?? "").trim();
+  if (raw) {
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length >= 1 && parsed.length <= 8) {
+        const out: TitleDef[] = [];
+        let prev = 0;
+        let valid = true;
+        for (const entry of parsed) {
+          if (typeof entry !== "object" || entry === null) {
+            valid = false;
+            break;
+          }
+          const r = entry as Record<string, unknown>;
+          const name = typeof r.name === "string" ? r.name.trim() : "";
+          const level = typeof r.level === "number" ? r.level : Number.NaN;
+          const standardPct =
+            typeof r.standardPct === "number" ? r.standardPct : Number.NaN;
+          const enhancedPct =
+            typeof r.enhancedPct === "number" ? r.enhancedPct : Number.NaN;
+          if (
+            !name ||
+            name.length > 30 ||
+            !Number.isInteger(level) ||
+            level <= prev ||
+            level > 1_000_000 ||
+            !Number.isFinite(standardPct) ||
+            standardPct < 0 ||
+            standardPct > 100 ||
+            !Number.isFinite(enhancedPct) ||
+            enhancedPct < 0 ||
+            enhancedPct > 100
+          ) {
+            valid = false;
+            break;
+          }
+          prev = level;
+          out.push({ name, level, standardPct, enhancedPct });
+        }
+        if (valid && out.length > 0) return { titles: out, centsPerLevel };
+      }
+    } catch {
+      // Invalid stored JSON — fall back to the built-in table.
+    }
+  }
+  return { titles: DEFAULT_TITLES, centsPerLevel };
+}
+
+function levelForEarned(totalEarnedCents: number, centsPerLevel = 100): number {
+  return Math.max(0, Math.floor(totalEarnedCents / Math.max(1, centsPerLevel)));
+}
+
+function titleForLevel(
+  level: number,
+  titles: readonly TitleDef[] = DEFAULT_TITLES,
+): TitleDef | null {
   let found: TitleDef | null = null;
-  for (const title of TITLES) {
+  for (const title of titles) {
     if (level >= title.level) found = title;
   }
   return found;
 }
 
-function nextTitleForLevel(level: number): TitleDef | null {
-  for (const title of TITLES) {
+function nextTitleForLevel(
+  level: number,
+  titles: readonly TitleDef[] = DEFAULT_TITLES,
+): TitleDef | null {
+  for (const title of titles) {
     if (level < title.level) return title;
   }
   return null;
@@ -469,24 +604,29 @@ async function checkLevelUps(db: DB, userId: number): Promise<void> {
     .limit(1);
   const user = rows[0];
   if (!user) return;
+  // Level pace + title table come from the owner's settings (Admin →
+  // Settings → Levels & Title Bonuses), defaulting to $1 per level and
+  // the built-in RewardJoy table.
+  const levelCfg = levelConfigFrom(await getSettings(db));
   const cbRate = await chargebackRatePct(db, userId);
   let totalEarned = user.totalEarnedCents;
   let balance = user.balanceCents;
   let paidLevel = user.titleBonusPaidLevel;
   const bonusRows: { amountCents: number; note: string }[] = [];
   for (let i = 0; i < 300; i++) {
-    const levelNow = levelForEarned(totalEarned);
+    const levelNow = levelForEarned(totalEarned, levelCfg.centsPerLevel);
     const nextMilestone = Math.floor(paidLevel / 10) * 10 + 10;
     if (nextMilestone > levelNow) break;
     paidLevel = nextMilestone;
     if (nextMilestone < 20) continue; // first settled after Level 15
-    const title = titleForLevel(nextMilestone);
+    const title = titleForLevel(nextMilestone, levelCfg.titles);
     if (!title) continue;
     const pct =
       cbRate < 3 ? title.enhancedPct : cbRate <= 5 ? title.standardPct : 0;
     if (pct <= 0) continue;
-    // The 10-level block is $10 of earnings; the bonus is pct% of it.
-    const bonus = Math.round(1000 * (pct / 100));
+    // The 10-level block is 10 × the per-level earnings; the bonus is
+    // pct% of that block ($10 at the default $1-per-level pace).
+    const bonus = Math.round(10 * levelCfg.centsPerLevel * (pct / 100));
     if (bonus <= 0) continue;
     bonusRows.push({
       amountCents: bonus,
@@ -495,7 +635,7 @@ async function checkLevelUps(db: DB, userId: number): Promise<void> {
     balance += bonus;
     totalEarned += bonus;
   }
-  const newLevel = levelForEarned(totalEarned);
+  const newLevel = levelForEarned(totalEarned, levelCfg.centsPerLevel);
   if (
     newLevel === user.level &&
     paidLevel === user.titleBonusPaidLevel &&
@@ -543,17 +683,7 @@ function shiftDayKey(dayKey: string, delta: number): string {
   return dayKeyOf(dt);
 }
 
-/** Consecutive-day streak ending today (or yesterday if today not yet claimed). */
-function computeStreak(dayKeys: Set<string>, todayKey: string): number {
-  let cursor = dayKeys.has(todayKey) ? todayKey : shiftDayKey(todayKey, -1);
-  if (!dayKeys.has(cursor)) return 0;
-  let streak = 0;
-  while (dayKeys.has(cursor)) {
-    streak += 1;
-    cursor = shiftDayKey(cursor, -1);
-  }
-  return streak;
-}
+
 
 // ------------------------------------------------------- weekly check-in
 // WEEKLY CHECK-IN (owner spec 2026-11-19 ~23:30 PST; reward rule
@@ -575,12 +705,32 @@ function computeStreak(dayKeys: Set<string>, todayKey: string): number {
 // missed). The earlier streak-position rule ("miss a day and the
 // reward restarts at Day 1") is REMOVED at the owner's order — it
 // made a Friday completion show and pay $0.20 instead of $0.50.
-const WEEKLY_CHECKIN_REWARDS_CENTS = [20, 25, 30, 40, 50, 65, 70];
-const WEEKLY_CHECKIN_TOTAL_CENTS = WEEKLY_CHECKIN_REWARDS_CENTS.reduce(
-  (s, r) => s + r,
-  0,
-);
-const CHECKIN_DAILY_GOAL_CENTS = 100;
+// The ladder amounts above and the daily earnings goal are the
+// DEFAULTS — the owner can change every one of them in Admin →
+// Settings → Money (settings keys checkin_rewards_cents /
+// checkin_goal_cents); the helpers below read the live values.
+const DEFAULT_CHECKIN_REWARDS_CENTS = [20, 25, 30, 40, 50, 65, 70];
+const DEFAULT_CHECKIN_GOAL_CENTS = 100;
+
+/** The 7 calendar-day check-in rewards (Mon..Sun) from settings. */
+function checkinRewardsFrom(settings: Record<string, string>): number[] {
+  const parts = (settings["checkin_rewards_cents"] ?? "")
+    .split(",")
+    .map((s) => Number.parseInt(s.trim(), 10));
+  if (
+    parts.length === 7 &&
+    parts.every((n) => Number.isFinite(n) && n >= 0 && n <= 100_000)
+  ) {
+    return parts;
+  }
+  return [...DEFAULT_CHECKIN_REWARDS_CENTS];
+}
+
+/** The daily earnings goal that completes a check-in day, from settings. */
+function checkinGoalFrom(settings: Record<string, string>): number {
+  const n = settingInt(settings, "checkin_goal_cents");
+  return n >= 1 && n <= 1_000_000 ? n : DEFAULT_CHECKIN_GOAL_CENTS;
+}
 const CHECKIN_EARNING_KINDS = [
   "offer_credit",
   "affiliate_earning",
@@ -614,6 +764,7 @@ interface WeekCheckinState {
 async function loadWeekCheckinState(
   db: DB,
   userId: number,
+  goalCents: number = DEFAULT_CHECKIN_GOAL_CENTS,
 ): Promise<WeekCheckinState> {
   const todayKey = dayKeyOf(new Date());
   const weekStartKey = mondayKeyOf(todayKey);
@@ -652,7 +803,7 @@ async function loadWeekCheckinState(
     if (earnedByDay.has(r.dayKey)) paidByDay.set(r.dayKey, r.amountCents);
   }
   const qualified = (key: string) =>
-    (earnedByDay.get(key) ?? 0) >= CHECKIN_DAILY_GOAL_CENTS;
+    (earnedByDay.get(key) ?? 0) >= goalCents;
   const runLengthAt = (dayKey: string): number => {
     let run = 0;
     let cursor = dayKey;
@@ -690,7 +841,11 @@ async function loadWeekCheckinState(
  * at most once, via its checkins row.
  */
 async function syncWeeklyCheckin(db: DB, userId: number): Promise<void> {
-  const state = await loadWeekCheckinState(db, userId);
+  // Goal + ladder are the owner's live settings (Admin → Settings).
+  const settings = await getSettings(db);
+  const goalCents = checkinGoalFrom(settings);
+  const rewardsCents = checkinRewardsFrom(settings);
+  const state = await loadWeekCheckinState(db, userId, goalCents);
   const userRows = await db
     .select()
     .from(schema.users)
@@ -705,11 +860,11 @@ async function syncWeeklyCheckin(db: DB, userId: number): Promise<void> {
     const key = shiftDayKey(state.weekStartKey, i);
     if (key > state.todayKey) break; // future days cannot be complete
     if (state.paidByDay.has(key)) continue;
-    if ((state.earnedByDay.get(key) ?? 0) < CHECKIN_DAILY_GOAL_CENTS)
+    if ((state.earnedByDay.get(key) ?? 0) < goalCents)
       continue;
     // The reward is the day's own CALENDAR ladder amount (Mon index 0
     // → Sun index 6) — never a streak position.
-    const reward = WEEKLY_CHECKIN_REWARDS_CENTS[i] ?? 0;
+    const reward = rewardsCents[i] ?? 0;
     if (reward <= 0) continue;
     statements.push(
       db.insert(schema.checkins).values({
@@ -723,7 +878,7 @@ async function syncWeeklyCheckin(db: DB, userId: number): Promise<void> {
         userId,
         kind: "checkin_bonus",
         amountCents: reward,
-        note: `Weekly check-in — ${"Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday".split("|")[i] ?? "Day"} (earned $1 that day)`,
+        note: `Weekly check-in — ${"Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday".split("|")[i] ?? "Day"} (earned $${(goalCents / 100).toFixed(2)} that day)`,
       }),
     );
     balance += reward;
@@ -742,7 +897,7 @@ async function syncWeeklyCheckin(db: DB, userId: number): Promise<void> {
 }
 
 /** Daily $100 prize tiers by rank (RewardJoy-verified): sums to $100. */
-const DAILY_TIERS_CENTS: number[] = [
+const DEFAULT_DAILY_TIERS_CENTS: number[] = [
   2500, 1000, 500, 400, 300, // 1st-5th
   200, 200, 200, 200, 200, // 6th-10th
   ...Array(10).fill(100), // 11th-20th
@@ -750,9 +905,80 @@ const DAILY_TIERS_CENTS: number[] = [
   ...Array(50).fill(30), // 51st-100th
 ];
 
-function dailyPrizeForRank(rank: number): number {
+/** Parses a comma-separated cents tier list from settings; any
+ *  malformed value falls back to the built-in table. */
+function parseTierList(
+  raw: string | undefined,
+  fallback: number[],
+  maxLen: number,
+): number[] {
+  const parts = (raw ?? "")
+    .split(",")
+    .map((s) => Number.parseInt(s.trim(), 10));
+  if (
+    parts.length >= 1 &&
+    parts.length <= maxLen &&
+    parts.every((n) => Number.isFinite(n) && n >= 0 && n <= 100_000_000)
+  ) {
+    return parts;
+  }
+  return [...fallback];
+}
+
+function dailyTiersFrom(settings: Record<string, string>): number[] {
+  return parseTierList(settings["daily_tiers_cents"], DEFAULT_DAILY_TIERS_CENTS, 150);
+}
+
+function affiliateTiersFrom(settings: Record<string, string>): number[] {
+  return parseTierList(
+    settings["affiliate_tiers_cents"],
+    DEFAULT_AFFILIATE_TIERS_CENTS,
+    100,
+  );
+}
+
+function dailyPrizeForRank(
+  rank: number,
+  tiers: readonly number[] = DEFAULT_DAILY_TIERS_CENTS,
+): number {
   if (rank < 1 || rank > 150) return 0;
-  return DAILY_TIERS_CENTS[rank - 1] ?? 0;
+  return tiers[rank - 1] ?? 0;
+}
+
+function ordinal(n: number): string {
+  const mod100 = n % 100;
+  if (mod100 >= 11 && mod100 <= 13) return `${n}th`;
+  switch (n % 10) {
+    case 1:
+      return `${n}st`;
+    case 2:
+      return `${n}nd`;
+    case 3:
+      return `${n}rd`;
+    default:
+      return `${n}th`;
+  }
+}
+
+/** Groups a tier list into display rows: consecutive ranks with the
+ *  same prize collapse into one "6th–10th" style row. */
+function tierSummary(
+  tiers: readonly number[],
+): { label: string; prizeCents: number }[] {
+  const out: { label: string; prizeCents: number }[] = [];
+  let start = 0;
+  for (let i = 1; i <= tiers.length; i++) {
+    if (i === tiers.length || tiers[i] !== tiers[start]) {
+      const from = start + 1;
+      const to = i;
+      out.push({
+        label: from === to ? ordinal(from) : `${ordinal(from)}–${ordinal(to)}`,
+        prizeCents: tiers[start] ?? 0,
+      });
+      start = i;
+    }
+  }
+  return out;
 }
 
 /**
@@ -821,6 +1047,8 @@ async function settleDailyContestFor(
       amountCents: all.reduce((s, a) => s + a.amountCents, 0),
     };
   }
+  // Prize tiers are the owner's live settings (Admin → Settings).
+  const dailyTiers = dailyTiersFrom(await getSettings(db));
   const [y = 1970, m = 1, d = 1] = periodKey.split("-").map(Number);
   const dayStart = new Date(y, m - 1, d);
   const dayEnd = new Date(y, m - 1, d + 1);
@@ -862,7 +1090,7 @@ async function settleDailyContestFor(
   let total = 0;
   ranked.slice(0, 150).forEach((entry, i) => {
     const rank = i + 1;
-    const prize = dailyPrizeForRank(rank);
+    const prize = dailyPrizeForRank(rank, dailyTiers);
     if (prize <= 0) return;
     total += prize;
     // Recorded as PENDING — the owner pays it from Admin → Contest
@@ -886,7 +1114,7 @@ async function settleDailyContestFor(
         contest: "daily",
         periodKey,
         winnerUserId: ranked[0]?.userId ?? null,
-        amountCents: dailyPrizeForRank(1),
+        amountCents: dailyPrizeForRank(1, dailyTiers),
       })
       // Upsert, not do-nothing: if a no-earners marker row somehow
       // exists for this day already, the real winner must replace it —
@@ -895,7 +1123,7 @@ async function settleDailyContestFor(
         target: [schema.contestPayouts.contest, schema.contestPayouts.periodKey],
         set: {
           winnerUserId: ranked[0]?.userId ?? null,
-          amountCents: dailyPrizeForRank(1),
+          amountCents: dailyPrizeForRank(1, dailyTiers),
         },
       }),
   );
@@ -935,7 +1163,7 @@ async function settleYesterdayIfNeeded(db: DB): Promise<void> {
 // idempotent and runs lazily from getLeaderboard and from the daily
 // settlement schedule.
 /** Affiliate $1,500 prize tiers by rank (sums to exactly $1,500). */
-const AFFILIATE_TIERS_CENTS: number[] = [
+const DEFAULT_AFFILIATE_TIERS_CENTS: number[] = [
   50000, 30000, 15000, 8500, 6500, // 1st–5th
   5000, 4500, 4000, 3500, 3000, // 6th–10th
   ...Array(5).fill(2000), // 11th–15th
@@ -943,9 +1171,12 @@ const AFFILIATE_TIERS_CENTS: number[] = [
   ...Array(5).fill(500), // 21st–25th
 ];
 
-function affiliatePrizeForRank(rank: number): number {
+function affiliatePrizeForRank(
+  rank: number,
+  tiers: readonly number[] = DEFAULT_AFFILIATE_TIERS_CENTS,
+): number {
   if (rank < 1) return 0;
-  return AFFILIATE_TIERS_CENTS[rank - 1] ?? 0;
+  return tiers[rank - 1] ?? 0;
 }
 
 /** "YYYY-MM" for the month containing the date (server-local). */
@@ -1056,11 +1287,13 @@ async function settleAffiliateMonthFor(db: DB, monthKey: string): Promise<void> 
     )
     .limit(1);
   if (marker[0]) return;
+  // Prize tiers are the owner's live settings (Admin → Settings).
+  const affiliateTiers = affiliateTiersFrom(await getSettings(db));
   const standings = await computeAffiliateStandings(db, monthKey);
   const statements: BatchItem<"sqlite">[] = [];
   standings.slice(0, 100).forEach((row, i) => {
     const rank = i + 1;
-    const prize = affiliatePrizeForRank(rank);
+    const prize = affiliatePrizeForRank(rank, affiliateTiers);
     if (prize <= 0) return;
     statements.push(
       db.insert(schema.contestAwards).values({
@@ -1081,7 +1314,7 @@ async function settleAffiliateMonthFor(db: DB, monthKey: string): Promise<void> 
         contest: "affiliate",
         periodKey: monthKey,
         winnerUserId: standings[0]?.userId ?? null,
-        amountCents: standings.length > 0 ? affiliatePrizeForRank(1) : 0,
+        amountCents: standings.length > 0 ? affiliatePrizeForRank(1, affiliateTiers) : 0,
       })
       .onConflictDoNothing(),
   );
@@ -1198,6 +1431,145 @@ function publicContent(row: typeof schema.contentItems.$inferSelect) {
     sortOrder: row.sortOrder,
     createdAt: row.createdAt.toISOString(),
   };
+}
+
+/**
+ * Personalises a partner URL for one signed-in user: `{user_id}` becomes
+ * the user's OWN Offer Token (the OT-… ID on their Profile — this is the
+ * ID partners send back in their postback/callback, so it is how a
+ * completed offer finds its user) and `{transaction_id}` becomes a
+ * fresh unique ID for this view/click. URLs without placeholders are
+ * returned unchanged.
+ */
+function personalizeContentUrl(url: string, user: UserRow): string {
+  if (!url) return url;
+  let out = url;
+  if (out.includes("{user_id}")) {
+    out = out
+      .split("{user_id}")
+      .join(encodeURIComponent(user.offerToken ?? user.userCode));
+  }
+  if (out.includes("{transaction_id}")) {
+    out = out.split("{transaction_id}").join(newToken("txn"));
+  }
+  return out;
+}
+
+/**
+ * TheoremReach signature: base64url( HMAC-SHA1(secret_key, url_string) )
+ * over the RAW binary digest — the scheme in TheoremReach's docs
+ * (theoremreach.com/docs/web + /docs/surveys_api). The url_string is the
+ * full callback URL exactly as TheoremReach called it, minus the
+ * trailing `&hash=…` they append.
+ */
+async function theoremReachSignature(
+  secret: string,
+  urlString: string,
+): Promise<string> {
+  const enc = new TextEncoder();
+  const key = await globalThis.crypto.subtle.importKey(
+    "raw",
+    enc.encode(secret),
+    { name: "HMAC", hash: "SHA-1" },
+    false,
+    ["sign"],
+  );
+  const raw = new Uint8Array(
+    await globalThis.crypto.subtle.sign("HMAC", key, enc.encode(urlString)),
+  );
+  let bin = "";
+  for (const b of raw) bin += String.fromCharCode(b);
+  return btoa(bin).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+}
+
+/**
+ * The one reward-credit path, shared by the generic offerwall postback
+ * and the TheoremReach callback: inserts the postback log row (its
+ * unique txn_id is what makes a second call a duplicate — callers check
+ * for an existing row BEFORE calling this), credits the user their
+ * share (user_share_pct, default 70%) of the payout, writes the ledger
+ * row, pays the referrer's earning commission, then settles level-ups
+ * and the weekly check-in for both. Returns the credited cents.
+ */
+async function applyRewardCredit(
+  db: DB,
+  settings: Record<string, string>,
+  user: UserRow,
+  opts: {
+    network: string;
+    txnId: string;
+    payout: number;
+    note: string;
+    rawJson: string;
+  },
+): Promise<number> {
+  const sharePct = settingInt(settings, "user_share_pct") || 70;
+  const creditedCents = Math.round(opts.payout * 100 * (sharePct / 100));
+  const statements: BatchItem<"sqlite">[] = [
+    db.insert(schema.postbacks).values({
+      txnId: opts.txnId,
+      network: opts.network,
+      userId: user.id,
+      payout: opts.payout,
+      creditedCents,
+      status: "credited",
+      rawJson: opts.rawJson,
+    }),
+    db
+      .update(schema.users)
+      .set({
+        balanceCents: user.balanceCents + creditedCents,
+        totalEarnedCents: user.totalEarnedCents + creditedCents,
+      })
+      .where(eq(schema.users.id, user.id)),
+    db.insert(schema.transactions).values({
+      userId: user.id,
+      kind: "offer_credit",
+      amountCents: creditedCents,
+      note: opts.note,
+    }),
+  ];
+  if (user.referredById != null && creditedCents > 0) {
+    const pct = settingInt(settings, "affiliate_earning_pct");
+    const commission = Math.round(creditedCents * (pct / 100));
+    if (commission > 0) {
+      const referrers = await db
+        .select()
+        .from(schema.users)
+        .where(eq(schema.users.id, user.referredById))
+        .limit(1);
+      const referrer = referrers[0];
+      if (referrer) {
+        statements.push(
+          db
+            .update(schema.users)
+            .set({
+              balanceCents: referrer.balanceCents + commission,
+              totalEarnedCents: referrer.totalEarnedCents + commission,
+            })
+            .where(eq(schema.users.id, referrer.id)),
+          db.insert(schema.transactions).values({
+            userId: referrer.id,
+            kind: "affiliate_earning",
+            amountCents: commission,
+            note: `Referral earning commission from ${user.name}`,
+            refId: user.id,
+          }),
+        );
+      }
+    }
+  }
+  const [first, ...rest] = statements;
+  if (first) await db.batch([first, ...rest]);
+  // Level-ups are real: pay any level rewards this credit unlocked,
+  // for the earner and for their referrer (commission counts too).
+  await checkLevelUps(db, user.id);
+  if (user.referredById != null) await checkLevelUps(db, user.referredById);
+  // Weekly check-in: this credit may have crossed someone's $1 daily
+  // goal — if so, that day's check-in bonus lands right now.
+  await syncWeeklyCheckin(db, user.id);
+  if (user.referredById != null) await syncWeeklyCheckin(db, user.referredById);
+  return creditedCents;
 }
 
 function visibleInCountry(countries: string, countryCode: string | null): boolean {
@@ -1562,7 +1934,11 @@ export const Actions = {
       const token = newToken("sess");
       await db.insert(schema.sessions).values({ token, userId: user.id });
       ctx.invalidateQueries();
-      return { status: "ok", token, user: publicUser(user) };
+      return {
+        status: "ok",
+        token,
+        user: publicUser(user, levelConfigFrom(settings).titles),
+      };
     },
   }),
 
@@ -1586,7 +1962,11 @@ export const Actions = {
             eq(schema.messages.readByUser, 0),
           ),
         );
-      return { user: publicUser(user), unreadMessages: unread.length };
+      const settings = await getSettings(db);
+      return {
+        user: publicUser(user, levelConfigFrom(settings).titles),
+        unreadMessages: unread.length,
+      };
     },
   }),
 
@@ -1605,7 +1985,7 @@ export const Actions = {
 
   listContent: defineAction({
     description:
-      "Lists active offerwalls, surveys or games visible in the signed-in user's country (all active items when signed out).",
+      "Lists active offerwalls, surveys or games visible in the signed-in user's country (all active items when signed out). For a signed-in user, partner URLs are personalised: {user_id} is replaced with the user's Offer Token and {transaction_id} with a fresh unique ID.",
     request: z.object({
       token: z.string().max(200).optional(),
       kind: z.enum(["offerwall", "survey", "game"]),
@@ -1614,12 +1994,14 @@ export const Actions = {
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
       let countryCode: string | null = null;
+      let viewer: UserRow | null = null;
       if (args.token) {
         try {
-          const user = await requireUser(ctx, args.token);
-          countryCode = user.countryCode;
+          viewer = await requireUser(ctx, args.token);
+          countryCode = viewer.countryCode;
         } catch {
           countryCode = null;
+          viewer = null;
         }
       }
       const rows = await db
@@ -1635,7 +2017,14 @@ export const Actions = {
       return {
         items: rows
           .filter((r) => visibleInCountry(r.countries, countryCode))
-          .map(publicContent),
+          .map((r) => {
+            const item = publicContent(r);
+            // Signed-in users get a personal link: {user_id} → their
+            // Offer Token, {transaction_id} → a fresh unique ID, so a
+            // completed offer/survey can be credited back to them.
+            if (viewer) item.url = personalizeContentUrl(item.url, viewer);
+            return item;
+          }),
       };
     },
   }),
@@ -1693,8 +2082,9 @@ export const Actions = {
             eq(schema.transactions.kind, "affiliate_earning"),
           ),
         );
+      const dashSettings = await getSettings(db);
       return {
-        user: publicUser(user),
+        user: publicUser(user, levelConfigFrom(dashSettings).titles),
         pendingWithdrawals: pending.length,
         referralCount: referrals.length,
         affiliateEarnedCents:
@@ -1722,6 +2112,7 @@ export const Actions = {
         z.object({
           id: z.string(),
           label: z.string(),
+          imageUrl: z.string().nullable(),
           fields: z.array(z.object({ key: z.string(), label: z.string() })),
         }),
       ),
@@ -1929,13 +2320,14 @@ export const Actions = {
       // fresh board every month. Rank 1 is the highest score.
       const currentMonth = monthKeyOf(new Date());
       const monthStandings = await computeAffiliateStandings(db, currentMonth);
+      const affiliateTiers = affiliateTiersFrom(settings);
       const affiliateStandings = monthStandings.slice(0, 100).map((row, i) => ({
         rank: i + 1,
         name: userById.get(row.userId)?.name ?? "User",
         referrals: row.referrals,
         qualifiedReferrals: row.qualifiedReferrals,
         score: row.score,
-        prizeCents: affiliatePrizeForRank(i + 1),
+        prizeCents: affiliatePrizeForRank(i + 1, affiliateTiers),
       }));
       const payoutRows = await db
         .select()
@@ -1969,33 +2361,10 @@ export const Actions = {
         affiliateEndsAt: monthRange(currentMonth).end.toISOString(),
         lastDailyPayout,
         lastAffiliatePayout,
-        dailyTiers: [
-          { label: "1st", prizeCents: 2500 },
-          { label: "2nd", prizeCents: 1000 },
-          { label: "3rd", prizeCents: 500 },
-          { label: "4th", prizeCents: 400 },
-          { label: "5th", prizeCents: 300 },
-          { label: "6th–10th", prizeCents: 200 },
-          { label: "11th–20th", prizeCents: 100 },
-          { label: "21st–50th", prizeCents: 60 },
-          { label: "51st–100th", prizeCents: 30 },
-          { label: "101st–150th", prizeCents: 0 },
-        ],
-        affiliateTiers: [
-          { label: "1st", prizeCents: 50000 },
-          { label: "2nd", prizeCents: 30000 },
-          { label: "3rd", prizeCents: 15000 },
-          { label: "4th", prizeCents: 8500 },
-          { label: "5th", prizeCents: 6500 },
-          { label: "6th", prizeCents: 5000 },
-          { label: "7th", prizeCents: 4500 },
-          { label: "8th", prizeCents: 4000 },
-          { label: "9th", prizeCents: 3500 },
-          { label: "10th", prizeCents: 3000 },
-          { label: "11th–15th", prizeCents: 2000 },
-          { label: "16th–20th", prizeCents: 1500 },
-          { label: "21st–25th", prizeCents: 500 },
-        ],
+        // Prize tables shown to users are derived from the owner's
+        // live tier settings, so an admin edit shows here at once.
+        dailyTiers: tierSummary(dailyTiersFrom(settings)),
+        affiliateTiers: tierSummary(affiliateTiers),
         affiliateStandings,
         daily,
       };
@@ -2135,7 +2504,7 @@ export const Actions = {
 
   getCheckin: defineAction({
     description:
-      "Weekly check-in state (Monday–Sunday, M T W T F S S): settles any completed day first, then returns each day's earnings toward the $1 goal, completion, that calendar day's own ladder reward (Mon $0.20 … Fri $0.50 … Sun $0.70), the current streak and the week's schedule. There is no claim action — a day completes automatically when the user earns $1 that day from offers, surveys or invite commissions, and its bonus is credited at that moment. Rewards follow the calendar weekday, never a streak position.",
+      "Weekly check-in state (Monday–Sunday, M T W T F S S): settles any completed day first, then returns each day's earnings toward the daily goal, completion, that calendar day's own ladder reward, the current streak and the week's schedule. The goal and the 7 day amounts are the owner's settings (Admin → Settings → Money; defaults $1 goal, Mon $0.20 … Sun $0.70). There is no claim action — a day completes automatically when the user earns the goal amount that day from offers, surveys or invite commissions, and its bonus is credited at that moment. Rewards follow the calendar weekday, never a streak position.",
     request: z.object({ token: z.string().min(1).max(200) }),
     response: z.object({
       goalCents: z.number(),
@@ -2164,9 +2533,12 @@ export const Actions = {
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
       const user = await requireUser(ctx, args.token);
-      // Settle first: any day that crossed $1 gets its bonus now.
+      const settings = await getSettings(db);
+      const goalCents = checkinGoalFrom(settings);
+      const rewardsCents = checkinRewardsFrom(settings);
+      // Settle first: any day that crossed the goal gets its bonus now.
       await syncWeeklyCheckin(db, user.id);
-      const state = await loadWeekCheckinState(db, user.id);
+      const state = await loadWeekCheckinState(db, user.id, goalCents);
       const allRows = await db
         .select()
         .from(schema.checkins)
@@ -2189,7 +2561,7 @@ export const Actions = {
           earnedCents: earned,
           completed: paid != null,
           missed: isPast && paid == null,
-          rewardCents: paid ?? (WEEKLY_CHECKIN_REWARDS_CENTS[i] ?? 0),
+          rewardCents: paid ?? (rewardsCents[i] ?? 0),
           paidCents: paid,
         };
       });
@@ -2203,14 +2575,14 @@ export const Actions = {
         ),
       );
       return {
-        goalCents: CHECKIN_DAILY_GOAL_CENTS,
-        scheduleCents: [...WEEKLY_CHECKIN_REWARDS_CENTS],
-        weekTotalCents: WEEKLY_CHECKIN_TOTAL_CENTS,
+        goalCents,
+        scheduleCents: [...rewardsCents],
+        weekTotalCents: rewardsCents.reduce((s, r) => s + r, 0),
         currentStreak: state.currentStreak,
         todayEarnedCents: state.earnedByDay.get(state.todayKey) ?? 0,
         todayCompleted: todayPaid != null,
         todayRewardCents:
-          todayPaid ?? (WEEKLY_CHECKIN_REWARDS_CENTS[todayIndex] ?? 0),
+          todayPaid ?? (rewardsCents[todayIndex] ?? 0),
         weekBonusCents: [...state.paidByDay.values()].reduce(
           (s, v) => s + v,
           0,
@@ -2410,11 +2782,12 @@ export const Actions = {
         .where(eq(schema.users.id, user0.id))
         .limit(1);
       const user = rows[0] ?? user0;
+      const levelCfg = levelConfigFrom(await getSettings(db));
       const level = user.level;
-      const current = titleForLevel(level);
-      const next = nextTitleForLevel(level);
-      const prevThreshold = (current?.level ?? 0) * 100;
-      const nextThreshold = next ? next.level * 100 : prevThreshold;
+      const current = titleForLevel(level, levelCfg.titles);
+      const next = nextTitleForLevel(level, levelCfg.titles);
+      const prevThreshold = (current?.level ?? 0) * levelCfg.centsPerLevel;
+      const nextThreshold = next ? next.level * levelCfg.centsPerLevel : prevThreshold;
       const progressPct = next
         ? Math.min(
             100,
@@ -2453,7 +2826,7 @@ export const Actions = {
           : null,
         progressPct,
         chargebackRatePct: await chargebackRatePct(db, user.id),
-        titles: TITLES.map((title) => ({
+        titles: levelCfg.titles.map((title) => ({
           name: title.name,
           level: title.level,
           standardPct: title.standardPct,
@@ -2670,77 +3043,166 @@ export const Actions = {
         return { status: "unknown_user" as const, creditedCents: 0 };
       }
 
-      const sharePct = settingInt(settings, "user_share_pct") || 70;
-      const creditedCents = Math.round(args.payout * 100 * (sharePct / 100));
-      const statements: BatchItem<"sqlite">[] = [
-        db.insert(schema.postbacks).values({
-          txnId: args.txn_id,
-          network: args.network,
-          userId: user.id,
-          payout: args.payout,
-          creditedCents,
-          status: "credited",
-          rawJson: JSON.stringify(args),
-        }),
-        db
-          .update(schema.users)
-          .set({
-            balanceCents: user.balanceCents + creditedCents,
-            totalEarnedCents: user.totalEarnedCents + creditedCents,
-          })
-          .where(eq(schema.users.id, user.id)),
-        db.insert(schema.transactions).values({
-          userId: user.id,
-          kind: "offer_credit",
-          amountCents: creditedCents,
-          note: args.network
-            ? `${args.network} offer completed`
-            : "Offer completed",
-        }),
-      ];
-      if (user.referredById != null && creditedCents > 0) {
-        const pct = settingInt(settings, "affiliate_earning_pct");
-        const commission = Math.round(creditedCents * (pct / 100));
-        if (commission > 0) {
-          const referrers = await db
-            .select()
-            .from(schema.users)
-            .where(eq(schema.users.id, user.referredById))
-            .limit(1);
-          const referrer = referrers[0];
-          if (referrer) {
-            statements.push(
-              db
-                .update(schema.users)
-                .set({
-                  balanceCents: referrer.balanceCents + commission,
-                  totalEarnedCents: referrer.totalEarnedCents + commission,
-                })
-                .where(eq(schema.users.id, referrer.id)),
-              db.insert(schema.transactions).values({
-                userId: referrer.id,
-                kind: "affiliate_earning",
-                amountCents: commission,
-                note: `Referral earning commission from ${user.name}`,
-                refId: user.id,
-              }),
-            );
-          }
+      const creditedCents = await applyRewardCredit(db, settings, user, {
+        network: args.network,
+        txnId: args.txn_id,
+        payout: args.payout,
+        note: args.network
+          ? `${args.network} offer completed`
+          : "Offer completed",
+        rawJson: JSON.stringify(args),
+      });
+      ctx.invalidateQueries();
+      return { status: "credited" as const, creditedCents };
+    },
+  }),
+
+  theoremReachCallback: defineAction({
+    description:
+      "TheoremReach server-to-server reward callback: verifies the HMAC-SHA1 signature with the app's Secret Key (Admin → Settings), then credits the user — found by the Offer Token TheoremReach sends back as user_id — 70% of the reward. Idempotent per TheoremReach tx_id; reversals never credit.",
+    request: z.object({
+      // All values are strings on purpose: they arrive as URL query
+      // parameters and the exact text is part of the signed string.
+      user_id: z.string().trim().min(1).max(64),
+      tx_id: z.string().trim().min(1).max(120),
+      reward: z.string().trim().max(32).optional(),
+      reward_amount_in_dollars: z.string().trim().max(32).optional(),
+      external_transaction_id: z.string().trim().max(160).optional(),
+      reversal: z.string().trim().max(16).optional(),
+      hash: z.string().trim().max(120).optional(),
+      // The full callback URL exactly as TheoremReach called it, minus
+      // the trailing &hash=… — supplied by the standalone server's
+      // /theoremreach-callback route from the raw request, because the
+      // signature covers that exact string.
+      signed_url: z.string().trim().max(4000).optional(),
+    }),
+    response: z.object({
+      status: z.enum(["credited", "duplicate", "unknown_user", "rejected"]),
+      creditedCents: z.number(),
+    }),
+    async handler(ctx, args) {
+      const db = ctx.db<typeof schema>();
+      const settings = await getSettings(db);
+
+      // When the signed URL is present its query parameters are the
+      // authoritative values — they are exactly what the signature
+      // covers, so the credited user/amount can never be swapped for
+      // different unsigned arguments.
+      let userId = args.user_id;
+      let txId = args.tx_id;
+      let reward = args.reward;
+      let rewardDollars = args.reward_amount_in_dollars;
+      let externalTxId = args.external_transaction_id;
+      let reversal = args.reversal;
+      if (args.signed_url) {
+        try {
+          const q = new URL(args.signed_url).searchParams;
+          userId = q.get("user_id") ?? userId;
+          txId = q.get("tx_id") ?? txId;
+          reward = q.get("reward") ?? reward;
+          rewardDollars =
+            q.get("reward_amount_in_dollars") ?? rewardDollars;
+          externalTxId =
+            q.get("external_transaction_id") ?? externalTxId;
+          reversal = q.get("reversal") ?? reversal;
+        } catch {
+          throw new Error("Invalid signed callback URL.");
         }
       }
-      const [first, ...rest] = statements;
-      if (first) await db.batch([first, ...rest]);
-      // Level-ups are real: pay any level rewards this credit unlocked,
-      // for the earner and for their referrer (commission counts too).
-      await checkLevelUps(db, user.id);
-      if (user.referredById != null) await checkLevelUps(db, user.referredById);
-      // Weekly check-in: this credit may have crossed someone's $1
-      // daily goal (the earner's offer earning, or the referrer's
-      // invite commission) — if so, that day's check-in bonus lands in
-      // their balance right now, with no button to press.
-      await syncWeeklyCheckin(db, user.id);
-      if (user.referredById != null)
-        await syncWeeklyCheckin(db, user.referredById);
+
+      // Signature verification (TheoremReach docs): the callback is
+      // signed with the app's Secret Key as
+      // base64url(HMAC-SHA1(secret, full callback URL without &hash=)).
+      // Enforced whenever a secret is set in Admin → Settings.
+      const secret = settings["theoremreach_secret"] ?? "";
+      if (secret) {
+        if (!args.hash || !args.signed_url)
+          throw new Error("Missing callback signature.");
+        const expected = await theoremReachSignature(secret, args.signed_url);
+        // A TLS-terminating proxy can make the received URL read http
+        // where TheoremReach signed https — that variant is still an
+        // HMAC over the exact parameters with the secret, so try it too.
+        const httpsVariant = args.signed_url.startsWith("http://")
+          ? `https://${args.signed_url.slice("http://".length)}`
+          : null;
+        const expectedHttps = httpsVariant
+          ? await theoremReachSignature(secret, httpsVariant)
+          : null;
+        if (args.hash !== expected && args.hash !== expectedHttps)
+          throw new Error("Invalid callback signature.");
+      }
+
+      // The reward: prefer the explicit USD amount; the app's currency
+      // is Dollar at exchange rate 1, so `reward` is dollars too.
+      const payoutText = rewardDollars ?? reward ?? "";
+      const payout = Number.parseFloat(payoutText);
+      if (!Number.isFinite(payout))
+        throw new Error("Invalid reward amount.");
+
+      // Reversals (negative reward / reversal=true) never credit and
+      // never debit automatically — the owner reconciles them by hand.
+      if (reversal === "true" || payout <= 0) {
+        return { status: "rejected" as const, creditedCents: 0 };
+      }
+
+      // Idempotent per TheoremReach transaction ID (namespaced so it
+      // can never collide with another network's transaction IDs).
+      const txnKey = `theoremreach:${txId}`;
+      const existing = await db
+        .select()
+        .from(schema.postbacks)
+        .where(eq(schema.postbacks.txnId, txnKey))
+        .limit(1);
+      if (existing[0]) {
+        return {
+          status: "duplicate" as const,
+          creditedCents: existing[0].creditedCents,
+        };
+      }
+
+      // user_id is the publisher user ID from the entry link = the
+      // user's Offer Token (OT-…); fall back to the user code.
+      let userRows = await db
+        .select()
+        .from(schema.users)
+        .where(eq(schema.users.offerToken, userId))
+        .limit(1);
+      if (!userRows[0]) {
+        userRows = await db
+          .select()
+          .from(schema.users)
+          .where(eq(schema.users.userCode, userId))
+          .limit(1);
+      }
+      const user = userRows[0];
+      const rawJson = JSON.stringify({
+        network: "TheoremReach",
+        user_id: userId,
+        tx_id: txId,
+        reward,
+        reward_amount_in_dollars: rewardDollars,
+        external_transaction_id: externalTxId,
+      });
+      if (!user) {
+        await db.insert(schema.postbacks).values({
+          txnId: txnKey,
+          network: "TheoremReach",
+          userId: null,
+          payout,
+          creditedCents: 0,
+          status: "unknown_user",
+          rawJson,
+        });
+        return { status: "unknown_user" as const, creditedCents: 0 };
+      }
+
+      const creditedCents = await applyRewardCredit(db, settings, user, {
+        network: "TheoremReach",
+        txnId: txnKey,
+        payout,
+        note: "TheoremReach survey completed",
+        rawJson,
+      });
       ctx.invalidateQueries();
       return { status: "credited" as const, creditedCents };
     },
@@ -2797,8 +3259,22 @@ export const Actions = {
         affiliateEarningPct: z.number(),
         affiliateSpendingPct: z.number(),
         postbackSecretSet: z.boolean(),
+        theoremReachSecretSet: z.boolean(),
         checkinBonusCents: z.number(),
         levelRewardCents: z.number(),
+        checkinGoalCents: z.number(),
+        checkinRewardsCents: z.array(z.number()),
+        dailyTiersCents: z.array(z.number()),
+        affiliateTiersCents: z.array(z.number()),
+        levelCentsPerLevel: z.number(),
+        levelTitles: z.array(
+          z.object({
+            name: z.string(),
+            level: z.number(),
+            standardPct: z.number(),
+            enhancedPct: z.number(),
+          }),
+        ),
         socialLinks: z.record(z.string(), z.string()),
       }),
     }),
@@ -2855,8 +3331,20 @@ export const Actions = {
           affiliateEarningPct: settingInt(settings, "affiliate_earning_pct"),
           affiliateSpendingPct: settingInt(settings, "affiliate_spending_pct"),
           postbackSecretSet: (settings["postback_secret"] ?? "") !== "",
+          theoremReachSecretSet: (settings["theoremreach_secret"] ?? "") !== "",
           checkinBonusCents: settingInt(settings, "checkin_bonus_cents"),
           levelRewardCents: settingInt(settings, "level_reward_cents"),
+          checkinGoalCents: checkinGoalFrom(settings),
+          checkinRewardsCents: checkinRewardsFrom(settings),
+          dailyTiersCents: dailyTiersFrom(settings),
+          affiliateTiersCents: affiliateTiersFrom(settings),
+          levelCentsPerLevel: levelConfigFrom(settings).centsPerLevel,
+          levelTitles: levelConfigFrom(settings).titles.map((t) => ({
+            name: t.name,
+            level: t.level,
+            standardPct: t.standardPct,
+            enhancedPct: t.enhancedPct,
+          })),
           socialLinks: Object.fromEntries(
             SOCIAL_PLATFORMS.map((s) => [s.id, settings[s.key] ?? ""]),
           ),
@@ -2900,9 +3388,11 @@ export const Actions = {
       const all = await db.select().from(schema.users);
       const allById = new Map(all.map((u) => [u.id, u]));
       void byId;
+      const settings = await getSettings(db);
+      const titles = levelConfigFrom(settings).titles;
       return {
         users: rows.map((u) => ({
-          ...publicUser(u),
+          ...publicUser(u, titles),
           ip: u.ip ?? null,
           isp: u.isp ?? null,
           countryCode: u.countryCode ?? null,
@@ -3289,6 +3779,7 @@ export const Actions = {
             z.object({
               id: z.string(),
               label: z.string(),
+              imageUrl: z.string().nullable(),
               fields: z.array(z.object({ key: z.string(), label: z.string() })),
             }),
           ),
@@ -3300,6 +3791,7 @@ export const Actions = {
           countryCode: z.string(),
           countryName: z.string(),
           label: z.string(),
+          imageUrl: z.string().nullable(),
           fields: z.array(z.object({ key: z.string(), label: z.string() })),
         }),
       ),
@@ -3325,6 +3817,7 @@ export const Actions = {
           methods: methodsForCountry(code).map((m) => ({
             id: m.id,
             label: m.label,
+            imageUrl: m.imageUrl ?? null,
             fields: m.fields,
           })),
         })),
@@ -3334,6 +3827,7 @@ export const Actions = {
           methods: methodsForCountry(null).map((m) => ({
             id: m.id,
             label: m.label,
+            imageUrl: m.imageUrl ?? null,
             fields: m.fields,
           })),
         },
@@ -3347,6 +3841,7 @@ export const Actions = {
             countryCode: r.countryCode,
             countryName: r.countryName,
             label: r.label,
+            imageUrl: def.imageUrl ?? null,
             fields: def.fields,
           };
         }),
@@ -3356,12 +3851,13 @@ export const Actions = {
 
   adminAddWithdrawMethod: defineAction({
     description:
-      "Adds a new withdraw payment method for one country. It appears on the Withdraw page of every user whose locked country matches, next to the built-in methods. The fields are the details the user must fill in when withdrawing with it.",
+      "Adds a new withdraw payment method for one country, with an optional logo image link shown next to its name on the Withdraw page. It appears for every user whose locked country matches, next to the built-in methods. The fields are the details the user must fill in when withdrawing with it.",
     request: z.object({
       adminToken: z.string().min(1).max(200),
       countryCode: z.string().trim().regex(/^[A-Za-z]{2}$/),
       countryName: z.string().trim().min(1).max(80),
       label: z.string().trim().min(1).max(60),
+      imageUrl: z.string().trim().max(1000).optional(),
       fields: z
         .array(
           z.object({
@@ -3407,6 +3903,7 @@ export const Actions = {
           countryCode: code,
           countryName: args.countryName,
           label: args.label,
+          imageUrl: args.imageUrl?.trim() ? args.imageUrl.trim() : null,
           fieldsJson: JSON.stringify(args.fields),
           active: 1,
         })
@@ -3415,6 +3912,76 @@ export const Actions = {
       if (!row) throw new Error("The method could not be saved.");
       ctx.invalidateQueries();
       return { id: row.id };
+    },
+  }),
+
+  adminUpdateWithdrawMethod: defineAction({
+    description:
+      "Edits an owner-added withdraw method: its name, logo image link and the detail fields users fill in. The change shows on the Withdraw page of every user in that country at once. The country itself does not change — remove and re-add to move a method.",
+    request: z.object({
+      adminToken: z.string().min(1).max(200),
+      id: z.number().int().positive(),
+      label: z.string().trim().min(1).max(60),
+      imageUrl: z.string().trim().max(1000).nullable().optional(),
+      fields: z
+        .array(
+          z.object({
+            key: z.string().trim().regex(/^[a-zA-Z][a-zA-Z0-9_]{0,29}$/),
+            label: z.string().trim().min(1).max(60),
+          }),
+        )
+        .min(1)
+        .max(5),
+    }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args): Promise<{ ok: true }> {
+      await requireAdmin(ctx, args.adminToken);
+      const db = ctx.db<typeof schema>();
+      const rows = await db
+        .select()
+        .from(schema.withdrawMethods)
+        .where(eq(schema.withdrawMethods.id, args.id))
+        .limit(1);
+      const row = rows[0];
+      if (!row || row.active !== 1)
+        throw new Error("That method no longer exists.");
+      const builtinLabels = new Set(
+        methodsForCountry(row.countryCode).map((m) => m.label.toLowerCase()),
+      );
+      if (builtinLabels.has(args.label.toLowerCase()))
+        throw new Error(
+          `"${args.label}" is already a built-in method for ${row.countryName}. Pick a different name.`,
+        );
+      const siblings = await db
+        .select()
+        .from(schema.withdrawMethods)
+        .where(
+          and(
+            eq(schema.withdrawMethods.countryCode, row.countryCode),
+            eq(schema.withdrawMethods.active, 1),
+          ),
+        );
+      if (
+        siblings.some(
+          (r) => r.id !== args.id && r.label.toLowerCase() === args.label.toLowerCase(),
+        )
+      )
+        throw new Error(`"${args.label}" already exists for ${row.countryName}.`);
+      await db
+        .update(schema.withdrawMethods)
+        .set({
+          label: args.label,
+          imageUrl:
+            args.imageUrl === undefined
+              ? row.imageUrl
+              : args.imageUrl?.trim()
+                ? args.imageUrl.trim()
+                : null,
+          fieldsJson: JSON.stringify(args.fields),
+        })
+        .where(eq(schema.withdrawMethods.id, args.id));
+      ctx.invalidateQueries();
+      return { ok: true };
     },
   }),
 
@@ -4012,7 +4579,7 @@ export const Actions = {
 
   adminUpdateSettings: defineAction({
     description:
-      "Updates site settings: Google client ID, contest pools, minimum withdrawal, revenue share, affiliate rates, postback secret, and the admin username/password.",
+      "Updates site settings: Google client ID, contest pools, minimum withdrawal, revenue share, affiliate rates, postback secret, TheoremReach secret key, the weekly check-in goal + 7 day rewards, the Daily and Affiliate contest prize tiers, the level pace and title table, and the admin username/password.",
     request: z.object({
       adminToken: z.string().min(1).max(200),
       googleClientId: z.string().trim().max(300).optional(),
@@ -4023,8 +4590,37 @@ export const Actions = {
       affiliateEarningPct: z.number().int().min(0).max(100).optional(),
       affiliateSpendingPct: z.number().int().min(0).max(100).optional(),
       postbackSecret: z.string().max(200).optional(),
+      theoremReachSecret: z.string().max(200).optional(),
       checkinBonusCents: z.number().int().min(0).max(100000).optional(),
       levelRewardCents: z.number().int().min(0).max(100000).optional(),
+      checkinGoalCents: z.number().int().min(1).max(1_000_000).optional(),
+      checkinRewardsCents: z
+        .array(z.number().int().min(0).max(100_000))
+        .length(7)
+        .optional(),
+      dailyTiersCents: z
+        .array(z.number().int().min(0).max(100_000_000))
+        .min(1)
+        .max(150)
+        .optional(),
+      affiliateTiersCents: z
+        .array(z.number().int().min(0).max(100_000_000))
+        .min(1)
+        .max(100)
+        .optional(),
+      levelCentsPerLevel: z.number().int().min(1).max(1_000_000).optional(),
+      levelTitles: z
+        .array(
+          z.object({
+            name: z.string().trim().min(1).max(30),
+            level: z.number().int().min(1).max(1_000_000),
+            standardPct: z.number().int().min(0).max(100),
+            enhancedPct: z.number().int().min(0).max(100),
+          }),
+        )
+        .min(1)
+        .max(8)
+        .optional(),
       socialDiscord: z.string().trim().max(500).optional(),
       socialYoutube: z.string().trim().max(500).optional(),
       socialTiktok: z.string().trim().max(500).optional(),
@@ -4056,10 +4652,31 @@ export const Actions = {
         updates.push(["affiliate_spending_pct", String(args.affiliateSpendingPct)]);
       if (args.postbackSecret !== undefined)
         updates.push(["postback_secret", args.postbackSecret]);
+      if (args.theoremReachSecret !== undefined)
+        updates.push(["theoremreach_secret", args.theoremReachSecret]);
       if (args.checkinBonusCents !== undefined)
         updates.push(["checkin_bonus_cents", String(args.checkinBonusCents)]);
       if (args.levelRewardCents !== undefined)
         updates.push(["level_reward_cents", String(args.levelRewardCents)]);
+      if (args.checkinGoalCents !== undefined)
+        updates.push(["checkin_goal_cents", String(args.checkinGoalCents)]);
+      if (args.checkinRewardsCents !== undefined)
+        updates.push(["checkin_rewards_cents", args.checkinRewardsCents.join(",")]);
+      if (args.dailyTiersCents !== undefined)
+        updates.push(["daily_tiers_cents", args.dailyTiersCents.join(",")]);
+      if (args.affiliateTiersCents !== undefined)
+        updates.push(["affiliate_tiers_cents", args.affiliateTiersCents.join(",")]);
+      if (args.levelCentsPerLevel !== undefined)
+        updates.push(["level_cents_per_level", String(args.levelCentsPerLevel)]);
+      if (args.levelTitles !== undefined) {
+        // Title levels must strictly increase, or the table is
+        // meaningless — refuse the save instead of storing a bad one.
+        for (let i = 1; i < args.levelTitles.length; i++) {
+          if ((args.levelTitles[i]?.level ?? 0) <= (args.levelTitles[i - 1]?.level ?? 0))
+            throw new Error("Title levels must increase from one title to the next.");
+        }
+        updates.push(["level_titles_json", JSON.stringify(args.levelTitles)]);
+      }
       const socialArgs: [string | undefined, string][] = [
         [args.socialDiscord, "social_discord"],
         [args.socialYoutube, "social_youtube"],

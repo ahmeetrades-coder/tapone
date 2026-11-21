@@ -174,6 +174,9 @@ export const withdrawMethods = sqliteTable("withdraw_methods", {
   countryCode: text("country_code").notNull(),
   countryName: text("country_name").notNull().default(""),
   label: text("label").notNull(),
+  // Optional logo image link the owner pastes in Admin → Withdraw
+  // Methods; shown next to the method's name on the Withdraw page.
+  imageUrl: text("image_url"),
   // JSON array of { key, label } — the detail fields the user fills in
   // when withdrawing with this method (all required).
   fieldsJson: text("fields_json").notNull().default("[]"),
