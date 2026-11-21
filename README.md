@@ -153,3 +153,5 @@ Pushing needs a GitHub sign-in (the repo owner's account) — it cannot be
 done from inside the app. Full deploy steps: `DEPLOY.md`. The owner panel
 also has a **GitHub & Deploy** tab with this same checklist and the live
 configuration values.
+
+v25 — sections restructure, embedded survey walls, payment logos, admin options (21 Nov 2026).
