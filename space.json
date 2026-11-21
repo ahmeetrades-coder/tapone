@@ -1,0 +1,20 @@
+{
+  "runtime": "typescript",
+  "platformVersion": 29,
+  "entry": "client/dist/index.html",
+  "name": "TapOne",
+  "slug": "tapone-3",
+  "managedCronJobs": [
+    {
+      "id": "tapone-daily-contest-settle",
+      "action": "settleDailyContest",
+      "args": {},
+      "schedule": {
+        "kind": "daily",
+        "time": "00:15",
+        "timezone": "America/Los_Angeles"
+      },
+      "note": "Records yesterday's Daily contest winners (and last month's Affiliate winners when due) as pending awards with the prize tiers — the owner pays each prize himself from Admin → Contest Payouts; no contest money moves automatically. Installed via cron.add_artifact_action; recording also runs lazily from getLeaderboard."
+    }
+  ]
+}

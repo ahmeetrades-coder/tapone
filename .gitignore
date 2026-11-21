@@ -1,0 +1,30 @@
+# Dependencies and Bun cache — rebuilt by `bun install`
+node_modules/
+.bun-cache/
+
+# Build output — rebuilt by `bun run build`
+.space-build/
+.space-build-cvm/
+client/dist/
+client/dist-cvm/
+server/dist/
+*.tsbuildinfo
+
+# LIVE DATABASE — real user accounts, balances and the admin password.
+# This repo is public: NEVER commit these files.
+app.db
+app.db-shm
+app.db-wal
+# Standalone-server blob storage (profile pictures) lives next to the DB
+app.db.blobs/
+# Persistent-disk layout used on hosts like FadeHost (DATABASE_PATH=/data/app.db)
+/data/
+
+# Build / audit internals of the authoring workspace
+.harness/
+audits/
+.xmds-icon
+
+# OS / editor noise
+.DS_Store
+*.log
