@@ -1755,6 +1755,22 @@ function ProfileTab({
     },
     onError: (e) => setUploadError(e.message),
   });
+  const [editingName, setEditingName] = useState(false);
+  const [nameDraft, setNameDraft] = useState("");
+  const [nameError, setNameError] = useState<string | null>(null);
+  const saveName = useMutation({
+    mutationFn: async () => {
+      const name = nameDraft.trim();
+      if (!name) throw new Error("Type a display name.");
+      return api.updateDisplayName({ token, name });
+    },
+    onSuccess: () => {
+      setNameError(null);
+      setEditingName(false);
+      void queryClient.invalidateQueries({ queryKey: ["me", token] });
+    },
+    onError: (e) => setNameError(e.message),
+  });
   const [tokenCopied, setTokenCopied] = useState(false);
   // Profile shows NO IP address, NO country and NO login method —
   // IP and country are admin-only (never even sent to this client)
@@ -1805,6 +1821,89 @@ function ProfileTab({
         </div>
 
         <div className="mt-6 rounded-2xl bg-[var(--surface-2)] p-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-xs font-semibold text-[var(--dim)]">Display name</p>
+              <p className="mt-0.5 truncate font-display text-base font-bold">{user.name}</p>
+            </div>
+            {!editingName &&
+              (user.nameChangesLeft > 0 ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setNameDraft(user.name);
+                    setNameError(null);
+                    setEditingName(true);
+                  }}
+                  className="rounded-full bg-[var(--surface)] px-4 py-2 text-sm font-bold ring-1 ring-[var(--border)] transition hover:ring-[var(--brand)]"
+                >
+                  Change name
+                </button>
+              ) : (
+                <span className="rounded-full bg-[var(--surface)] px-4 py-2 text-sm font-bold text-[var(--dim)] ring-1 ring-[var(--border)]">
+                  Name locked
+                </span>
+              ))}
+          </div>
+          {editingName && (
+            <form
+              className="mt-3"
+              onSubmit={(e) => {
+                e.preventDefault();
+                setNameError(null);
+                if (!nameDraft.trim()) {
+                  setNameError("Type a display name.");
+                  return;
+                }
+                saveName.mutate();
+              }}
+            >
+              <label htmlFor="profile-display-name" className="sr-only">Display name</label>
+              <input
+                id="profile-display-name"
+                {...FIELDS.updateDisplayName.name}
+                value={nameDraft}
+                onChange={(e) => setNameDraft(e.target.value)}
+                autoComplete="off"
+                className="w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 text-sm outline-none focus:border-[var(--brand)]"
+                placeholder="Your display name"
+              />
+              {nameError && (
+                <p role="alert" className="mt-2 text-sm font-medium text-red-600 dark:text-red-400">{nameError}</p>
+              )}
+              <div className="mt-3 flex gap-2">
+                <button
+                  type="submit"
+                  disabled={saveName.isPending}
+                  className="rounded-full bg-[var(--brand)] px-5 py-2 text-sm font-bold text-white transition hover:bg-[var(--brand-deep)] disabled:opacity-60"
+                >
+                  {saveName.isPending ? "Saving…" : "Save name"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setEditingName(false)}
+                  className="rounded-full bg-[var(--surface)] px-5 py-2 text-sm font-bold ring-1 ring-[var(--border)]"
+                >
+                  Cancel
+                </button>
+              </div>
+            </form>
+          )}
+          <p className="mt-2 text-xs leading-relaxed text-[var(--dim)]">
+            This is the name shown on the leaderboard and to your referrals.
+            Your email address stays the same. You can change your display
+            name 3 times in total —{" "}
+            <strong className="text-[var(--text)]">
+              {user.nameChangesLeft}{" "}
+              {user.nameChangesLeft === 1 ? "change" : "changes"} left
+            </strong>
+            {user.nameChangesLeft === 0
+              ? ", so your name is now locked."
+              : "."}
+          </p>
+        </div>
+
+        <div className="mt-4 rounded-2xl bg-[var(--surface-2)] p-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <p className="font-display text-base font-bold">
               Lv.{d?.level ?? user.level}

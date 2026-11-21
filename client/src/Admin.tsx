@@ -20,7 +20,7 @@ import { Wordmark, goHome } from "./App";
 
 const FIELDS = actionFields<typeof Actions>();
 
-type AdminTab = "overview" | "users" | "stats" | "payouts" | "withdrawals" | "methods" | "content" | "inbox" | "notifications" | "countries" | "postbacks" | "settings" | "deploy";
+type AdminTab = "overview" | "users" | "stats" | "payouts" | "withdrawals" | "methods" | "content" | "inbox" | "notifications" | "countries" | "postbacks" | "callbacks" | "settings" | "deploy";
 
 const ADMIN_TABS: { id: AdminTab; label: string }[] = [
   { id: "overview", label: "Overview" },
@@ -34,6 +34,7 @@ const ADMIN_TABS: { id: AdminTab; label: string }[] = [
   { id: "notifications", label: "Notifications" },
   { id: "countries", label: "Countries" },
   { id: "postbacks", label: "Postbacks" },
+  { id: "callbacks", label: "Partner Callbacks" },
   { id: "settings", label: "Settings" },
   { id: "deploy", label: "GitHub & Deploy" },
 ];
@@ -130,6 +131,7 @@ export function Admin() {
         {tab === "notifications" && <NotificationsTab token={token} />}
         {tab === "countries" && <CountriesTab token={token} />}
         {tab === "postbacks" && <PostbacksTab token={token} />}
+        {tab === "callbacks" && <PartnerCallbacksTab token={token} />}
         {tab === "settings" && <SettingsTab token={token} />}
         {tab === "deploy" && <DeployTab token={token} />}
 
@@ -228,6 +230,10 @@ function Overview({
     queryFn: () => api.adminGetOverview({ adminToken: token }),
     retry: false,
   });
+  const partnerCallbacks = useQuery({
+    queryKey: ["admin-partner-callbacks", token],
+    queryFn: () => api.adminListPartnerCallbacks({ adminToken: token }),
+  });
   if (overview.isError) {
     onAuthFail();
     return null;
@@ -310,6 +316,40 @@ function Overview({
             <p className="mt-4 rounded-xl bg-[var(--ink)] px-4 py-3 font-mono text-xs leading-relaxed text-[#7ee2b8]">
               theoremreach-callback?user_id={"{user_id}"}&amp;tx_id={"{tx_id}"}&amp;reward={"{reward}"}&amp;reward_amount_in_dollars={"{reward_amount_in_dollars}"}&amp;external_transaction_id={"{external_transaction_id}"}
             </p>
+
+            <h3 className="mt-6 font-display text-base font-bold">Partner callbacks — one address per partner you add</h3>
+            <p className="mt-2 max-w-2xl text-sm leading-relaxed text-[var(--dim)]">
+              Every partner you set up in the{" "}
+              <strong className="text-[var(--text)]">Partner Callbacks</strong> tab gets its
+              own callback address below — paste it into that partner&apos;s dashboard and
+              its rewards credit the right user <strong className="text-[var(--text)]">70%</strong>,
+              exactly like the built-in postbacks, with no code change and no redeploy.
+              The parameter names and the secret check are the ones you saved for that
+              partner.
+            </p>
+            {partnerCallbacks.data && partnerCallbacks.data.partners.length > 0 ? (
+              <div className="mt-4 space-y-3">
+                {partnerCallbacks.data.partners.map((p) => (
+                  <div key={p.id}>
+                    <p className="text-sm font-bold">
+                      {p.name}{" "}
+                      <span className="font-semibold text-[var(--dim)]">
+                        · {AUTH_METHOD_LABELS[p.authMethod]}
+                        {p.active ? "" : " · switched off"}
+                      </span>
+                    </p>
+                    <p className="mt-1 overflow-x-auto rounded-xl bg-[var(--ink)] px-4 py-3 font-mono text-xs leading-relaxed whitespace-nowrap text-[#7ee2b8]">
+                      {partnerCallbackUrl(getSiteOrigin(), p)}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="mt-3 text-sm text-[var(--dim)]">
+                No partner callbacks set up yet — add the first one in the Partner
+                Callbacks tab (for example CPX Research) and its address will appear here.
+              </p>
+            )}
           </section>
         </>
       )}
@@ -2383,6 +2423,39 @@ function NotificationsTab({ token }: { token: string }) {
   );
 }
 
+// ------------------------------------------------------- partner callbacks
+
+type PartnerCallbackRow = ApiResponse<typeof api, "adminListPartnerCallbacks">["partners"][number];
+
+const AUTH_METHOD_LABELS: Record<PartnerCallbackRow["authMethod"], string> = {
+  none: "No secret check",
+  secret: "Secret parameter",
+  hmac_sha1: "HMAC-SHA1 signature",
+  hmac_sha256: "HMAC-SHA256 signature",
+};
+
+/**
+ * The exact callback address to paste into a partner's dashboard: the
+ * site's own address + /partner-callback/<key> + the parameter names
+ * the owner configured, with {placeholders} for the values the partner
+ * fills in per conversion.
+ */
+function partnerCallbackUrl(origin: string, p: {
+  key: string;
+  userParam: string;
+  txnParam: string;
+  payoutParam: string;
+  authMethod: PartnerCallbackRow["authMethod"];
+  secretParam: string;
+}): string {
+  let url = `${origin}/partner-callback/${p.key}?${p.userParam}={user_id}&${p.txnParam}={transaction_id}&${p.payoutParam}={payout}`;
+  if (p.authMethod === "secret" && p.secretParam)
+    url += `&${p.secretParam}={secret}`;
+  else if (p.authMethod !== "none" && p.secretParam)
+    url += `&${p.secretParam}={signature}`;
+  return url;
+}
+
 // -------------------------------------------------------------- postbacks
 
 function PostbacksTab({ token }: { token: string }) {
@@ -2424,6 +2497,417 @@ function PostbacksTab({ token }: { token: string }) {
       ) : (
         <p className="mt-6 rounded-2xl border-2 border-dashed border-[var(--border)] bg-[var(--surface)] px-5 py-10 text-center text-sm text-[var(--dim)]">
           No postbacks received yet. They will appear here when a partner sends a conversion.
+        </p>
+      )}
+    </div>
+  );
+}
+
+// ------------------------------------------------------- partner callbacks
+
+type PartnerCallbackForm = {
+  id: number | null;
+  key: string;
+  name: string;
+  userParam: string;
+  txnParam: string;
+  payoutParam: string;
+  payoutInCents: boolean;
+  authMethod: PartnerCallbackRow["authMethod"];
+  secretParam: string;
+  secret: string;
+  active: boolean;
+};
+
+const EMPTY_PARTNER_FORM: PartnerCallbackForm = {
+  id: null,
+  key: "",
+  name: "",
+  userParam: "user_id",
+  txnParam: "txn_id",
+  payoutParam: "payout",
+  payoutInCents: false,
+  authMethod: "none",
+  secretParam: "",
+  secret: "",
+  active: true,
+};
+
+function slugifyPartnerKey(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 40);
+}
+
+function PartnerCallbacksTab({ token }: { token: string }) {
+  const queryClient = useQueryClient();
+  const [form, setForm] = useState<PartnerCallbackForm | null>(null);
+  const [keyTouched, setKeyTouched] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  const fieldCls =
+    "mt-1 w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 text-sm outline-none focus:border-[var(--brand)]";
+
+  const list = useQuery({
+    queryKey: ["admin-partner-callbacks", token],
+    queryFn: () => api.adminListPartnerCallbacks({ adminToken: token }),
+  });
+
+  const invalidate = () =>
+    void queryClient.invalidateQueries({ queryKey: ["admin-partner-callbacks", token] });
+
+  const save = useMutation({
+    mutationFn: async (f: PartnerCallbackForm) => {
+      if (!f.name.trim()) throw new Error("Give the partner a name.");
+      if (!f.key.trim())
+        throw new Error("Give the partner a callback key — it is the end of its callback address.");
+      if (!f.userParam.trim() || !f.txnParam.trim() || !f.payoutParam.trim())
+        throw new Error("Fill in all three parameter names: user ID, transaction ID and payout.");
+      if (f.authMethod !== "none") {
+        if (!f.secretParam.trim())
+          throw new Error("Name the parameter that carries the secret / signature.");
+        if (f.id === null && !f.secret.trim())
+          throw new Error("Type the partner's secret.");
+      }
+      return api.adminUpsertPartnerCallback({
+        adminToken: token,
+        id: f.id ?? undefined,
+        key: f.key.trim(),
+        name: f.name.trim(),
+        userParam: f.userParam.trim(),
+        txnParam: f.txnParam.trim(),
+        payoutParam: f.payoutParam.trim(),
+        payoutInCents: f.payoutInCents,
+        authMethod: f.authMethod,
+        secretParam: f.secretParam.trim(),
+        secret: f.secret.trim() === "" ? undefined : f.secret.trim(),
+        active: f.active,
+      });
+    },
+    onSuccess: (_data, f) => {
+      setNotice(
+        f.id
+          ? `"${f.name.trim()}" updated — its callbacks now follow the new settings.`
+          : `"${f.name.trim()}" added — paste its callback address (below, and in Overview) into the partner's dashboard and rewards will start crediting.`,
+      );
+      setForm(null);
+      setKeyTouched(false);
+      setError(null);
+      invalidate();
+    },
+    onError: (e) => setError(e.message),
+  });
+
+  const setActive = useMutation({
+    mutationFn: async (input: { id: number; active: boolean }) =>
+      api.adminSetPartnerCallbackActive({ adminToken: token, id: input.id, active: input.active }),
+    onSuccess: (_data, input) => {
+      setNotice(
+        input.active
+          ? "Partner switched on — its callbacks credit again."
+          : "Partner switched off — its callbacks are refused until you switch it back on.",
+      );
+      setError(null);
+      invalidate();
+    },
+    onError: (e) => setError(e.message),
+  });
+
+  const remove = useMutation({
+    mutationFn: async (input: { id: number }) =>
+      api.adminRemovePartnerCallback({ adminToken: token, id: input.id }),
+    onSuccess: () => {
+      setNotice("Partner removed — its callback address no longer works. Past credits stay in the postback log.");
+      setError(null);
+      invalidate();
+    },
+    onError: (e) => setError(e.message),
+  });
+
+  const startEdit = (p: PartnerCallbackRow) => {
+    setError(null);
+    setNotice(null);
+    setKeyTouched(true);
+    setForm({
+      id: p.id,
+      key: p.key,
+      name: p.name,
+      userParam: p.userParam,
+      txnParam: p.txnParam,
+      payoutParam: p.payoutParam,
+      payoutInCents: p.payoutInCents,
+      authMethod: p.authMethod,
+      secretParam: p.secretParam,
+      secret: "",
+      active: p.active,
+    });
+  };
+
+  const origin = getSiteOrigin();
+
+  return (
+    <div>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h1 className="font-display text-2xl font-extrabold">Partner Callbacks</h1>
+        <button
+          type="button"
+          onClick={() => {
+            setError(null);
+            setNotice(null);
+            setKeyTouched(false);
+            setForm({ ...EMPTY_PARTNER_FORM });
+          }}
+          className="flex items-center gap-1.5 rounded-full bg-[var(--brand)] px-4 py-2.5 text-sm font-bold text-white"
+        >
+          {Icons.plus("h-4 w-4")} Add partner
+        </button>
+      </div>
+      <p className="mt-1 max-w-3xl text-sm leading-relaxed text-[var(--dim)]">
+        Connect any new offerwall or survey partner (CPX Research, BitLabs, anyone)
+        from here alone — no code change, no upload, no redeploy. For each partner you
+        say which parameters its callback sends for the user ID, the transaction ID and
+        the payout, and how the call proves itself. Paste the partner&apos;s callback
+        address into its dashboard; from then on its rewards credit the right user{" "}
+        <strong className="text-[var(--text)]">70%</strong> automatically — duplicate
+        transactions never credit twice, and the referrer commission, level-ups and the
+        weekly check-in all follow from the same credit. The built-in generic postback
+        and the TheoremReach callback keep working exactly as before.
+      </p>
+      <p className="mt-2 max-w-3xl text-sm leading-relaxed text-[var(--dim)]">
+        The user ID a partner sends back must be the one from the user&apos;s offer
+        link — their <strong className="text-[var(--text)]">Offer Token</strong> (the{" "}
+        <code className="font-semibold text-[var(--text)]">{"{user_id}"}</code> in the
+        partner link you add under Offerwalls / Surveys / Games). For an HMAC partner,
+        the signature is the lowercase hex HMAC of every other parameter sorted by
+        name and joined as <code className="font-semibold text-[var(--text)]">name=value&amp;name=value</code>,
+        keyed with the secret below.
+      </p>
+
+      {error && (
+        <p role="alert" className="mt-3 text-sm font-medium text-red-600 dark:text-red-400">{error}</p>
+      )}
+      {notice && (
+        <p role="status" className="mt-3 text-sm font-medium text-[var(--brand-deep)] dark:text-[var(--brand)]">{notice}</p>
+      )}
+
+      {form && (
+        <form
+          className="mt-5 rounded-3xl bg-[var(--surface)] p-5 ring-1 ring-[var(--border)] sm:p-6"
+          onSubmit={(e) => {
+            e.preventDefault();
+            setError(null);
+            setNotice(null);
+            save.mutate(form);
+          }}
+        >
+          <p className="font-display text-lg font-bold">{form.id ? "Edit partner" : "Add partner"}</p>
+          <div className="mt-4 grid gap-4 sm:grid-cols-2">
+            <div>
+              <label htmlFor="pc-name" className="text-sm font-semibold">Partner name</label>
+              <input
+                id="pc-name"
+                {...FIELDS.adminUpsertPartnerCallback.name}
+                value={form.name}
+                onChange={(e) => {
+                  const name = e.target.value;
+                  setForm({
+                    ...form,
+                    name,
+                    key: keyTouched ? form.key : slugifyPartnerKey(name),
+                  });
+                }}
+                className={fieldCls}
+                placeholder="e.g. CPX Research"
+              />
+            </div>
+            <div>
+              <label htmlFor="pc-key" className="text-sm font-semibold">Callback key <span className="font-normal text-[var(--dim)]">(end of the callback address)</span></label>
+              <input
+                id="pc-key"
+                {...FIELDS.adminUpsertPartnerCallback.key}
+                value={form.key}
+                onChange={(e) => {
+                  setKeyTouched(true);
+                  setForm({ ...form, key: e.target.value.toLowerCase() });
+                }}
+                className={fieldCls}
+                placeholder="e.g. cpx-research"
+              />
+            </div>
+            <div>
+              <label htmlFor="pc-user-param" className="text-sm font-semibold">User ID parameter name</label>
+              <input id="pc-user-param" {...FIELDS.adminUpsertPartnerCallback.userParam} value={form.userParam} onChange={(e) => setForm({ ...form, userParam: e.target.value })} className={fieldCls} placeholder="e.g. user_id" />
+              <p className="mt-1 text-xs text-[var(--dim)]">The parameter that carries the user&apos;s Offer Token.</p>
+            </div>
+            <div>
+              <label htmlFor="pc-txn-param" className="text-sm font-semibold">Transaction ID parameter name</label>
+              <input id="pc-txn-param" {...FIELDS.adminUpsertPartnerCallback.txnParam} value={form.txnParam} onChange={(e) => setForm({ ...form, txnParam: e.target.value })} className={fieldCls} placeholder="e.g. txn_id" />
+              <p className="mt-1 text-xs text-[var(--dim)]">The partner&apos;s unique ID per conversion — this is what stops double credit.</p>
+            </div>
+            <div>
+              <label htmlFor="pc-payout-param" className="text-sm font-semibold">Payout parameter name</label>
+              <input id="pc-payout-param" {...FIELDS.adminUpsertPartnerCallback.payoutParam} value={form.payoutParam} onChange={(e) => setForm({ ...form, payoutParam: e.target.value })} className={fieldCls} placeholder="e.g. payout" />
+            </div>
+            <div>
+              <label htmlFor="pc-payout-unit" className="text-sm font-semibold">Payout arrives as</label>
+              <select
+                id="pc-payout-unit"
+                value={form.payoutInCents ? "cents" : "dollars"}
+                onChange={(e) => setForm({ ...form, payoutInCents: e.target.value === "cents" })}
+                className={fieldCls}
+              >
+                <option value="dollars">Dollars (e.g. 1.50)</option>
+                <option value="cents">Cents (e.g. 150 = $1.50)</option>
+              </select>
+            </div>
+            <div>
+              <label htmlFor="pc-auth" className="text-sm font-semibold">Signature / secret check</label>
+              <select
+                id="pc-auth"
+                value={form.authMethod}
+                onChange={(e) => {
+                  const authMethod = e.target.value as PartnerCallbackForm["authMethod"];
+                  setForm({
+                    ...form,
+                    authMethod,
+                    secretParam:
+                      form.secretParam ||
+                      (authMethod === "secret"
+                        ? "secret"
+                        : authMethod === "none"
+                          ? ""
+                          : "signature"),
+                  });
+                }}
+                className={fieldCls}
+              >
+                <option value="none">No secret — accept without a check (not recommended)</option>
+                <option value="secret">Secret — a parameter must match the secret</option>
+                <option value="hmac_sha1">HMAC-SHA1 signature</option>
+                <option value="hmac_sha256">HMAC-SHA256 signature</option>
+              </select>
+            </div>
+            {form.authMethod !== "none" && (
+              <>
+                <div>
+                  <label htmlFor="pc-secret-param" className="text-sm font-semibold">Secret / signature parameter name</label>
+                  <input id="pc-secret-param" {...FIELDS.adminUpsertPartnerCallback.secretParam} value={form.secretParam} onChange={(e) => setForm({ ...form, secretParam: e.target.value })} className={fieldCls} placeholder={form.authMethod === "secret" ? "e.g. secret" : "e.g. signature"} />
+                </div>
+                <div>
+                  <label htmlFor="pc-secret" className="text-sm font-semibold">
+                    Secret value{" "}
+                    {form.id !== null && (
+                      <span className="font-normal text-[var(--dim)]">(leave blank to keep the saved one)</span>
+                    )}
+                  </label>
+                  <input id="pc-secret" {...FIELDS.adminUpsertPartnerCallback.secret} type="password" autoComplete="off" value={form.secret} onChange={(e) => setForm({ ...form, secret: e.target.value })} className={fieldCls} placeholder="The secret from the partner's dashboard" />
+                </div>
+              </>
+            )}
+            <div className="flex items-end pb-1">
+              <label className="flex cursor-pointer items-center gap-2 text-sm font-semibold">
+                <input type="checkbox" checked={form.active} onChange={(e) => setForm({ ...form, active: e.target.checked })} className="h-5 w-5 accent-[var(--brand)]" />
+                Active (callbacks credit)
+              </label>
+            </div>
+          </div>
+
+          <div className="mt-5">
+            <p className="text-sm font-semibold">Callback address for this partner</p>
+            <p className="mt-1.5 overflow-x-auto rounded-xl bg-[var(--ink)] px-4 py-3 font-mono text-xs leading-relaxed whitespace-nowrap text-[#7ee2b8]">
+              {partnerCallbackUrl(origin, form)}
+            </p>
+            <p className="mt-1.5 text-xs text-[var(--dim)]">
+              Paste this into the partner&apos;s dashboard, keeping the{" "}
+              <code className="font-semibold">{"{...}"}</code> parts as they are — the
+              partner replaces them with real values on every conversion.
+            </p>
+          </div>
+
+          <div className="mt-5 flex gap-2">
+            <button type="submit" disabled={save.isPending} className="rounded-full bg-[var(--brand)] px-6 py-2.5 font-display text-sm font-bold text-white disabled:opacity-60">
+              {save.isPending ? "Saving…" : form.id ? "Save changes" : "Add partner"}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setForm(null);
+                setKeyTouched(false);
+              }}
+              className="rounded-full bg-[var(--surface-2)] px-6 py-2.5 font-display text-sm font-bold text-[var(--dim)]"
+            >
+              Cancel
+            </button>
+          </div>
+        </form>
+      )}
+
+      {list.isPending ? (
+        <p className="mt-4 text-sm text-[var(--dim)]">Loading…</p>
+      ) : list.data && list.data.partners.length > 0 ? (
+        <ul className="mt-5 space-y-3">
+          {list.data.partners.map((p) => (
+            <li key={p.id} className="rounded-3xl bg-[var(--surface)] p-5 ring-1 ring-[var(--border)]">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="font-display text-base font-bold">
+                    {p.name}{" "}
+                    <span className={`ml-1 rounded-full px-2.5 py-0.5 text-xs font-bold ${p.active ? "bg-[var(--pill)] text-[var(--brand-deep)] dark:text-[var(--brand)]" : "bg-[var(--surface-2)] text-[var(--dim)]"}`}>
+                      {p.active ? "Active" : "Off"}
+                    </span>
+                  </p>
+                  <p className="mt-1 text-xs leading-relaxed text-[var(--dim)]">
+                    User ID in <code className="font-semibold text-[var(--text)]">{p.userParam}</code> ·
+                    transaction in <code className="font-semibold text-[var(--text)]">{p.txnParam}</code> ·
+                    payout in <code className="font-semibold text-[var(--text)]">{p.payoutParam}</code> ({p.payoutInCents ? "cents" : "dollars"}) ·{" "}
+                    {AUTH_METHOD_LABELS[p.authMethod]}
+                    {p.authMethod !== "none" && (
+                      <>
+                        {" "}in <code className="font-semibold text-[var(--text)]">{p.secretParam}</code> ·{" "}
+                        {p.secretSet ? "secret saved" : "NO SECRET SAVED — callbacks will be refused"}
+                      </>
+                    )}
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => startEdit(p)}
+                    className="rounded-full bg-[var(--surface-2)] px-4 py-2 text-xs font-bold text-[var(--dim)] transition hover:text-[var(--text)]"
+                  >
+                    Edit
+                  </button>
+                  <button
+                    type="button"
+                    disabled={setActive.isPending}
+                    onClick={() => setActive.mutate({ id: p.id, active: !p.active })}
+                    className="rounded-full bg-[var(--surface-2)] px-4 py-2 text-xs font-bold text-[var(--dim)] transition hover:text-[var(--text)] disabled:opacity-60"
+                  >
+                    {p.active ? "Switch off" : "Switch on"}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={remove.isPending}
+                    onClick={() => remove.mutate({ id: p.id })}
+                    className="rounded-full bg-[var(--surface-2)] px-4 py-2 text-xs font-bold text-red-600 transition hover:text-red-700 disabled:opacity-60 dark:text-red-400"
+                  >
+                    Remove
+                  </button>
+                </div>
+              </div>
+              <p className="mt-3 overflow-x-auto rounded-xl bg-[var(--ink)] px-4 py-3 font-mono text-xs leading-relaxed whitespace-nowrap text-[#7ee2b8]">
+                {partnerCallbackUrl(origin, p)}
+              </p>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="mt-6 rounded-2xl border-2 border-dashed border-[var(--border)] bg-[var(--surface)] px-5 py-10 text-center text-sm text-[var(--dim)]">
+          No partner callbacks yet. Tap “Add partner” to connect the first one — its
+          callback address will show here and in Overview.
         </p>
       )}
     </div>
