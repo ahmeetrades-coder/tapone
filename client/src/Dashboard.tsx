@@ -2071,6 +2071,57 @@ function MonthCountdown({ endsAt, onElapsed }: { endsAt: string; onElapsed: () =
   );
 }
 
+/** One leaderboard row: rank badge, the user's profile picture (or
+ *  their initial in the blue avatar circle when they have no picture),
+ *  name, and their earnings/prize. Used for the board itself and for
+ *  the standings inside the Join Now view — every ranked user shows
+ *  with name + picture + earnings, Top 100, both contests. */
+function StandingRow({
+  rank,
+  name,
+  pictureUrl,
+  main,
+  sub,
+}: {
+  rank: number;
+  name: string;
+  pictureUrl: string | null;
+  main: string;
+  sub: string;
+}) {
+  return (
+    <li className="flex items-center gap-3 py-3">
+      <span
+        className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full font-display text-sm font-extrabold ${
+          rank === 1
+            ? "bg-[var(--gold)] text-[var(--ink)]"
+            : rank === 2
+              ? "bg-slate-300 text-[var(--ink)]"
+              : rank === 3
+                ? "bg-amber-700 text-white"
+                : "bg-[var(--surface-2)] text-[var(--dim)]"
+        }`}
+      >
+        {rank}
+      </span>
+      <span className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-full bg-[var(--avatar)] font-display text-sm font-extrabold text-white">
+        {pictureUrl ? (
+          <img src={pictureUrl} alt="" className="h-full w-full object-cover" />
+        ) : (
+          name.charAt(0).toUpperCase()
+        )}
+      </span>
+      <span className="min-w-0 flex-1 truncate text-sm font-semibold">{name}</span>
+      <span className="text-right">
+        <span className="block font-display text-base font-bold text-[var(--brand-deep)] dark:text-[var(--brand)]">
+          {main}
+        </span>
+        <span className="block text-xs text-[var(--dim)]">{sub}</span>
+      </span>
+    </li>
+  );
+}
+
 function LeaderboardTab({ token }: { token: string }) {
   const [contest, setContest] = useState<"daily" | "affiliate">("daily");
   const [showPrizes, setShowPrizes] = useState(false);
@@ -2085,12 +2136,14 @@ function LeaderboardTab({ token }: { token: string }) {
       ? d.daily.map((r) => ({
           rank: r.rank,
           name: r.name,
+          pictureUrl: r.pictureUrl,
           main: fmt(r.earnedCents),
           sub: "earned today",
         }))
       : d.affiliateStandings.map((r) => ({
           rank: r.rank,
           name: r.name,
+          pictureUrl: r.pictureUrl,
           main: r.prizeCents > 0 ? fmt(r.prizeCents) : "—",
           sub: `${r.referrals} ${r.referrals === 1 ? "referral" : "referrals"} brought · Score ${r.score}`,
         }))
@@ -2158,6 +2211,24 @@ function LeaderboardTab({ token }: { token: string }) {
         {showPrizes && (
           <div className="mt-4 rounded-2xl bg-[var(--surface)] p-4 ring-1 ring-[var(--border)]">
             <p className="text-sm font-bold">
+              {contest === "daily" ? "Who is winning today" : "Who is winning this month"}
+            </p>
+            {board.isPending ? (
+              <p className="mt-2 text-sm text-[var(--dim)]">Loading…</p>
+            ) : rows.length > 0 ? (
+              <ol className="mt-1 divide-y divide-[var(--border)]">
+                {rows.map((r) => (
+                  <StandingRow key={r.rank} {...r} />
+                ))}
+              </ol>
+            ) : (
+              <p className="mt-2 text-sm text-[var(--dim)]">
+                {contest === "affiliate"
+                  ? "Nobody is on this month's board yet — invite friends to be the first."
+                  : "Nobody is on the board yet — be the first."}
+              </p>
+            )}
+            <p className="mt-3 text-sm font-bold">
               {contest === "daily" ? "Daily contest prizes" : "Affiliate contest prizes"}
             </p>
             <ul className="mt-2 divide-y divide-[var(--border)]">
@@ -2195,30 +2266,7 @@ function LeaderboardTab({ token }: { token: string }) {
       ) : rows.length > 0 ? (
         <ol className="mt-5 divide-y divide-[var(--border)] rounded-2xl bg-[var(--surface)] px-4 ring-1 ring-[var(--border)]">
           {rows.map((r) => (
-            <li key={r.rank} className="flex items-center gap-3 py-3">
-              <span
-                className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full font-display text-sm font-extrabold ${
-                  r.rank === 1
-                    ? "bg-[var(--gold)] text-[var(--ink)]"
-                    : r.rank === 2
-                      ? "bg-slate-300 text-[var(--ink)]"
-                      : r.rank === 3
-                        ? "bg-amber-700 text-white"
-                        : "bg-[var(--surface-2)] text-[var(--dim)]"
-                }`}
-              >
-                {r.rank}
-              </span>
-              <span className="min-w-0 flex-1 truncate text-sm font-semibold">
-                {r.name}
-              </span>
-              <span className="text-right">
-                <span className="block font-display text-base font-bold text-[var(--brand-deep)] dark:text-[var(--brand)]">
-                  {r.main}
-                </span>
-                <span className="block text-xs text-[var(--dim)]">{r.sub}</span>
-              </span>
-            </li>
+            <StandingRow key={r.rank} {...r} />
           ))}
         </ol>
       ) : (

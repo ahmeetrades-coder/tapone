@@ -653,6 +653,8 @@ function UsersTab({ token }: { token: string }) {
   const [adjustFor, setAdjustFor] = useState<number | null>(null);
   const [adjustAmount, setAdjustAmount] = useState("");
   const [adjustNote, setAdjustNote] = useState("");
+  const [countryFor, setCountryFor] = useState<number | null>(null);
+  const [countryPick, setCountryPick] = useState("");
   const [rowError, setRowError] = useState<string | null>(null);
   const [rowOk, setRowOk] = useState<string | null>(null);
 
@@ -690,6 +692,26 @@ function UsersTab({ token }: { token: string }) {
       setAdjustFor(null);
       setAdjustAmount("");
       setAdjustNote("");
+      refresh();
+    },
+    onError: (e) => setRowError(e.message),
+  });
+
+  const fixCountry = useMutation({
+    mutationFn: async (userId: number) => {
+      const country = COUNTRIES.find((c) => c.code === countryPick);
+      if (!country) throw new Error("Pick the correct country first.");
+      return api.adminSetUserCountry({
+        adminToken: token,
+        userId,
+        countryCode: country.code,
+        countryName: country.name,
+      });
+    },
+    onSuccess: () => {
+      setRowOk("Country corrected — the user's withdraw methods now follow the new country.");
+      setCountryFor(null);
+      setCountryPick("");
       refresh();
     },
     onError: (e) => setRowError(e.message),
@@ -801,7 +823,56 @@ function UsersTab({ token }: { token: string }) {
                 >
                   {Icons.dollar("h-4 w-4")} Adjust balance
                 </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCountryFor(countryFor === u.id ? null : u.id);
+                    setCountryPick(u.countryCode ?? "");
+                  }}
+                  className="flex items-center gap-1.5 rounded-full bg-[var(--surface-2)] px-4 py-2 text-sm font-bold"
+                >
+                  {Icons.globe("h-4 w-4")} Fix country
+                </button>
               </div>
+              {countryFor === u.id && (
+                <form
+                  className="mt-3 flex flex-col gap-2 rounded-xl bg-[var(--surface-2)] p-3 sm:flex-row sm:items-end"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    setRowError(null);
+                    setRowOk(null);
+                    fixCountry.mutate(u.id);
+                  }}
+                >
+                  <div className="flex-1">
+                    <label htmlFor={`fix-country-${u.id}`} className="text-xs font-semibold text-[var(--dim)]">
+                      Account country — set at sign-up from the login IP and locked since.
+                      Use this when the sign-up connection resolved to the wrong country;
+                      the user's withdraw methods follow it at once.
+                    </label>
+                    <select
+                      id={`fix-country-${u.id}`}
+                      value={countryPick}
+                      onChange={(e) => setCountryPick(e.target.value)}
+                      className="mt-1 w-full rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm outline-none focus:border-[var(--brand)]"
+                    >
+                      <option value="">Pick the correct country…</option>
+                      {COUNTRIES.map((c) => (
+                        <option key={c.code} value={c.code}>
+                          {flagEmojiFor(c.code)} {c.name} ({c.code})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={fixCountry.isPending || !countryPick}
+                    className="rounded-full bg-[var(--brand)] px-4 py-2 text-sm font-bold text-white disabled:opacity-60"
+                  >
+                    {fixCountry.isPending ? "Saving…" : "Save country"}
+                  </button>
+                </form>
+              )}
               {adjustFor === u.id && (
                 <form
                   className="mt-3 flex flex-col gap-2 rounded-xl bg-[var(--surface-2)] p-3 sm:flex-row"
@@ -1322,6 +1393,52 @@ function WithdrawMethodsTab({ token }: { token: string }) {
     onError: (e) => setError(e.message),
   });
 
+  // Built-in per-country sets: the owner's ticked method ids per group,
+  // seeded from the server's effective sets whenever they reload. A
+  // Save writes the override to site settings — it applies to every
+  // user of that country at once, no redeploy.
+  const [builtinEdits, setBuiltinEdits] = useState<Record<string, string[]>>({});
+  useEffect(() => {
+    if (!list.data) return;
+    setBuiltinEdits(
+      Object.fromEntries(
+        list.data.builtIns.map((g) => [g.countryCode, g.methods.map((m) => m.id)]),
+      ),
+    );
+  }, [list.data]);
+
+  const saveBuiltins = useMutation({
+    mutationFn: async (input: { countryCode: string; methodIds: string[] }) =>
+      api.adminSetBuiltinWithdrawMethods({
+        adminToken: token,
+        groups: [input],
+        resetGroups: [],
+      }),
+    onSuccess: (_data, input) => {
+      setNotice(
+        `Built-in methods for ${input.countryCode} saved — every user from that country sees the new set on their Withdraw page right away.`,
+      );
+      setError(null);
+      invalidate();
+    },
+    onError: (e) => setError(e.message),
+  });
+
+  const resetBuiltins = useMutation({
+    mutationFn: async (input: { countryCode: string }) =>
+      api.adminSetBuiltinWithdrawMethods({
+        adminToken: token,
+        groups: [],
+        resetGroups: [input.countryCode],
+      }),
+    onSuccess: (_data, input) => {
+      setNotice(`Built-in methods for ${input.countryCode} are back to the site defaults.`);
+      setError(null);
+      invalidate();
+    },
+    onError: (e) => setError(e.message),
+  });
+
   const submit = () => {
     if (!countryCode) {
       setError("Pick a country first.");
@@ -1461,39 +1578,101 @@ function WithdrawMethodsTab({ token }: { token: string }) {
         </button>
       </section>
 
-      <h2 className="mt-8 font-display text-lg font-bold">Built-in methods</h2>
-      <p className="mt-1 text-sm text-[var(--dim)]">
-        These ship with the site and show automatically by each user's login
-        country. They can't be removed.
+      <h2 className="mt-8 font-display text-lg font-bold">Built-in methods — set per country</h2>
+      <p className="mt-1 max-w-xl text-sm text-[var(--dim)]">
+        Tick which built-in methods each country gets, then Save. The change
+        applies at once to <strong className="text-[var(--text)]">every user whose account country matches</strong> —
+        no redeploy, nothing else to publish. Every country must keep at
+        least one method ticked.
       </p>
       {list.isPending ? (
         <p className="mt-3 text-sm text-[var(--dim)]">Loading…</p>
       ) : (
         <div className="mt-3 space-y-3">
-          {(list.data?.builtIns ?? []).map((g) => (
-            <div key={g.countryCode} className="rounded-2xl bg-[var(--surface)] p-4 ring-1 ring-[var(--border)] sm:p-5">
-              <p className="font-display text-base font-extrabold">
-                {g.countryCode === "DEFAULT" ? "🌍" : flagEmojiFor(g.countryCode)} {g.countryName}{" "}
-                <span className="text-sm font-bold text-[var(--dim)]">({g.countryCode})</span>
-              </p>
-              <ul className="mt-2 divide-y divide-[var(--border)]">
-                {g.methods.map((m) => (
-                  <li key={m.id} className="flex flex-wrap items-center gap-3 py-2.5">
-                    <MethodLogo methodId={m.id} imageUrl={m.imageUrl} label={m.label} />
-                    <span className="min-w-0 flex-1">
-                      <span className="block text-sm font-semibold">{m.label}</span>
-                      <span className="block text-xs text-[var(--dim)]">
-                        Asks for: {m.fields.map((f) => f.label).join(" · ")}
-                      </span>
+          {(list.data?.builtIns ?? []).map((g) => {
+            const picked = builtinEdits[g.countryCode] ?? g.methods.map((m) => m.id);
+            const serverIds = g.methods.map((m) => m.id);
+            const dirty =
+              picked.length !== serverIds.length ||
+              picked.some((id) => !serverIds.includes(id));
+            return (
+              <div key={g.countryCode} className="rounded-2xl bg-[var(--surface)] p-4 ring-1 ring-[var(--border)] sm:p-5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="font-display text-base font-extrabold">
+                    {g.countryCode === "DEFAULT" ? "🌍" : flagEmojiFor(g.countryCode)} {g.countryName}{" "}
+                    <span className="text-sm font-bold text-[var(--dim)]">({g.countryCode})</span>
+                  </p>
+                  {g.overridden && (
+                    <span className="rounded-full bg-[var(--brand)]/15 px-3 py-1 text-xs font-bold text-[var(--brand-deep)] ring-1 ring-[var(--border)] dark:text-[var(--brand)]">
+                      Customised by you
                     </span>
-                    <span className="rounded-full bg-[var(--surface-2)] px-3 py-1 text-xs font-bold text-[var(--dim)] ring-1 ring-[var(--border)]">
-                      Built-in
+                  )}
+                </div>
+                <ul className="mt-2 divide-y divide-[var(--border)]">
+                  {(list.data?.catalogue ?? []).map((m) => {
+                    const on = picked.includes(m.id);
+                    return (
+                      <li key={m.id} className="py-1.5">
+                        <label className="flex cursor-pointer flex-wrap items-center gap-3 py-1">
+                          <input
+                            type="checkbox"
+                            checked={on}
+                            aria-label={`${m.label} for ${g.countryName}`}
+                            onChange={(e) =>
+                              setBuiltinEdits((prev) => ({
+                                ...prev,
+                                [g.countryCode]: e.target.checked
+                                  ? [...(prev[g.countryCode] ?? serverIds), m.id]
+                                  : (prev[g.countryCode] ?? serverIds).filter((id) => id !== m.id),
+                              }))
+                            }
+                            className="h-5 w-5 shrink-0 accent-[var(--brand)]"
+                          />
+                          <MethodLogo methodId={m.id} imageUrl={m.imageUrl} label={m.label} />
+                          <span className="min-w-0 flex-1">
+                            <span className="block text-sm font-semibold">{m.label}</span>
+                            <span className="block text-xs text-[var(--dim)]">
+                              Asks for: {m.fields.map((f) => f.label).join(" · ")}
+                            </span>
+                          </span>
+                          <span className={`rounded-full px-3 py-1 text-xs font-bold ring-1 ring-[var(--border)] ${on ? "bg-[var(--brand)] text-white" : "bg-[var(--surface-2)] text-[var(--dim)]"}`}>
+                            {on ? "Shown" : "Hidden"}
+                          </span>
+                        </label>
+                      </li>
+                    );
+                  })}
+                </ul>
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={!dirty || picked.length === 0 || saveBuiltins.isPending}
+                    onClick={() =>
+                      saveBuiltins.mutate({ countryCode: g.countryCode, methodIds: picked })
+                    }
+                    className="rounded-full bg-[var(--brand)] px-5 py-2 text-sm font-bold text-white transition hover:bg-[var(--brand-deep)] disabled:opacity-50"
+                  >
+                    {saveBuiltins.isPending ? "Saving…" : `Save ${g.countryName} methods`}
+                  </button>
+                  {picked.length === 0 && (
+                    <span className="text-xs font-semibold text-red-600 dark:text-red-400">
+                      Tick at least one method before saving.
                     </span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          ))}
+                  )}
+                  {g.overridden && (
+                    <button
+                      type="button"
+                      disabled={resetBuiltins.isPending}
+                      onClick={() => resetBuiltins.mutate({ countryCode: g.countryCode })}
+                      className="rounded-full px-4 py-2 text-sm font-bold ring-1 ring-[var(--border)] transition hover:ring-[var(--brand)] disabled:opacity-60"
+                    >
+                      Reset to site defaults
+                    </button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
 
