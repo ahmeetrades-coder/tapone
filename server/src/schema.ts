@@ -88,6 +88,17 @@ export const contentItems = sqliteTable("content_items", {
   rewardCents: integer("reward_cents"),
   url: text("url").notNull().default(""),
   imageUrl: text("image_url"),
+  // Optional small badge on the Offerwalls card (e.g. "+20%"), set by
+  // the owner in Admin → Content. Null = no badge.
+  badge: text("badge"),
+  // Games only: which devices the game runs on ("android" | "ios" |
+  // "both"). The Games tab's Android/iOS pills filter on this and the
+  // pill defaults to the visitor's own device.
+  platform: text("platform").notNull().default("android"),
+  // Games only: JSON array of { event, amountCents } — the milestone
+  // table in the game's detail popup; the amounts add up to the total
+  // payout shown on the game card. Edited in Admin → Content.
+  milestonesJson: text("milestones_json").notNull().default("[]"),
   // Comma-separated ISO country codes, or "ALL".
   countries: text("countries").notNull().default("ALL"),
   featured: integer("featured").notNull().default(0),

@@ -1419,12 +1419,55 @@ const contentShape = z.object({
   rewardCents: z.number().nullable(),
   url: z.string(),
   imageUrl: z.string().nullable(),
+  badge: z.string().nullable(),
+  platform: z.string(),
+  milestones: z.array(
+    z.object({ event: z.string(), amountCents: z.number() }),
+  ),
   countries: z.string(),
   featured: z.boolean(),
   active: z.boolean(),
   sortOrder: z.number(),
   createdAt: z.string(),
 });
+
+/** Parses the stored game-milestones JSON; anything malformed = none. */
+function parseMilestones(
+  json: string | null | undefined,
+): { event: string; amountCents: number }[] {
+  if (!json) return [];
+  try {
+    const value: unknown = JSON.parse(json);
+    if (!Array.isArray(value)) return [];
+    const out: { event: string; amountCents: number }[] = [];
+    for (const m of value) {
+      if (m === null || typeof m !== "object" || Array.isArray(m)) continue;
+      const rec = m as Record<string, unknown>;
+      const event = typeof rec.event === "string" ? rec.event : "";
+      const amountCents =
+        typeof rec.amountCents === "number" && Number.isFinite(rec.amountCents)
+          ? Math.max(0, Math.round(rec.amountCents))
+          : null;
+      if (event && amountCents !== null) out.push({ event, amountCents });
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * One partner = one card (owner order 2026-11-21: TheoremReach showed
+ * TWICE in Offers because two rows existed for it). Partners are keyed
+ * by their provider name, falling back to the title when no provider
+ * is set.
+ */
+function partnerKeyOf(provider: string, title: string): string {
+  return (
+    (provider || "").trim().toLowerCase() ||
+    (title || "").trim().toLowerCase()
+  );
+}
 
 function publicContent(row: typeof schema.contentItems.$inferSelect) {
   return {
@@ -1436,6 +1479,9 @@ function publicContent(row: typeof schema.contentItems.$inferSelect) {
     rewardCents: row.rewardCents ?? null,
     url: row.url,
     imageUrl: row.imageUrl ?? null,
+    badge: row.badge ?? null,
+    platform: row.platform ?? "android",
+    milestones: parseMilestones(row.milestonesJson),
     countries: row.countries,
     featured: row.featured === 1,
     active: row.active === 1,
@@ -1464,6 +1510,248 @@ function personalizeContentUrl(url: string, user: UserRow): string {
     out = out.split("{transaction_id}").join(newToken("txn"));
   }
   return out;
+}
+
+// ------------------------------------------------------------ survey feed
+//
+// The Surveys tab shows INDIVIDUAL surveys — never partner cards and
+// never a partner's website (owner order 2026-11-21, TimeBucks model).
+// For every survey partner the admin has added, a per-partner adapter
+// below asks that partner's own survey API for the surveys matched to
+// THIS user (the partner does the IP/profile matching for the user ID
+// we send — the user's Offer Token, the same ID its callbacks use).
+// Each survey keeps its own entry link, so tapping a card opens that
+// one survey. A partner with no adapter yet, or whose API answers
+// nothing, simply contributes no surveys — nothing is invented.
+
+const surveyFeedItemShape = z.object({
+  key: z.string(),
+  provider: z.string(),
+  providerImageUrl: z.string().nullable(),
+  imageUrl: z.string().nullable(),
+  title: z.string().nullable(),
+  // What the USER earns for this survey: the partner payout with the
+  // site's revenue share applied — the same share the reward callback
+  // will credit on completion (user_share_pct, default 70%).
+  payoutCents: z.number(),
+  minutes: z.number().nullable(),
+  url: z.string(),
+});
+type SurveyFeedItem = z.infer<typeof surveyFeedItemShape>;
+
+function feedRecord(v: unknown): Record<string, unknown> | null {
+  return v !== null && typeof v === "object" && !Array.isArray(v)
+    ? (v as Record<string, unknown>)
+    : null;
+}
+
+function feedList(json: unknown): unknown[] | null {
+  if (Array.isArray(json)) return json;
+  const rec = feedRecord(json);
+  if (!rec) return null;
+  for (const k of ["offers", "surveys", "data", "results", "items"]) {
+    const v = rec[k];
+    if (Array.isArray(v)) return v;
+  }
+  return null;
+}
+
+function feedNum(
+  rec: Record<string, unknown>,
+  names: string[],
+): number | null {
+  for (const n of names) {
+    const v = rec[n];
+    if (typeof v === "number" && Number.isFinite(v)) return v;
+    if (typeof v === "string") {
+      const p = Number.parseFloat(v.replace(/[^0-9.\-]/g, ""));
+      if (Number.isFinite(p)) return p;
+    }
+  }
+  return null;
+}
+
+function feedStr(
+  rec: Record<string, unknown>,
+  names: string[],
+): string | null {
+  for (const n of names) {
+    const v = rec[n];
+    if (typeof v === "string" && v.trim() !== "") return v.trim();
+    if (typeof v === "number" && Number.isFinite(v)) return String(v);
+  }
+  return null;
+}
+
+/**
+ * Maps one raw partner-API survey onto the feed shape. Field names
+ * differ per network, so every known alias is tried; a survey without
+ * a usable entry link or a positive payout is dropped, never guessed.
+ */
+function mapFeedSurvey(
+  raw: unknown,
+  index: number,
+  partner: { name: string; imageUrl: string | null },
+  sharePct: number,
+): SurveyFeedItem | null {
+  const rec = feedRecord(raw);
+  if (!rec) return null;
+  const url = feedStr(rec, [
+    "link",
+    "url",
+    "offer_url",
+    "entry_url",
+    "survey_url",
+    "href",
+  ]);
+  if (!url || !/^https?:\/\//i.test(url)) return null;
+  const centsDirect = feedNum(rec, [
+    "payout_cents",
+    "reward_cents",
+    "amount_cents",
+    "cents",
+  ]);
+  const dollars = feedNum(rec, [
+    "payout",
+    "reward",
+    "amount",
+    "cpi",
+    "price",
+    "payout_usd",
+    "usd",
+  ]);
+  const grossCents =
+    centsDirect != null
+      ? Math.round(centsDirect)
+      : dollars != null
+        ? Math.round(dollars * 100)
+        : null;
+  if (grossCents == null || grossCents <= 0) return null;
+  const mins = feedNum(rec, [
+    "loi",
+    "length",
+    "minutes",
+    "duration",
+    "estimated_loi",
+    "time_required",
+  ]);
+  const offerId =
+    feedStr(rec, ["offer_id", "survey_id", "id"]) ?? String(index);
+  return {
+    key: `${partner.name}:${offerId}:${index}`,
+    provider: partner.name,
+    providerImageUrl: partner.imageUrl,
+    imageUrl: feedStr(rec, ["image", "image_url", "thumbnail", "icon"]),
+    title: feedStr(rec, ["name", "title"]),
+    payoutCents: Math.max(1, Math.round((grossCents * sharePct) / 100)),
+    minutes: mins != null && mins > 0 && mins <= 600 ? Math.round(mins) : null,
+    url,
+  };
+}
+
+async function fetchFeedJson(url: string): Promise<unknown | null> {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 8000);
+  try {
+    const res = await fetch(url, {
+      headers: { accept: "application/json" },
+      signal: ctl.signal,
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as unknown;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+type ContentRow = typeof schema.contentItems.$inferSelect;
+
+/**
+ * TheoremReach Surveys API (theoremreach.com/docs/surveys_api): the
+ * publisher API key is read from the entry URL the admin saved for
+ * the partner (it carries ?api_key=…), and the surveys returned are
+ * the ones TheoremReach has matched to this user_id.
+ */
+async function theoremReachSurveys(
+  item: ContentRow,
+  user: UserRow,
+  sharePct: number,
+): Promise<SurveyFeedItem[]> {
+  let apiKey = "";
+  try {
+    apiKey = new URL(item.url).searchParams.get("api_key") ?? "";
+  } catch {
+    apiKey = "";
+  }
+  if (!apiKey) return [];
+  const partner = {
+    name: item.provider || item.title,
+    imageUrl: item.imageUrl ?? null,
+  };
+  const uid = encodeURIComponent(user.offerToken ?? user.userCode);
+  const key = encodeURIComponent(apiKey);
+  const endpoints = [
+    `https://theoremreach.com/api/offers/v1/offers?api_key=${key}&user_id=${uid}`,
+    `https://theoremreach.com/api/offers/v1/offers/all?api_key=${key}&user_id=${uid}`,
+  ];
+  for (const endpoint of endpoints) {
+    const json = await fetchFeedJson(endpoint);
+    const list = json == null ? null : feedList(json);
+    if (!list) continue;
+    return list
+      .map((raw, i) => mapFeedSurvey(raw, i, partner, sharePct))
+      .filter((s): s is SurveyFeedItem => s !== null);
+  }
+  return [];
+}
+
+/**
+ * CPX Research survey API: app_id is read from the wall URL the admin
+ * saved (it carries ?app_id=…); output_method=api returns the surveys
+ * CPX has matched to this ext_user_id as JSON instead of the wall.
+ */
+async function cpxSurveys(
+  item: ContentRow,
+  user: UserRow,
+  sharePct: number,
+): Promise<SurveyFeedItem[]> {
+  let appId = "";
+  try {
+    appId = new URL(item.url).searchParams.get("app_id") ?? "";
+  } catch {
+    appId = "";
+  }
+  if (!appId) return [];
+  const partner = {
+    name: item.provider || item.title,
+    imageUrl: item.imageUrl ?? null,
+  };
+  const json = await fetchFeedJson(
+    `https://offers.cpx-research.com/index.php?app_id=${encodeURIComponent(appId)}&ext_user_id=${encodeURIComponent(user.offerToken ?? user.userCode)}&output_method=api`,
+  );
+  const list = json == null ? null : feedList(json);
+  if (!list) return [];
+  return list
+    .map((raw, i) => mapFeedSurvey(raw, i, partner, sharePct))
+    .filter((s): s is SurveyFeedItem => s !== null);
+}
+
+/** Routes one survey partner to its feed adapter, by provider name. */
+function surveyFeedForPartner(
+  item: ContentRow,
+  user: UserRow,
+  sharePct: number,
+): Promise<SurveyFeedItem[]> {
+  const key = partnerKeyOf(item.provider, item.title);
+  if (key.includes("theoremreach") || key.includes("theorem reach"))
+    return theoremReachSurveys(item, user, sharePct);
+  if (key.includes("cpx")) return cpxSurveys(item, user, sharePct);
+  // No adapter for this partner yet: its individual surveys cannot be
+  // listed until one is added — the partner contributes nothing here
+  // (its wall card still lives in the Offerwalls tab).
+  return Promise.resolve([]);
 }
 
 /**
@@ -2109,18 +2397,85 @@ export const Actions = {
           ),
         )
         .orderBy(schema.contentItems.sortOrder, desc(schema.contentItems.id));
+      const visible = rows.filter((r) =>
+        visibleInCountry(r.countries, countryCode),
+      );
+      // One card per partner in Offers / Surveys partners (owner
+      // order 2026-11-21): duplicate rows for the same partner —
+      // e.g. TheoremReach added twice — collapse to a single card,
+      // preferring the featured row. Games are NOT deduped: every
+      // game the admin adds shows.
+      let deduped = visible;
+      if (args.kind !== "game") {
+        const kept: typeof visible = [];
+        const indexByPartner = new Map<string, number>();
+        for (const r of visible) {
+          const k = partnerKeyOf(r.provider, r.title);
+          const at = indexByPartner.get(k);
+          if (at === undefined) {
+            indexByPartner.set(k, kept.length);
+            kept.push(r);
+          } else {
+            const existing = kept[at];
+            if (existing && existing.featured !== 1 && r.featured === 1)
+              kept[at] = r;
+          }
+        }
+        deduped = kept;
+      }
       return {
-        items: rows
-          .filter((r) => visibleInCountry(r.countries, countryCode))
-          .map((r) => {
-            const item = publicContent(r);
-            // Signed-in users get a personal link: {user_id} → their
-            // Offer Token, {transaction_id} → a fresh unique ID, so a
-            // completed offer/survey can be credited back to them.
-            if (viewer) item.url = personalizeContentUrl(item.url, viewer);
-            return item;
-          }),
+        items: deduped.map((r) => {
+          const item = publicContent(r);
+          // Signed-in users get a personal link: {user_id} → their
+          // Offer Token, {transaction_id} → a fresh unique ID, so a
+          // completed offer/survey can be credited back to them.
+          if (viewer) item.url = personalizeContentUrl(item.url, viewer);
+          return item;
+        }),
       };
+    },
+  }),
+
+  listSurveyFeed: defineAction({
+    description:
+      "The signed-in user's individual surveys, pulled live from every active survey partner the admin has added (TheoremReach, CPX, …) and visible in the user's country: the partner matched them to this user's account/IP, and each entry carries that survey's own entry link, the payout the user will earn (their revenue share) and its length in minutes. Partner walls/websites are never returned — only individual surveys.",
+    request: z.object({ token: z.string().min(1).max(200) }),
+    response: z.object({ surveys: z.array(surveyFeedItemShape) }),
+    async handler(ctx, args) {
+      const db = ctx.db<typeof schema>();
+      const user = await requireUser(ctx, args.token);
+      const settings = await getSettings(db);
+      const sharePct = settingInt(settings, "user_share_pct") || 70;
+      const rows = await db
+        .select()
+        .from(schema.contentItems)
+        .where(
+          and(
+            eq(schema.contentItems.kind, "survey"),
+            eq(schema.contentItems.active, 1),
+          ),
+        )
+        .orderBy(schema.contentItems.sortOrder, desc(schema.contentItems.id));
+      // One feed per partner, from the partners visible in the
+      // user's own (login-IP) country — the same IP rule as content.
+      const seenPartners = new Set<string>();
+      const partners = rows.filter((r) => {
+        if (!visibleInCountry(r.countries, user.countryCode)) return false;
+        const k = partnerKeyOf(r.provider, r.title);
+        if (seenPartners.has(k)) return false;
+        seenPartners.add(k);
+        return true;
+      });
+      const perPartner = await Promise.all(
+        partners.map((p) => surveyFeedForPartner(p, user, sharePct)),
+      );
+      const byUrl = new Map<string, SurveyFeedItem>();
+      for (const s of perPartner.flat())
+        if (!byUrl.has(s.url)) byUrl.set(s.url, s);
+      const surveys = [...byUrl.values()]
+        .sort((a, b) => b.payoutCents - a.payoutCents)
+        .slice(0, 100);
+      return { surveys };
     },
   }),
 
@@ -4306,6 +4661,17 @@ export const Actions = {
       rewardCents: z.number().int().nonnegative().max(100_000_000).nullable().default(null),
       url: z.string().trim().max(1000).default(""),
       imageUrl: z.string().trim().max(1000).nullable().default(null),
+      badge: z.string().trim().max(24).nullable().default(null),
+      platform: z.enum(["android", "ios", "both"]).default("android"),
+      milestones: z
+        .array(
+          z.object({
+            event: z.string().trim().min(1).max(120),
+            amountCents: z.number().int().nonnegative().max(100_000_000),
+          }),
+        )
+        .max(50)
+        .default([]),
       countries: z.string().trim().max(300).default("ALL"),
       featured: z.boolean().default(false),
       active: z.boolean().default(true),
@@ -4323,6 +4689,9 @@ export const Actions = {
         rewardCents: args.rewardCents,
         url: args.url,
         imageUrl: args.imageUrl,
+        badge: args.badge,
+        platform: args.platform,
+        milestonesJson: JSON.stringify(args.milestones),
         countries: args.countries || "ALL",
         featured: args.featured ? 1 : 0,
         active: args.active ? 1 : 0,
