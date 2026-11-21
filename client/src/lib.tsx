@@ -489,6 +489,22 @@ export const Icons = {
       <circle cx="18" cy="15" r="0.5" fill="currentColor" />
     </Icon>
   ),
+  clock: (c?: string) => (
+    <Icon className={c}>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 7v5l3 3" />
+    </Icon>
+  ),
+  chevronRight: (c?: string) => (
+    <Icon className={c}>
+      <path d="m9 6 6 6-6 6" />
+    </Icon>
+  ),
+  chevronLeft: (c?: string) => (
+    <Icon className={c}>
+      <path d="m15 6-6 6 6 6" />
+    </Icon>
+  ),
   wallet: (c?: string) => (
     <Icon className={c}>
       <path d="M20 7H4a2 2 0 0 1 0-4h14v4" />

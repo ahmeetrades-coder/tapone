@@ -1177,6 +1177,9 @@ interface ContentForm {
   rewardDollars: string;
   url: string;
   imageUrl: string;
+  badge: string;
+  platform: "android" | "ios" | "both";
+  milestonesText: string;
   countries: string;
   featured: boolean;
   active: boolean;
@@ -1191,6 +1194,9 @@ const EMPTY_FORM: ContentForm = {
   rewardDollars: "",
   url: "",
   imageUrl: "",
+  badge: "",
+  platform: "android",
+  milestonesText: "",
   countries: "ALL",
   featured: false,
   active: true,
@@ -1663,6 +1669,23 @@ function ContentTab({ token }: { token: string }) {
         f.rewardDollars.trim() === "" ? null : toCents(f.rewardDollars.trim());
       if (f.rewardDollars.trim() !== "" && rewardCents === null)
         throw new Error("Reward must be a valid dollar amount.");
+      // Game milestones: one per line, "Event | dollars". They are
+      // the popup's EVENT / CASH table and add up to the total
+      // payout on the game card.
+      const milestones = f.milestonesText
+        .split("\n")
+        .map((l) => l.trim())
+        .filter(Boolean)
+        .map((line) => {
+          const at = line.lastIndexOf("|");
+          const event = at >= 0 ? line.slice(0, at).trim() : "";
+          const cents = at >= 0 ? toCents(line.slice(at + 1).trim()) : null;
+          if (!event || cents === null)
+            throw new Error(
+              `Milestone "${line}" is not in the form: Event | 0.50`,
+            );
+          return { event, amountCents: cents };
+        });
       return api.adminUpsertContent({
         adminToken: token,
         id: f.id,
@@ -1673,6 +1696,9 @@ function ContentTab({ token }: { token: string }) {
         rewardCents,
         url: f.url.trim(),
         imageUrl: f.imageUrl.trim() === "" ? null : f.imageUrl.trim(),
+        badge: f.badge.trim() === "" ? null : f.badge.trim(),
+        platform: f.platform,
+        milestones,
         countries: f.countries.trim() || "ALL",
         featured: f.featured,
         active: f.active,
@@ -1706,6 +1732,14 @@ function ContentTab({ token }: { token: string }) {
     rewardDollars: item.rewardCents != null ? (item.rewardCents / 100).toFixed(2) : "",
     url: item.url,
     imageUrl: item.imageUrl ?? "",
+    badge: item.badge ?? "",
+    platform:
+      item.platform === "ios" || item.platform === "both"
+        ? item.platform
+        : "android",
+    milestonesText: item.milestones
+      .map((m) => `${m.event} | ${(m.amountCents / 100).toFixed(2)}`)
+      .join("\n"),
     countries: item.countries,
     featured: item.featured,
     active: item.active,
@@ -1817,9 +1851,46 @@ function ContentTab({ token }: { token: string }) {
               <input id="ct-img" {...FIELDS.adminUpsertContent.imageUrl} value={form.imageUrl} onChange={(e) => setForm({ ...form, imageUrl: e.target.value })} placeholder="https://…" className={fieldCls} />
             </div>
             <div>
+              <label htmlFor="ct-badge" className="text-sm font-semibold">Badge <span className="font-normal text-[var(--dim)]">(optional — small label on the Offerwalls card, e.g. +20%)</span></label>
+              <input id="ct-badge" {...FIELDS.adminUpsertContent.badge} value={form.badge} onChange={(e) => setForm({ ...form, badge: e.target.value })} placeholder="+20%" className={fieldCls} />
+            </div>
+            <div>
               <label htmlFor="ct-countries" className="text-sm font-semibold">Countries <span className="font-normal text-[var(--dim)]">(ALL, or codes like PK,US,GB)</span></label>
               <input id="ct-countries" {...FIELDS.adminUpsertContent.countries} value={form.countries} onChange={(e) => setForm({ ...form, countries: e.target.value })} className={fieldCls} />
             </div>
+            {form.kind === "game" && (
+              <>
+                <div>
+                  <label htmlFor="ct-platform" className="text-sm font-semibold">Platform <span className="font-normal text-[var(--dim)]">(the Games tab filters on this; each visitor's own device is preselected)</span></label>
+                  <select
+                    id="ct-platform"
+                    value={form.platform}
+                    onChange={(e) => setForm({ ...form, platform: e.target.value as ContentForm["platform"] })}
+                    className={fieldCls}
+                  >
+                    <option value="android">Android</option>
+                    <option value="ios">iOS</option>
+                    <option value="both">Android &amp; iOS</option>
+                  </select>
+                </div>
+                <div className="sm:col-span-2">
+                  <label htmlFor="ct-milestones" className="text-sm font-semibold">Milestones <span className="font-normal text-[var(--dim)]">(one per line: Event | dollars)</span></label>
+                  <textarea
+                    id="ct-milestones"
+                    value={form.milestonesText}
+                    onChange={(e) => setForm({ ...form, milestonesText: e.target.value })}
+                    rows={4}
+                    placeholder={"Install and open the game | 0.10\nReach level 10 | 0.50\nReach level 20 | 1.50"}
+                    className={fieldCls}
+                  />
+                  <p className="mt-1 text-xs leading-relaxed text-[var(--dim)]">
+                    Shown as the EVENT / CASH table in the game's popup — the amounts add up to the
+                    total payout on the game card and its PLAY AND EARN button. Leave empty to use
+                    the single Reward amount above instead.
+                  </p>
+                </div>
+              </>
+            )}
             <div>
               <label htmlFor="ct-sort" className="text-sm font-semibold">Sort order</label>
               <input id="ct-sort" value={form.sortOrder} onChange={(e) => setForm({ ...form, sortOrder: e.target.value })} inputMode="numeric" className={fieldCls} />
@@ -1867,6 +1938,8 @@ function ContentTab({ token }: { token: string }) {
                 </p>
                 <p className="truncate text-sm text-[var(--dim)]">
                   {item.provider || "—"} · {item.rewardCents != null ? fmt(item.rewardCents) : "no set reward"} · {item.countries}
+                  {item.kind === "game" ? ` · ${item.platform}${item.milestones.length > 0 ? ` · ${item.milestones.length} milestones` : ""}` : ""}
+                  {item.badge ? ` · badge ${item.badge}` : ""}
                 </p>
               </div>
               <button type="button" onClick={() => setForm(editForm(item))} className="flex items-center gap-1.5 rounded-full bg-[var(--surface-2)] px-4 py-2 text-sm font-bold">

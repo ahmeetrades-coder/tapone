@@ -5,7 +5,7 @@ import { api, type ApiResponse } from "./api";
 import type { Actions } from "../../server/src/actions";
 import { Icons, MethodLogo, applyThemeMode, fmt, fmtDate, fmtDateTime, getThemeMode, isAuthError } from "./lib";
 import { fileToBase64 } from "@hatch/space-sdk/client";
-import { ContentCard, FooterThemePill, Wordmark } from "./App";
+import { FooterThemePill, Wordmark } from "./App";
 
 const FIELDS = actionFields<typeof Actions>();
 
@@ -335,7 +335,7 @@ export function Dashboard({
               )}
               {tab === "offers" && (<><ContentSection token={token} kind="offerwall" includeSurveyWalls /><MyOffersPanel token={token} /></>)}
               {tab === "surveys" && <SurveysSection token={token} />}
-              {tab === "playtime" && <ContentSection token={token} kind="game" />}
+              {tab === "playtime" && <GamesSection token={token} />}
               {tab === "apps" && <ContentSection token={token} kind="offerwall" heading="Apps" />}
               {tab === "partners" && <ContentSection token={token} kind="survey" heading="Surveys partners" />}
               {tab === "cashout" && <WithdrawTab token={token} />}
@@ -746,6 +746,94 @@ function SectionStats({ token, kind }: { token: string; kind: "offerwall" | "sur
 
 // ------------------------------------------------------------ content tabs
 
+type ContentListItem = ApiResponse<typeof api, "listContent">["items"][number];
+
+/**
+ * Collapses duplicate rows for the same partner to a single card,
+ * preferring the featured row (the server dedupes within each kind
+ * too; this covers the Offers tab merging offerwalls + survey walls).
+ */
+function dedupePartners(items: ContentListItem[]): ContentListItem[] {
+  const kept: ContentListItem[] = [];
+  const indexByPartner = new Map<string, number>();
+  for (const item of items) {
+    const key =
+      (item.provider || "").trim().toLowerCase() ||
+      (item.title || "").trim().toLowerCase();
+    const at = indexByPartner.get(key);
+    if (at === undefined) {
+      indexByPartner.set(key, kept.length);
+      kept.push(item);
+    } else {
+      const existing = kept[at];
+      if (existing && !existing.featured && item.featured) kept[at] = item;
+    }
+  }
+  return kept;
+}
+
+/**
+ * Offerwalls card (owner order 2026-11-21, TimeBucks model): ONLY the
+ * partner's logo centred on a white card with its name below — no
+ * payout, no description, no other text. A small badge (e.g. "+20%")
+ * shows when the admin set one for that wall. Tapping the card opens
+ * the partner's own wall website in a new tab — that IS the intended
+ * behaviour on this tab; the wall itself is the partner's own page
+ * with its own offers, TapOne only links to it. Individual surveys
+ * and games live on their own tabs, never as wall cards.
+ */
+function OfferwallCard({ item }: { item: ContentListItem }) {
+  const [imgOk, setImgOk] = useState(true);
+  const name = item.provider || item.title;
+  const inner = (
+    <>
+      {item.badge && (
+        <span className="absolute right-3 top-3 rounded-full bg-green-500 px-2 py-0.5 text-xs font-extrabold text-white">
+          {item.badge}
+        </span>
+      )}
+      <span className="flex h-16 items-center justify-center sm:h-20">
+        {item.imageUrl && imgOk ? (
+          <img
+            src={item.imageUrl}
+            alt={name}
+            className="max-h-16 max-w-[75%] object-contain sm:max-h-20"
+            loading="lazy"
+            onError={() => setImgOk(false)}
+          />
+        ) : (
+          <span
+            className="flex h-14 w-14 items-center justify-center rounded-2xl bg-[var(--surface-2)] font-display text-xl font-extrabold text-[var(--brand)]"
+            aria-hidden="true"
+          >
+            {name.slice(0, 1).toUpperCase()}
+          </span>
+        )}
+      </span>
+      <span className="mt-3 block truncate text-center font-display text-sm font-bold text-[var(--text)] sm:text-base">
+        {name}
+      </span>
+    </>
+  );
+  const cls =
+    "relative block rounded-2xl bg-[var(--surface)] px-4 py-6 ring-1 ring-[var(--border)] transition hover:ring-[var(--brand)]";
+  return item.url ? (
+    <a
+      href={item.url}
+      target="_blank"
+      rel="noreferrer"
+      aria-label={`Open ${name}`}
+      className={cls}
+    >
+      {inner}
+    </a>
+  ) : (
+    <div className={cls} aria-label={name}>
+      {inner}
+    </div>
+  );
+}
+
 function ContentSection({
   token,
   kind,
@@ -758,9 +846,9 @@ function ContentSection({
   /**
    * Offerwalls tab only (owner order 2026-11-21): survey partner
    * WALLS — TheoremReach, CPX and the like — are offerwalls and their
-   * cards belong here. Individual surveys never appear as cards
-   * anywhere: they live inside the walls, which open embedded on the
-   * Surveys tab.
+   * cards belong here, next to the offerwall rows. Individual surveys
+   * never appear as cards anywhere: the Surveys tab lists them from
+   * the partners' own feeds.
    */
   includeSurveyWalls?: boolean;
 }) {
@@ -793,12 +881,13 @@ function ContentSection({
         "No games are live yet. Game partners are reviewing TapOne — approved games will appear here, with the best ones featured on the home page.",
     },
   }[kind];
-  const allItems = [
+  // One card per partner (owner order 2026-11-21): the merged lists
+  // can hold the same partner twice — TheoremReach showed two cards
+  // in Offers — so duplicates collapse here as well as server-side.
+  const allItems = dedupePartners([
     ...(query.data?.items ?? []),
     ...(includeSurveyWalls ? (wallsQuery.data?.items ?? []) : []),
-  ];
-  const featured = allItems.filter((i) => i.featured);
-  const rest = allItems.filter((i) => !i.featured);
+  ]);
   const loading =
     query.isPending || (includeSurveyWalls === true && wallsQuery.isPending);
   return (
@@ -815,21 +904,10 @@ function ContentSection({
       {loading ? (
         <p className="mt-8 text-sm text-[var(--dim)]">Loading…</p>
       ) : allItems.length > 0 ? (
-        <div className="mt-6 space-y-6">
-          {featured.length > 0 && (
-            <div className="grid gap-4 sm:grid-cols-2">
-              {featured.map((item) => (
-                <ContentCard key={item.id} item={item} big />
-              ))}
-            </div>
-          )}
-          {rest.length > 0 && (
-            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-              {rest.map((item) => (
-                <ContentCard key={item.id} item={item} />
-              ))}
-            </div>
-          )}
+        <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-3 sm:gap-4 xl:grid-cols-4">
+          {allItems.map((item) => (
+            <OfferwallCard key={item.id} item={item} />
+          ))}
         </div>
       ) : (
         <div className="mt-8 rounded-3xl border-2 border-dashed border-[var(--border)] bg-[var(--surface)] px-6 py-12 text-center">
@@ -843,106 +921,650 @@ function ContentSection({
 
 // ------------------------------------------------------------- surveys tab
 
-type ContentListItem = ApiResponse<typeof api, "listContent">["items"][number];
+type FeedSurvey = ApiResponse<typeof api, "listSurveyFeed">["surveys"][number];
 
 /**
- * Surveys tab (owner order 2026-11-21): NO partner cards here — a
- * card the user has to click is exactly what the owner removed. Each
- * survey partner's wall opens directly on this page, below the
- * check-in card: the partner matches surveys to the user's IP inside
- * its own wall, and listContent has already personalised the wall URL
- * with the user's own Offer Token ({user_id}) and a fresh transaction
- * ID, so a completed survey credits the right account. The wall CARDS
- * live in the Offerwalls tab (Offers), where the owner wants them.
+ * Surveys tab (owner order 2026-11-21, TimeBucks model): ONE merged
+ * list of INDIVIDUAL surveys from EVERY survey partner the admin has
+ * added — the server pulls each partner's own survey feed for this
+ * user (listSurveyFeed), so the surveys are the ones matched to the
+ * user's IP/account, each with its picture, its price and its
+ * minutes. There are NO partner cards and NO partner website links
+ * here: tapping a survey card opens THAT survey directly.
  */
 function SurveysSection({ token }: { token: string }) {
   const query = useQuery({
-    queryKey: ["content", "survey", token],
-    queryFn: () => api.listContent({ token, kind: "survey" }),
+    queryKey: ["survey-feed", token],
+    queryFn: () => api.listSurveyFeed({ token }),
+    staleTime: 60_000,
   });
-  const items = query.data?.items ?? [];
+  const surveys = query.data?.surveys ?? [];
+  const [provider, setProvider] = useState("all");
+  const providers = Array.from(new Set(surveys.map((s) => s.provider)));
+  const shown =
+    provider === "all"
+      ? surveys
+      : surveys.filter((s) => s.provider === provider);
+  const totalPotential = surveys.reduce((sum, s) => sum + s.payoutCents, 0);
   return (
     <div>
       <CheckinBonus token={token} />
       <h1 className="font-display text-2xl font-extrabold sm:text-3xl">Surveys</h1>
       <p className="mt-1 text-sm text-[var(--dim)]">
-        The latest surveys matched to your account open right here —
-        no extra tap needed.
+        The latest surveys matched to your account from every survey
+        partner — tap a survey to start it.
       </p>
       <div className="mt-5">
         <SectionStats token={token} kind="survey" />
       </div>
       {query.isPending ? (
-        <p className="mt-8 text-sm text-[var(--dim)]">Loading…</p>
-      ) : items.length > 0 ? (
-        <div className="mt-6 space-y-6">
-          {items.map((item) => (
-            <SurveyWall key={item.id} item={item} />
-          ))}
+        <p className="mt-8 text-sm text-[var(--dim)]">Loading surveys…</p>
+      ) : query.isError ? (
+        <div className="mt-8 rounded-3xl border-2 border-dashed border-[var(--border)] bg-[var(--surface)] px-6 py-12 text-center">
+          <p className="mx-auto max-w-md text-sm leading-relaxed text-[var(--dim)]">
+            Surveys could not be loaded just now.
+          </p>
+          <button
+            type="button"
+            onClick={() => void query.refetch()}
+            disabled={query.isFetching}
+            className="mt-4 rounded-full bg-[var(--brand)] px-6 py-2.5 font-display text-sm font-bold text-white transition hover:bg-[var(--brand-deep)] disabled:opacity-60"
+          >
+            {query.isFetching ? "Trying again…" : "Try again"}
+          </button>
         </div>
-      ) : (
+      ) : surveys.length === 0 ? (
         <div className="mt-8 rounded-3xl border-2 border-dashed border-[var(--border)] bg-[var(--surface)] px-6 py-12 text-center">
           <span className="text-[var(--brand)]">{Icons.survey("h-10 w-10")}</span>
           <p className="mx-auto mt-3 max-w-md text-sm leading-relaxed text-[var(--dim)]">
-            No survey partners are live yet. When a survey network
-            approves TapOne, its surveys for you will open here
-            automatically.
+            No surveys are available for your account right now. Survey
+            partners match new surveys to accounts through the day —
+            check back soon.
           </p>
         </div>
+      ) : (
+        <>
+          <div className="mt-6 flex flex-wrap items-center gap-x-8 gap-y-2 rounded-2xl bg-[var(--surface)] px-5 py-4 ring-1 ring-[var(--border)]">
+            <p className="font-display text-lg font-extrabold sm:text-xl">
+              {surveys.length} Available Surveys
+            </p>
+            <p className="text-sm font-semibold text-[var(--dim)]">
+              Total Potential Earnings{" "}
+              <span className="font-display text-lg font-extrabold text-green-600 dark:text-green-400">
+                {fmt(totalPotential)}
+              </span>
+            </p>
+          </div>
+          <div className="mt-4 flex flex-wrap items-center gap-3">
+            <label htmlFor="survey-provider-filter" className="text-sm font-bold">
+              Filter by Provider
+            </label>
+            <select
+              id="survey-provider-filter"
+              value={provider}
+              onChange={(e) => setProvider(e.target.value)}
+              className="rounded-xl bg-[var(--surface)] px-3.5 py-2.5 text-sm font-semibold ring-1 ring-[var(--border)] outline-none focus:ring-[var(--brand)]"
+            >
+              <option value="all">All Providers</option>
+              {providers.map((p) => (
+                <option key={p} value={p}>
+                  {p}
+                </option>
+              ))}
+            </select>
+            {provider !== "all" && (
+              <button
+                type="button"
+                onClick={() => setProvider("all")}
+                className="rounded-full bg-red-600 px-4 py-2 text-sm font-bold text-white transition hover:bg-red-700"
+              >
+                Show All
+              </button>
+            )}
+          </div>
+          {shown.length > 0 ? (
+            <div className="mt-5 grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-3 xl:grid-cols-4">
+              {shown.map((s) => (
+                <SurveyCard key={s.key} survey={s} />
+              ))}
+            </div>
+          ) : (
+            <p className="mt-6 text-sm text-[var(--dim)]">
+              No surveys from {provider} right now — pick another
+              provider or press Show All.
+            </p>
+          )}
+        </>
       )}
     </div>
   );
 }
 
-function SurveyWall({ item }: { item: ContentListItem }) {
+/**
+ * One survey, TimeBucks style: big payout top-left, green arrow
+ * button top-right, clock + minutes under the payout, the provider's
+ * logo bottom-right — no title, no description. The whole card is the
+ * survey's own entry link: tapping opens that one survey directly,
+ * never the partner's website.
+ */
+function SurveyCard({ survey }: { survey: FeedSurvey }) {
+  const logo = survey.imageUrl ?? survey.providerImageUrl;
   return (
-    <section
-      aria-label={`${item.title} surveys`}
-      className="overflow-hidden rounded-3xl bg-[var(--surface)] ring-1 ring-[var(--border)]"
+    <a
+      href={survey.url}
+      target="_blank"
+      rel="noreferrer"
+      aria-label={`Survey from ${survey.provider} paying ${fmt(survey.payoutCents)}${survey.minutes != null ? `, about ${survey.minutes} minutes` : ""}`}
+      className="relative flex min-h-[132px] flex-col rounded-2xl bg-[var(--surface)] p-4 ring-1 ring-[var(--border)] transition hover:ring-[var(--brand)]"
     >
-      <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3 sm:px-5">
-        <div>
-          <h2 className="font-display text-base font-bold text-[var(--text)]">{item.title}</h2>
+      <span className="flex items-start justify-between gap-2">
+        <span className="font-display text-2xl font-extrabold text-[var(--text)]">
+          {fmt(survey.payoutCents)}
+        </span>
+        <span
+          className="flex h-9 w-9 flex-none items-center justify-center rounded-full bg-green-500 text-white"
+          aria-hidden="true"
+        >
+          {Icons.chevronRight("h-5 w-5")}
+        </span>
+      </span>
+      {survey.minutes != null && (
+        <span className="mt-1.5 flex items-center gap-1.5 text-sm font-semibold text-[var(--dim)]">
+          {Icons.clock("h-4 w-4")} {survey.minutes} min
+        </span>
+      )}
+      <span className="mt-auto flex items-end justify-between gap-2 pt-3">
+        <span className="min-w-0 truncate text-xs font-semibold text-[var(--dim)]">
+          {survey.title ?? ""}
+        </span>
+        {logo ? (
+          <img
+            src={logo}
+            alt={survey.provider}
+            className="h-6 max-w-[76px] flex-none object-contain"
+            loading="lazy"
+          />
+        ) : (
+          <span className="flex-none text-xs font-bold uppercase tracking-wide text-[var(--dim)]">
+            {survey.provider}
+          </span>
+        )}
+      </span>
+    </a>
+  );
+}
+
+// -------------------------------------------------------------- games tab
+
+type GameItem = ContentListItem;
+
+/** A game's total payout: its milestones added up, else its set reward. */
+function gameTotalCents(item: GameItem): number {
+  if (item.milestones.length > 0)
+    return item.milestones.reduce((sum, m) => sum + m.amountCents, 0);
+  return item.rewardCents ?? 0;
+}
+
+/** The visitor's own device platform — the Games toggle's default. */
+function detectDevicePlatform(): "android" | "ios" {
+  if (
+    typeof navigator !== "undefined" &&
+    /iphone|ipad|ipod/i.test(navigator.userAgent)
+  )
+    return "ios";
+  return "android";
+}
+
+function PlatformIcon({
+  platform,
+  className,
+}: {
+  platform: string;
+  className?: string;
+}) {
+  if (platform === "ios") {
+    return (
+      <svg
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        className={className}
+        aria-hidden="true"
+      >
+        <rect x="7" y="2.5" width="10" height="19" rx="2" />
+        <path d="M11 18.5h2" />
+      </svg>
+    );
+  }
+  if (platform === "both") return Icons.globe(className);
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden="true"
+    >
+      <path d="M8.5 9 7 5.5M15.5 9 17 5.5" />
+      <rect x="5" y="9" width="14" height="10" rx="2" />
+      <circle cx="9.5" cy="14" r="0.5" fill="currentColor" stroke="none" />
+      <circle cx="14.5" cy="14" r="0.5" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
+/**
+ * One carousel row: scrolls left/right with arrow buttons, and when
+ * there are enough games the row's content is duplicated so scrolling
+ * wraps around seamlessly (the TimeBucks loop).
+ */
+function LoopRow({
+  items,
+  renderCard,
+  label,
+}: {
+  items: GameItem[];
+  renderCard: (item: GameItem, key: string) => ReactNode;
+  label: string;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const loop = items.length > 3;
+  const onScroll = () => {
+    const el = ref.current;
+    if (!el || !loop) return;
+    const half = el.scrollWidth / 2;
+    if (half > 0 && el.scrollLeft >= half) el.scrollLeft -= half;
+  };
+  const nudge = (dir: 1 | -1) =>
+    ref.current?.scrollBy({ left: dir * 340, behavior: "smooth" });
+  return (
+    <div>
+      <div className="mb-2 flex justify-end gap-2">
+        <button
+          type="button"
+          onClick={() => nudge(-1)}
+          aria-label={`Scroll ${label} left`}
+          className="flex h-9 w-9 items-center justify-center rounded-full bg-[var(--surface)] ring-1 ring-[var(--border)] transition hover:ring-[var(--brand)]"
+        >
+          {Icons.chevronLeft("h-5 w-5")}
+        </button>
+        <button
+          type="button"
+          onClick={() => nudge(1)}
+          aria-label={`Scroll ${label} right`}
+          className="flex h-9 w-9 items-center justify-center rounded-full bg-[var(--surface)] ring-1 ring-[var(--border)] transition hover:ring-[var(--brand)]"
+        >
+          {Icons.chevronRight("h-5 w-5")}
+        </button>
+      </div>
+      <div
+        ref={ref}
+        onScroll={onScroll}
+        className="flex gap-3 overflow-x-auto pb-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+        role="list"
+        aria-label={label}
+      >
+        {items.map((item) => renderCard(item, `a-${item.id}`))}
+        {loop && items.map((item) => renderCard(item, `b-${item.id}`))}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * One game card (TimeBucks model): large square artwork on top, the
+ * title below it, the total payout in large bold green at the bottom
+ * left and a small platform icon at the bottom right. The card itself
+ * is the button — no Start button, no description, no rating.
+ */
+function GameCard({
+  item,
+  onOpen,
+}: {
+  item: GameItem;
+  onOpen: () => void;
+}) {
+  const [imgOk, setImgOk] = useState(true);
+  const total = gameTotalCents(item);
+  return (
+    <button
+      type="button"
+      role="listitem"
+      onClick={onOpen}
+      aria-label={`${item.title} — earn up to ${fmt(total)}`}
+      className="w-36 flex-none overflow-hidden rounded-2xl bg-[var(--surface)] text-left ring-1 ring-[var(--border)] transition hover:ring-[var(--brand)] sm:w-44"
+    >
+      {item.imageUrl && imgOk ? (
+        <img
+          src={item.imageUrl}
+          alt={item.title}
+          className="aspect-square w-full object-cover"
+          loading="lazy"
+          onError={() => setImgOk(false)}
+        />
+      ) : (
+        <span className="flex aspect-square w-full items-center justify-center bg-[var(--surface-2)] text-[var(--brand)]">
+          {Icons.game("h-12 w-12")}
+        </span>
+      )}
+      <span className="block px-3 pb-3 pt-2">
+        <span className="block truncate font-display text-sm font-bold text-[var(--text)]">
+          {item.title}
+        </span>
+        <span className="mt-1.5 flex items-end justify-between gap-2">
+          <span className="font-display text-lg font-extrabold leading-none text-green-600 dark:text-green-400">
+            {fmt(total)}
+          </span>
+          <PlatformIcon
+            platform={item.platform}
+            className="h-[18px] w-[18px] flex-none text-[var(--dim)]"
+          />
+        </span>
+      </span>
+    </button>
+  );
+}
+
+/**
+ * Game detail popup — opens INSIDE TapOne (the page never navigates):
+ * green header with the game name and an X, the large thumbnail, the
+ * EVENT / CASH milestone table adding up to the total payout, and the
+ * green PLAY AND EARN button, which opens that game offerwall's
+ * game/install page directly.
+ */
+function GamePopup({
+  item,
+  onClose,
+}: {
+  item: GameItem;
+  onClose: () => void;
+}) {
+  const total = gameTotalCents(item);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 sm:items-center sm:p-6"
+      role="dialog"
+      aria-modal="true"
+      aria-label={item.title}
+      onClick={onClose}
+    >
+      <div
+        className="max-h-[92vh] w-full max-w-lg overflow-y-auto rounded-t-3xl bg-[var(--surface)] shadow-2xl sm:rounded-3xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between gap-3 bg-green-600 px-5 py-4 text-white">
+          <h2 className="min-w-0 truncate font-display text-lg font-extrabold">
+            {item.title}
+          </h2>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            className="flex h-9 w-9 flex-none items-center justify-center rounded-full bg-white/15 transition hover:bg-white/25"
+          >
+            {Icons.x("h-5 w-5")}
+          </button>
+        </div>
+        {item.imageUrl && (
+          <img
+            src={item.imageUrl}
+            alt={item.title}
+            className="aspect-video w-full object-cover"
+          />
+        )}
+        <div className="px-5 py-4">
           {item.provider && (
-            <p className="text-xs font-semibold uppercase tracking-wide text-[var(--dim)]">
+            <p className="text-xs font-bold uppercase tracking-wide text-[var(--dim)]">
               {item.provider}
             </p>
           )}
+          {item.description && (
+            <p className="mt-2 text-sm leading-relaxed text-[var(--dim)]">
+              {item.description}
+            </p>
+          )}
+          {item.milestones.length > 0 ? (
+            <table className="mt-4 w-full text-sm">
+              <thead>
+                <tr className="border-b border-[var(--border)] text-left text-xs font-extrabold uppercase tracking-wide text-[var(--dim)]">
+                  <th scope="col" className="py-2 pr-3">Event</th>
+                  <th scope="col" className="py-2 text-right">Cash</th>
+                </tr>
+              </thead>
+              <tbody>
+                {item.milestones.map((m, i) => (
+                  <tr
+                    key={`${m.event}-${i}`}
+                    className="border-b border-[var(--border)]/60"
+                  >
+                    <td className="py-2.5 pr-3 font-semibold text-[var(--text)]">
+                      {m.event}
+                    </td>
+                    <td className="py-2.5 text-right font-display font-extrabold text-green-600 dark:text-green-400">
+                      {fmt(m.amountCents)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr>
+                  <td className="py-2.5 pr-3 font-display font-extrabold text-[var(--text)]">
+                    Total
+                  </td>
+                  <td className="py-2.5 text-right font-display font-extrabold text-green-600 dark:text-green-400">
+                    {fmt(total)}
+                  </td>
+                </tr>
+              </tfoot>
+            </table>
+          ) : total > 0 ? (
+            <p className="mt-4 text-sm font-semibold text-[var(--dim)]">
+              Complete this game to earn{" "}
+              <span className="font-display font-extrabold text-green-600 dark:text-green-400">
+                {fmt(total)}
+              </span>
+              .
+            </p>
+          ) : null}
+          {item.url ? (
+            <a
+              href={item.url}
+              target="_blank"
+              rel="noreferrer"
+              className="mt-5 block rounded-full bg-green-600 px-6 py-3.5 text-center font-display text-base font-extrabold uppercase tracking-wide text-white transition hover:bg-green-700"
+            >
+              Play and Earn {fmt(total)}
+            </a>
+          ) : (
+            <p className="mt-5 rounded-2xl bg-[var(--surface-2)] px-4 py-3 text-center text-sm font-semibold text-[var(--dim)]">
+              This game is not open for play yet.
+            </p>
+          )}
         </div>
-        {item.url && (
-          <a
-            href={item.url}
-            target="_blank"
-            rel="noreferrer"
-            aria-label={`Open ${item.title} in a new tab`}
-            className="rounded-full bg-[var(--brand)] px-4 py-2 text-sm font-bold text-white transition hover:bg-[var(--brand-deep)]"
-          >
-            Open in new tab
-          </a>
-        )}
       </div>
-      {item.url ? (
-        <>
-          <iframe
-            src={item.url}
-            title={`${item.title} — surveys matched to your account`}
-            className="h-[620px] w-full border-t border-[var(--border)] bg-white"
-            loading="lazy"
-          />
-          <p className="px-4 py-2.5 text-xs leading-relaxed text-[var(--dim)] sm:px-5">
-            The surveys above are matched to your account by{" "}
-            {item.provider || item.title}. If the wall does not load
-            inside this page, use Open in new tab instead — your
-            earnings are credited either way.
+    </div>
+  );
+}
+
+/**
+ * Games tab (owner order 2026-11-21, TimeBucks model): ONE merged
+ * list of every game from every game offerwall the admin has added —
+ * listContent has already matched them to the user's country (login
+ * IP) server-side; here the Android/iOS pills filter by device, with
+ * the visitor's own device selected by default. Nothing is copied
+ * from anywhere: games appear only when the admin adds them after a
+ * partner approves TapOne.
+ */
+function GamesSection({ token }: { token: string }) {
+  const query = useQuery({
+    queryKey: ["content", "game", token],
+    queryFn: () => api.listContent({ token, kind: "game" }),
+  });
+  const all = query.data?.items ?? [];
+  const [platform, setPlatform] = useState<"android" | "ios">(() =>
+    detectDevicePlatform(),
+  );
+  const [partner, setPartner] = useState<string | null>(null);
+  const [openId, setOpenId] = useState<number | null>(null);
+
+  const partnerNames: string[] = [];
+  const partnerCounts = new Map<string, number>();
+  for (const g of all) {
+    const name = g.provider || g.title;
+    if (!partnerCounts.has(name)) partnerNames.push(name);
+    partnerCounts.set(name, (partnerCounts.get(name) ?? 0) + 1);
+  }
+
+  const forPlatform = all.filter(
+    (g) => g.platform === platform || g.platform === "both",
+  );
+  const visible = partner
+    ? forPlatform.filter((g) => (g.provider || g.title) === partner)
+    : forPlatform;
+  const rowA = visible.filter((_, i) => i % 2 === 0);
+  const rowB = visible.filter((_, i) => i % 2 === 1);
+  const openItem = all.find((g) => g.id === openId) ?? null;
+
+  const renderCard = (item: GameItem, key: string) => (
+    <GameCard key={key} item={item} onOpen={() => setOpenId(item.id)} />
+  );
+
+  return (
+    <div>
+      <h1 className="font-display text-2xl font-extrabold sm:text-3xl">Games</h1>
+      <p className="mt-1 text-sm text-[var(--dim)]">
+        Games matched to your account and your device, from every game
+        partner. Tap a game to see how its payout adds up.
+      </p>
+      <div className="mt-5">
+        <SectionStats token={token} kind="game" />
+      </div>
+      <div
+        className="mt-2 flex gap-2"
+        role="group"
+        aria-label="Choose your device platform"
+      >
+        {(["android", "ios"] as const).map((p) => (
+          <button
+            key={p}
+            type="button"
+            aria-pressed={platform === p}
+            onClick={() => setPlatform(p)}
+            className={`flex items-center gap-2 rounded-full px-4 py-2 text-sm font-bold ring-1 transition ${
+              platform === p
+                ? "bg-[var(--brand)] text-white ring-[var(--brand)]"
+                : "bg-[var(--surface)] text-[var(--text)] ring-[var(--border)] hover:ring-[var(--brand)]"
+            }`}
+          >
+            <PlatformIcon platform={p} className="h-[18px] w-[18px]" />
+            {p === "android" ? "Android" : "iOS"}
+          </button>
+        ))}
+      </div>
+
+      {query.isPending ? (
+        <p className="mt-8 text-sm text-[var(--dim)]">Loading games…</p>
+      ) : all.length === 0 ? (
+        <div className="mt-8 rounded-3xl border-2 border-dashed border-[var(--border)] bg-[var(--surface)] px-6 py-12 text-center">
+          <span className="text-[var(--brand)]">{Icons.game("h-10 w-10")}</span>
+          <p className="mx-auto mt-3 max-w-md text-sm leading-relaxed text-[var(--dim)]">
+            No games are live yet. Game partners are reviewing TapOne —
+            as soon as one approves us and its games are added, they
+            will appear here for your device.
           </p>
-        </>
+        </div>
       ) : (
-        <p className="border-t border-[var(--border)] px-4 py-6 text-sm text-[var(--dim)] sm:px-5">
-          This survey partner is not live yet — its surveys will open
-          here as soon as it is.
-        </p>
+        <>
+          {partner && (
+            <div className="mt-5 flex flex-wrap items-center gap-3">
+              <p className="text-sm font-semibold text-[var(--dim)]">
+                Showing games from{" "}
+                <span className="font-bold text-[var(--text)]">{partner}</span>
+              </p>
+              <button
+                type="button"
+                onClick={() => setPartner(null)}
+                className="rounded-full bg-[var(--surface)] px-4 py-2 text-sm font-bold ring-1 ring-[var(--border)] transition hover:ring-[var(--brand)]"
+              >
+                Show all games
+              </button>
+            </div>
+          )}
+          {visible.length > 0 ? (
+            <div className="mt-5 space-y-5">
+              <LoopRow items={rowA} renderCard={renderCard} label="Games row 1" />
+              {rowB.length > 0 && (
+                <LoopRow items={rowB} renderCard={renderCard} label="Games row 2" />
+              )}
+            </div>
+          ) : (
+            <div className="mt-6 rounded-3xl border-2 border-dashed border-[var(--border)] bg-[var(--surface)] px-6 py-10 text-center">
+              <p className="mx-auto max-w-md text-sm leading-relaxed text-[var(--dim)]">
+                No {platform === "ios" ? "iOS" : "Android"} games
+                {partner ? ` from ${partner}` : ""} right now — try the
+                other platform{partner ? " or show all games" : ""}.
+              </p>
+            </div>
+          )}
+
+          {partnerNames.length > 0 && (
+            <section aria-label="Gaming Partners" className="mt-10">
+              <h2 className="font-display text-xl font-extrabold">
+                Gaming Partners
+              </h2>
+              <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3 sm:gap-4 xl:grid-cols-4">
+                {partnerNames.map((name) => {
+                  const count = partnerCounts.get(name) ?? 0;
+                  const active = partner === name;
+                  return (
+                    <button
+                      key={name}
+                      type="button"
+                      aria-pressed={active}
+                      onClick={() => setPartner(active ? null : name)}
+                      className={`rounded-2xl bg-[var(--surface)] px-4 py-5 text-left ring-1 transition ${
+                        active
+                          ? "ring-2 ring-[var(--brand)]"
+                          : "ring-[var(--border)] hover:ring-[var(--brand)]"
+                      }`}
+                    >
+                      <span
+                        className="flex h-11 w-11 items-center justify-center rounded-2xl bg-[var(--surface-2)] font-display text-lg font-extrabold text-[var(--brand)]"
+                        aria-hidden="true"
+                      >
+                        {name.slice(0, 1).toUpperCase()}
+                      </span>
+                      <span className="mt-3 block truncate font-display text-sm font-bold text-[var(--text)] sm:text-base">
+                        {name}
+                      </span>
+                      <span className="mt-0.5 block text-xs font-semibold text-[var(--dim)]">
+                        {count} {count === 1 ? "game" : "games"}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </section>
+          )}
+        </>
       )}
-    </section>
+      {openItem && (
+        <GamePopup item={openItem} onClose={() => setOpenId(null)} />
+      )}
+    </div>
   );
 }
 
