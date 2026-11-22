@@ -20,7 +20,7 @@ import { Wordmark, goHome } from "./App";
 
 const FIELDS = actionFields<typeof Actions>();
 
-type AdminTab = "overview" | "users" | "stats" | "payouts" | "withdrawals" | "methods" | "content" | "inbox" | "notifications" | "countries" | "postbacks" | "callbacks" | "settings" | "deploy";
+type AdminTab = "overview" | "users" | "stats" | "payouts" | "withdrawals" | "methods" | "content" | "inbox" | "notifications" | "announcements" | "countries" | "postbacks" | "callbacks" | "settings" | "deploy";
 
 const ADMIN_TABS: { id: AdminTab; label: string }[] = [
   { id: "overview", label: "Overview" },
@@ -32,6 +32,7 @@ const ADMIN_TABS: { id: AdminTab; label: string }[] = [
   { id: "content", label: "Offerwalls / Surveys / Games" },
   { id: "inbox", label: "Inbox" },
   { id: "notifications", label: "Notifications" },
+  { id: "announcements", label: "Announcements" },
   { id: "countries", label: "Countries" },
   { id: "postbacks", label: "Postbacks" },
   { id: "callbacks", label: "Partner Callbacks" },
@@ -129,6 +130,7 @@ export function Admin() {
         {tab === "content" && <ContentTab token={token} />}
         {tab === "inbox" && <InboxTab token={token} />}
         {tab === "notifications" && <NotificationsTab token={token} />}
+        {tab === "announcements" && <AnnouncementsTab token={token} />}
         {tab === "countries" && <CountriesTab token={token} />}
         {tab === "postbacks" && <PostbacksTab token={token} />}
         {tab === "callbacks" && <PartnerCallbacksTab token={token} />}
@@ -2198,6 +2200,16 @@ function InboxTab({ token }: { token: string }) {
     onError: (e) => setError(e.message),
   });
 
+  const approve = useMutation({
+    mutationFn: async (messageId: number) =>
+      api.adminApproveHelpMessage({ adminToken: token, messageId }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["admin-thread", token, openUserId] });
+      void queryClient.invalidateQueries({ queryKey: ["admin-threads", token] });
+    },
+    onError: (e) => setError(e.message),
+  });
+
   if (openUserId != null) {
     const meta = threads.data?.threads.find((t) => t.userId === openUserId);
     return (
@@ -2222,6 +2234,36 @@ function InboxTab({ token }: { token: string }) {
                 >
                   {m.subject && <p className="text-sm font-bold">{m.subject}</p>}
                   <p className="whitespace-pre-wrap text-sm leading-relaxed">{m.body}</p>
+                  {m.imageUrl && (
+                    <a href={m.imageUrl} target="_blank" rel="noreferrer" className="mt-2 block">
+                      <img
+                        src={m.imageUrl}
+                        alt="Photo attached by the user"
+                        className="max-h-48 rounded-xl object-cover ring-1 ring-white/40"
+                      />
+                    </a>
+                  )}
+                  {m.sender === "user" && (
+                    <span className="mt-2 flex flex-wrap items-center gap-2">
+                      <span
+                        className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${
+                          m.status === "approved" ? "bg-green-600 text-white" : "bg-amber-500 text-white"
+                        }`}
+                      >
+                        {m.status === "approved" ? "Approved" : "Pending"}
+                      </span>
+                      {m.status === "pending" && (
+                        <button
+                          type="button"
+                          disabled={approve.isPending}
+                          onClick={() => approve.mutate(m.id)}
+                          className="rounded-full bg-green-600 px-3 py-1 text-[11px] font-bold text-white disabled:opacity-60"
+                        >
+                          {approve.isPending ? "Approving…" : "Approve"}
+                        </button>
+                      )}
+                    </span>
+                  )}
                   <p className={`mt-1.5 text-[11px] ${m.sender === "admin" ? "text-white/60" : "text-[var(--dim)]"}`}>
                     {m.sender === "admin" ? "You (admin)" : meta?.userName ?? "User"} · {fmtDateTime(m.createdAt)}
                   </p>
@@ -2283,6 +2325,9 @@ function InboxTab({ token }: { token: string }) {
                     {t.userName}
                     {t.unread > 0 && (
                       <span className="rounded-full bg-[var(--gold)] px-2 py-0.5 text-xs font-bold text-[var(--ink)]">{t.unread} new</span>
+                    )}
+                    {t.pending > 0 && (
+                      <span className="rounded-full bg-amber-500 px-2 py-0.5 text-xs font-bold text-white">{t.pending} pending</span>
                     )}
                   </span>
                   <span className="block truncate text-sm text-[var(--dim)]">{t.lastBody}</span>
@@ -2685,6 +2730,278 @@ function NotificationsTab({ token }: { token: string }) {
         <p className="mt-6 rounded-2xl border-2 border-dashed border-[var(--border)] bg-[var(--surface)] px-5 py-10 text-center text-sm text-[var(--dim)]">
           No registrations yet. As soon as someone creates an account, their details
           will appear here.
+        </p>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------- announcements
+//
+// Owner broadcasts to ALL users: post an announcement or an event and it
+// appears in every user's notification bell at once — no deploy, no
+// GitHub, no Muse needed. Edit or delete any post from here.
+
+type AnnouncementKind = "announcement" | "event";
+
+function AnnouncementsTab({ token }: { token: string }) {
+  const queryClient = useQueryClient();
+  const [kind, setKind] = useState<AnnouncementKind>("announcement");
+  const [title, setTitle] = useState("");
+  const [body, setBody] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [editKind, setEditKind] = useState<AnnouncementKind>("announcement");
+  const [editTitle, setEditTitle] = useState("");
+  const [editBody, setEditBody] = useState("");
+
+  const list = useQuery({
+    queryKey: ["admin-announcements", token],
+    queryFn: () => api.adminListAnnouncements({ adminToken: token }),
+  });
+  const invalidate = () => {
+    void queryClient.invalidateQueries({ queryKey: ["admin-announcements", token] });
+    void queryClient.invalidateQueries({ queryKey: ["announcements"] });
+  };
+
+  const create = useMutation({
+    mutationFn: async () =>
+      api.adminCreateAnnouncement({
+        adminToken: token,
+        kind,
+        title: title.trim(),
+        body: body.trim(),
+      }),
+    onSuccess: () => {
+      setTitle("");
+      setBody("");
+      invalidate();
+    },
+    onError: (e) => setError(e.message),
+  });
+
+  const update = useMutation({
+    mutationFn: async (id: number) =>
+      api.adminUpdateAnnouncement({
+        adminToken: token,
+        id,
+        kind: editKind,
+        title: editTitle.trim(),
+        body: editBody.trim(),
+      }),
+    onSuccess: () => {
+      setEditingId(null);
+      invalidate();
+    },
+    onError: (e) => setError(e.message),
+  });
+
+  const remove = useMutation({
+    mutationFn: async (id: number) => api.adminDeleteAnnouncement({ adminToken: token, id }),
+    onSuccess: () => invalidate(),
+    onError: (e) => setError(e.message),
+  });
+
+  return (
+    <div>
+      <h1 className="font-display text-2xl font-extrabold">Announcements &amp; Events</h1>
+      <p className="mt-1 text-sm text-[var(--dim)]">
+        Post once and every user sees it in their notification bell right away — no deploy
+        needed. Use “Event” for something coming up, “Announcement” for news.
+      </p>
+
+      <form
+        className="mt-5 rounded-3xl bg-[var(--surface)] p-5 ring-1 ring-[var(--border)]"
+        onSubmit={(e) => {
+          e.preventDefault();
+          setError(null);
+          if (!title.trim() || !body.trim()) {
+            setError("Write a title and a message first.");
+            return;
+          }
+          create.mutate();
+        }}
+      >
+        <p className="font-display text-base font-bold">📣 Post to all users</p>
+        <div className="mt-3 flex flex-wrap gap-2" role="group" aria-label="Type">
+          {(["announcement", "event"] as const).map((k) => (
+            <button
+              key={k}
+              type="button"
+              onClick={() => setKind(k)}
+              aria-pressed={kind === k}
+              className={`rounded-full px-4 py-2 text-sm font-bold ring-1 ${
+                kind === k
+                  ? "bg-[var(--brand)] text-white ring-[var(--brand)]"
+                  : "bg-[var(--surface-2)] text-[var(--dim)] ring-[var(--border)]"
+              }`}
+            >
+              {k === "event" ? "🎉 Event" : "📣 Announcement"}
+            </button>
+          ))}
+        </div>
+        <div className="mt-3">
+          <label htmlFor="ann-title" className="text-sm font-semibold">
+            Title
+          </label>
+          <input
+            id="ann-title"
+            {...FIELDS.adminCreateAnnouncement.title}
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            placeholder="e.g. Double rewards weekend"
+            className="mt-1 w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 outline-none focus:border-[var(--brand)]"
+          />
+        </div>
+        <div className="mt-3">
+          <label htmlFor="ann-body" className="text-sm font-semibold">
+            Message
+          </label>
+          <textarea
+            id="ann-body"
+            {...FIELDS.adminCreateAnnouncement.body}
+            value={body}
+            onChange={(e) => setBody(e.target.value)}
+            rows={3}
+            placeholder="What should every user know?"
+            className="mt-1 w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 outline-none focus:border-[var(--brand)]"
+          />
+        </div>
+        {error && (
+          <p role="alert" className="mt-3 text-sm font-medium text-red-600 dark:text-red-400">{error}</p>
+        )}
+        <button
+          type="submit"
+          disabled={create.isPending}
+          className="mt-4 flex items-center gap-2 rounded-full bg-[var(--brand)] px-6 py-3 font-display text-sm font-bold text-white transition hover:bg-[var(--brand-deep)] disabled:opacity-60"
+        >
+          {Icons.send("h-4 w-4")} {create.isPending ? "Posting…" : "Post to all users"}
+        </button>
+      </form>
+
+      {list.isPending ? (
+        <p className="mt-6 text-sm text-[var(--dim)]">Loading…</p>
+      ) : list.data && list.data.announcements.length > 0 ? (
+        <ul className="mt-6 space-y-3">
+          {list.data.announcements.map((a) => (
+            <li key={a.id} className="rounded-2xl bg-[var(--surface)] p-4 ring-1 ring-[var(--border)] sm:p-5">
+              {editingId === a.id ? (
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    setError(null);
+                    if (!editTitle.trim() || !editBody.trim()) {
+                      setError("Write a title and a message first.");
+                      return;
+                    }
+                    update.mutate(a.id);
+                  }}
+                >
+                  <div className="flex flex-wrap gap-2" role="group" aria-label="Type">
+                    {(["announcement", "event"] as const).map((k) => (
+                      <button
+                        key={k}
+                        type="button"
+                        onClick={() => setEditKind(k)}
+                        aria-pressed={editKind === k}
+                        className={`rounded-full px-4 py-2 text-sm font-bold ring-1 ${
+                          editKind === k
+                            ? "bg-[var(--brand)] text-white ring-[var(--brand)]"
+                            : "bg-[var(--surface-2)] text-[var(--dim)] ring-[var(--border)]"
+                        }`}
+                      >
+                        {k === "event" ? "🎉 Event" : "📣 Announcement"}
+                      </button>
+                    ))}
+                  </div>
+                  <input
+                    aria-label="Title"
+                    {...FIELDS.adminUpdateAnnouncement.title}
+                    value={editTitle}
+                    onChange={(e) => setEditTitle(e.target.value)}
+                    className="mt-3 w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 outline-none focus:border-[var(--brand)]"
+                  />
+                  <textarea
+                    aria-label="Message"
+                    {...FIELDS.adminUpdateAnnouncement.body}
+                    value={editBody}
+                    onChange={(e) => setEditBody(e.target.value)}
+                    rows={3}
+                    className="mt-2 w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 outline-none focus:border-[var(--brand)]"
+                  />
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <button
+                      type="submit"
+                      disabled={update.isPending}
+                      className="rounded-full bg-[var(--brand)] px-5 py-2 text-sm font-bold text-white disabled:opacity-60"
+                    >
+                      {update.isPending ? "Saving…" : "Save changes"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setEditingId(null)}
+                      className="rounded-full bg-[var(--surface-2)] px-5 py-2 text-sm font-bold"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </form>
+              ) : (
+                <>
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="flex flex-wrap items-center gap-2 font-display font-bold">
+                        <span
+                          className={`rounded-full px-2 py-0.5 text-[11px] font-bold uppercase tracking-wide ${
+                            a.kind === "event"
+                              ? "bg-[var(--gold)] text-[var(--ink)]"
+                              : "bg-[var(--surface-2)] text-[var(--dim)]"
+                          }`}
+                        >
+                          {a.kind === "event" ? "Event" : "Announcement"}
+                        </span>
+                        {a.title}
+                      </p>
+                      <p className="mt-1 whitespace-pre-wrap text-sm leading-relaxed text-[var(--dim)]">{a.body}</p>
+                      <p className="mt-1.5 text-xs text-[var(--dim)]">
+                        Posted {fmtDateTime(a.createdAt)}
+                        {a.updatedAt !== a.createdAt && ` · edited ${fmtDateTime(a.updatedAt)}`}
+                      </p>
+                    </div>
+                    <span className="flex shrink-0 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingId(a.id);
+                          setEditKind(a.kind);
+                          setEditTitle(a.title);
+                          setEditBody(a.body);
+                        }}
+                        className="rounded-full bg-[var(--surface-2)] px-4 py-2 text-sm font-bold"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        type="button"
+                        disabled={remove.isPending}
+                        onClick={() => {
+                          if (window.confirm("Delete this post for all users?")) remove.mutate(a.id);
+                        }}
+                        className="rounded-full bg-red-600 px-4 py-2 text-sm font-bold text-white disabled:opacity-60"
+                      >
+                        Delete
+                      </button>
+                    </span>
+                  </div>
+                </>
+              )}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="mt-6 rounded-2xl border-2 border-dashed border-[var(--border)] bg-[var(--surface)] px-5 py-10 text-center text-sm text-[var(--dim)]">
+          Nothing posted yet. Your first announcement or event will show in every user&apos;s
+          notification bell the moment you post it.
         </p>
       )}
     </div>
