@@ -216,6 +216,7 @@ export function Dashboard({
                 Balance {fmt(user.balanceCents)}
               </span>
             )}
+            {user && <NotificationBell token={token} />}
             {user && (
               <span className="relative">
                 <button
@@ -2861,6 +2862,122 @@ function ContactTab() {
   );
 }
 
+// ------------------------------------------------- notification bell
+//
+// Owner broadcasts (announcements + events) land here for every user:
+// the bell sits next to Balance, shows the unread count, and opens the
+// list. Opening an item (or "Mark all as read") marks it read and the
+// badge drops.
+
+function NotificationBell({ token }: { token: string }) {
+  const queryClient = useQueryClient();
+  const [open, setOpen] = useState(false);
+  const list = useQuery({
+    queryKey: ["announcements", token],
+    queryFn: () => api.getAnnouncements({ token }),
+  });
+  const unread = list.data?.unreadCount ?? 0;
+
+  const mark = useMutation({
+    mutationFn: async (announcementId?: number) =>
+      api.markAnnouncementsRead({ token, announcementId }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["announcements", token] });
+    },
+  });
+
+  return (
+    <span className="relative">
+      <button
+        type="button"
+        aria-label={`Notifications${unread > 0 ? `, ${unread} unread` : ""}`}
+        aria-haspopup="true"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+        className="relative flex h-10 w-10 items-center justify-center rounded-full bg-[var(--pill)] text-[var(--text)] ring-1 ring-[var(--border)]"
+      >
+        {Icons.bell("h-5 w-5")}
+        {unread > 0 && (
+          <span className="absolute -right-1 -top-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-red-600 px-1 text-[11px] font-bold text-white">
+            {unread > 99 ? "99+" : unread}
+          </span>
+        )}
+      </button>
+      {open && (
+        <>
+          <button
+            type="button"
+            aria-label="Close notifications"
+            className="fixed inset-0 z-10 cursor-default"
+            onClick={() => setOpen(false)}
+          />
+          <span className="absolute right-0 z-20 mt-2 block w-80 max-w-[85vw] overflow-hidden rounded-2xl bg-[var(--surface)] text-left shadow-xl ring-1 ring-[var(--border)]">
+            <span className="flex items-center justify-between border-b border-[var(--border)] px-4 py-3">
+              <span className="font-display text-sm font-bold">Notifications</span>
+              {unread > 0 && (
+                <button
+                  type="button"
+                  disabled={mark.isPending}
+                  onClick={() => mark.mutate(undefined)}
+                  className="text-xs font-bold text-[var(--brand-deep)] disabled:opacity-60"
+                >
+                  Mark all as read
+                </button>
+              )}
+            </span>
+            <span className="block max-h-96 overflow-y-auto">
+              {list.isPending ? (
+                <span className="block px-4 py-6 text-center text-sm text-[var(--dim)]">Loading…</span>
+              ) : list.data && list.data.announcements.length > 0 ? (
+                list.data.announcements.map((a) => (
+                  <button
+                    key={a.id}
+                    type="button"
+                    onClick={() => {
+                      if (!a.read) mark.mutate(a.id);
+                    }}
+                    className={`block w-full border-b border-[var(--border)] px-4 py-3 text-left last:border-b-0 ${
+                      a.read ? "" : "bg-[var(--pill)]"
+                    }`}
+                  >
+                    <span className="flex items-center gap-2">
+                      <span
+                        className={`rounded-full px-2 py-0.5 text-[11px] font-bold uppercase tracking-wide ${
+                          a.kind === "event"
+                            ? "bg-[var(--gold)] text-[var(--ink)]"
+                            : "bg-[var(--surface-2)] text-[var(--dim)]"
+                        }`}
+                      >
+                        {a.kind === "event" ? "Event" : "Announcement"}
+                      </span>
+                      {!a.read && (
+                        <span className="rounded-full bg-red-600 px-2 py-0.5 text-[11px] font-bold text-white">
+                          NEW
+                        </span>
+                      )}
+                      <span className="ml-auto shrink-0 text-[11px] text-[var(--dim)]">
+                        {fmtDate(a.createdAt)}
+                      </span>
+                    </span>
+                    <span className="mt-1 block text-sm font-bold">{a.title}</span>
+                    <span className="mt-0.5 block whitespace-pre-wrap text-sm leading-relaxed text-[var(--dim)]">
+                      {a.body}
+                    </span>
+                  </button>
+                ))
+              ) : (
+                <span className="block px-4 py-6 text-center text-sm text-[var(--dim)]">
+                  No announcements yet. New events and updates from TapOne will appear here.
+                </span>
+              )}
+            </span>
+          </span>
+        </>
+      )}
+    </span>
+  );
+}
+
 // ----------------------------------------------------------------- help tab
 
 function HelpTab({ token }: { token: string }) {
@@ -2873,12 +2990,49 @@ function HelpTab({ token }: { token: string }) {
   const [body, setBody] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
   const [sent, setSent] = useState(false);
+  const [imageFile, setImageFile] = useState<File | null>(null);
+  const [imagePreview, setImagePreview] = useState<string | null>(null);
+  const [imageData, setImageData] = useState<{
+    dataBase64: string;
+    mimeType: string;
+  } | null>(null);
+
+  const pickImage = async (file: File | undefined) => {
+    setFormError(null);
+    if (!file) return;
+    if (!["image/png", "image/jpeg", "image/webp"].includes(file.type)) {
+      setFormError("Please choose a PNG, JPG or WebP image.");
+      return;
+    }
+    if (file.size > 2_200_000) {
+      setFormError("That image is too large — please pick one under 2 MB.");
+      return;
+    }
+    const { dataBase64, mimeType } = await fileToBase64(file);
+    setImageFile(file);
+    setImagePreview(URL.createObjectURL(file));
+    setImageData({ dataBase64, mimeType });
+  };
 
   const send = useMutation({
-    mutationFn: async () => api.sendHelpMessage({ token, subject: subject.trim(), body: body.trim() }),
+    mutationFn: async () =>
+      api.sendHelpMessage({
+        token,
+        subject: subject.trim(),
+        body: body.trim(),
+        ...(imageData
+          ? {
+              imageDataBase64: imageData.dataBase64,
+              imageMimeType: imageData.mimeType,
+            }
+          : {}),
+      }),
     onSuccess: () => {
       setSubject("");
       setBody("");
+      setImageFile(null);
+      setImagePreview(null);
+      setImageData(null);
       setSent(true);
       void queryClient.invalidateQueries({ queryKey: ["mailbox", token] });
       void queryClient.invalidateQueries({ queryKey: ["me", token] });
@@ -2909,6 +3063,26 @@ function HelpTab({ token }: { token: string }) {
               >
                 {m.subject && <p className="text-sm font-bold">{m.subject}</p>}
                 <p className="whitespace-pre-wrap text-sm leading-relaxed">{m.body}</p>
+                {m.imageUrl && (
+                  <a href={m.imageUrl} target="_blank" rel="noreferrer" className="mt-2 block">
+                    <img
+                      src={m.imageUrl}
+                      alt="Photo attached to this message"
+                      className="max-h-40 rounded-xl object-cover ring-1 ring-white/40"
+                    />
+                  </a>
+                )}
+                {m.sender === "user" && (
+                  <p className="mt-2">
+                    <span
+                      className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${
+                        m.status === "approved" ? "bg-green-600 text-white" : "bg-amber-500 text-white"
+                      }`}
+                    >
+                      {m.status === "approved" ? "Approved" : "Pending"}
+                    </span>
+                  </p>
+                )}
                 <p className={`mt-1.5 text-[11px] ${m.sender === "user" ? "text-white/70" : "text-[var(--dim)]"}`}>
                   {m.sender === "user" ? "You" : "TapOne team"} · {fmtDateTime(m.createdAt)}
                 </p>
@@ -2962,6 +3136,44 @@ function HelpTab({ token }: { token: string }) {
             placeholder="How can we help?"
             className="mt-1 w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 outline-none focus:border-[var(--brand)]"
           />
+        </div>
+        <div className="mt-3">
+          <label htmlFor="help-image" className="text-sm font-semibold">
+            Photo <span className="font-normal text-[var(--dim)]">(optional — a screenshot of the problem)</span>
+          </label>
+          <input
+            id="help-image"
+            type="file"
+            accept="image/png,image/jpeg,image/webp"
+            onChange={(e) => {
+              void pickImage(e.target.files?.[0]);
+              e.target.value = "";
+            }}
+            className="mt-1 block w-full text-sm text-[var(--dim)] file:mr-3 file:rounded-full file:border-0 file:bg-[var(--surface-2)] file:px-4 file:py-2 file:text-sm file:font-bold file:text-[var(--text)]"
+          />
+          {imagePreview && (
+            <div className="mt-2 flex items-start gap-3">
+              <img
+                src={imagePreview}
+                alt="Photo you attached"
+                className="h-20 w-20 rounded-xl object-cover ring-1 ring-[var(--border)]"
+              />
+              <div>
+                <p className="break-all text-sm font-semibold">{imageFile?.name}</p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setImageFile(null);
+                    setImagePreview(null);
+                    setImageData(null);
+                  }}
+                  className="mt-1 text-sm font-bold text-red-600 dark:text-red-400"
+                >
+                  Remove photo
+                </button>
+              </div>
+            </div>
+          )}
         </div>
         {formError && (
           <p role="alert" className="mt-3 text-sm font-medium text-red-600 dark:text-red-400">
