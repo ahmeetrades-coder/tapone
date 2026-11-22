@@ -200,6 +200,116 @@ async function requireAdmin(ctx: Ctx, token: string): Promise<void> {
     throw new Error("Admin session expired. Sign in again.");
 }
 
+// ------------------------------------------------------- outbound help email
+//
+// Every new Help appeal is also emailed to the business inbox
+// (info@tapone.store). There is no SMTP server in this stack, so mail is
+// sent with the Resend HTTP API (plain fetch — no new dependency).
+// BLOCKED ON KEY: this only runs when RESEND_API_KEY is set in the
+// server environment (FadeHost → environment variables). Without the key
+// the appeal is still saved and still shows in the admin Inbox — the
+// email step is skipped and a warning is logged, never a user-facing
+// failure. The owner creates the key at resend.com (free tier) and sets
+// RESEND_API_KEY; HELP_EMAIL overrides the destination if ever needed.
+const HELP_EMAIL_TO =
+  process.env.HELP_EMAIL?.trim() || "info@tapone.store";
+
+async function notifyHelpByEmail(args: {
+  userName: string;
+  userEmail: string;
+  subject: string;
+  body: string;
+  imageUrl: string | null;
+  messageId: number;
+}): Promise<void> {
+  const apiKey = process.env.RESEND_API_KEY?.trim();
+  if (!apiKey) {
+    console.warn(
+      "[tapone] RESEND_API_KEY is not set — help appeal #" +
+        args.messageId +
+        " was saved but NOT emailed to " +
+        HELP_EMAIL_TO +
+        ". Set RESEND_API_KEY in the server environment to enable it.",
+    );
+    return;
+  }
+  const esc = (s: string) =>
+    s
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  const subjectLine =
+    "New Help appeal" +
+    (args.subject ? ": " + args.subject : "") +
+    " — " +
+    args.userName;
+  const text =
+    "A user sent a new Help appeal on TapOne.\n\n" +
+    "User: " +
+    args.userName +
+    " <" +
+    args.userEmail +
+    ">\n" +
+    "Subject: " +
+    (args.subject || "(none)") +
+    "\n\n" +
+    args.body +
+    "\n\n" +
+    (args.imageUrl
+      ? "Attached image: " + args.imageUrl + "\n\n"
+      : "") +
+    "Status: Pending — approve it in Admin → Inbox after solving it.";
+  try {
+    const res = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer " + apiKey,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        from: "TapOne <noreply@tapone.store>",
+        to: [HELP_EMAIL_TO],
+        subject: subjectLine,
+        text,
+        html:
+          "<p>A user sent a new Help appeal on TapOne.</p>" +
+          "<p><strong>User:</strong> " +
+          esc(args.userName) +
+          " &lt;" +
+          esc(args.userEmail) +
+          "&gt;</p>" +
+          "<p><strong>Subject:</strong> " +
+          esc(args.subject || "(none)") +
+          "</p>" +
+          "<p>" +
+          esc(args.body).replace(/\n/g, "<br>") +
+          "</p>" +
+          (args.imageUrl
+            ? '<p><strong>Attached image:</strong> <a href="' +
+              esc(args.imageUrl) +
+              '">view image</a></p>'
+            : "") +
+          "<p><strong>Status:</strong> Pending — approve it in Admin → Inbox after solving it.</p>",
+      }),
+    });
+    if (!res.ok) {
+      console.warn(
+        "[tapone] Help email to " +
+          HELP_EMAIL_TO +
+          " failed (" +
+          res.status +
+          "): " +
+          (await res.text()).slice(0, 300),
+      );
+    }
+  } catch (e) {
+    console.warn(
+      "[tapone] Help email to " + HELP_EMAIL_TO + " failed: " + String(e),
+    );
+  }
+}
+
 // ------------------------------------------------------- network detection
 
 const VPN_KEYWORDS = [
@@ -3234,23 +3344,58 @@ export const Actions = {
   }),
 
   sendHelpMessage: defineAction({
-    description: "Sends a help message from the signed-in user to the admin inbox.",
+    description:
+      "Sends a help message from the signed-in user to the admin inbox. Optional screenshot/photo (PNG/JPG/WebP, under 2 MB) is stored as a site blob. The appeal starts as Pending until the admin approves it, and a copy is emailed to the business inbox (info@tapone.store) when RESEND_API_KEY is set.",
     request: z.object({
       token: z.string().min(1).max(200),
       subject: z.string().trim().max(120).default(""),
       body: z.string().trim().min(1).max(2000),
+      imageDataBase64: z.string().min(1).max(3_000_000).optional(),
+      imageMimeType: z.string().min(1).max(60).optional(),
     }),
     response: z.object({ ok: z.literal(true) }),
     async handler(ctx, args): Promise<{ ok: true }> {
       const db = ctx.db<typeof schema>();
       const user = await requireUser(ctx, args.token);
-      await db.insert(schema.messages).values({
-        userId: user.id,
-        sender: "user",
+      let imageUrl: string | null = null;
+      if (args.imageDataBase64) {
+        if (!args.imageMimeType)
+          throw new Error("Please attach the image again.");
+        if (
+          !["image/png", "image/jpeg", "image/webp"].includes(
+            args.imageMimeType,
+          )
+        )
+          throw new Error("Please choose a PNG, JPG or WebP image.");
+        const bytes = Buffer.from(args.imageDataBase64, "base64");
+        if (bytes.length === 0 || bytes.length > 2_200_000)
+          throw new Error("That image is too large — please pick one under 2 MB.");
+        const key = `help/user-${user.id}-${Date.now()}`;
+        await ctx.blobs.put(key, bytes, { contentType: args.imageMimeType });
+        imageUrl = await ctx.blobs.getUrl(key);
+      }
+      const inserted = await db
+        .insert(schema.messages)
+        .values({
+          userId: user.id,
+          sender: "user",
+          subject: args.subject,
+          body: args.body,
+          imageUrl,
+          status: "pending",
+          readByAdmin: 0,
+          readByUser: 1,
+        })
+        .returning({ id: schema.messages.id });
+      // Email copy to the business inbox — best effort: a mail failure
+      // must never lose the appeal itself.
+      await notifyHelpByEmail({
+        userName: user.name,
+        userEmail: user.email,
         subject: args.subject,
         body: args.body,
-        readByAdmin: 0,
-        readByUser: 1,
+        imageUrl,
+        messageId: inserted[0]?.id ?? 0,
       });
       ctx.invalidateQueries();
       return { ok: true };
@@ -3267,6 +3412,8 @@ export const Actions = {
           sender: z.enum(["user", "admin"]),
           subject: z.string(),
           body: z.string(),
+          imageUrl: z.string().nullable(),
+          status: z.string(),
           createdAt: z.string(),
         }),
       ),
@@ -3295,6 +3442,8 @@ export const Actions = {
           sender: m.sender,
           subject: m.subject,
           body: m.body,
+          imageUrl: m.imageUrl,
+          status: m.status,
           createdAt: m.createdAt.toISOString(),
         })),
       };
@@ -5214,7 +5363,7 @@ export const Actions = {
   }),
 
   adminListThreads: defineAction({
-    description: "Admin inbox: every user help thread with unread counts and the latest message.",
+    description: "Admin inbox: every user help thread with unread counts, pending-appeal counts and the latest message.",
     request: z.object({ adminToken: z.string().min(1).max(200) }),
     response: z.object({
       threads: z.array(
@@ -5224,6 +5373,7 @@ export const Actions = {
           userCode: z.string(),
           userEmail: z.string(),
           unread: z.number(),
+          pending: z.number(),
           lastBody: z.string(),
           lastAt: z.string(),
         }),
@@ -5241,10 +5391,13 @@ export const Actions = {
       const byId = new Map(users.map((u) => [u.id, u]));
       const seen = new Map<number, (typeof msgs)[number]>();
       const unread = new Map<number, number>();
+      const pending = new Map<number, number>();
       for (const m of msgs) {
         if (!seen.has(m.userId)) seen.set(m.userId, m);
         if (m.sender === "user" && m.readByAdmin === 0)
           unread.set(m.userId, (unread.get(m.userId) ?? 0) + 1);
+        if (m.sender === "user" && m.status === "pending")
+          pending.set(m.userId, (pending.get(m.userId) ?? 0) + 1);
       }
       return {
         threads: [...seen.entries()].map(([userId, m]) => ({
@@ -5253,6 +5406,7 @@ export const Actions = {
           userCode: byId.get(userId)?.userCode ?? "",
           userEmail: byId.get(userId)?.email ?? "",
           unread: unread.get(userId) ?? 0,
+          pending: pending.get(userId) ?? 0,
           lastBody: m.body.slice(0, 140),
           lastAt: m.createdAt.toISOString(),
         })),
@@ -5273,6 +5427,8 @@ export const Actions = {
           sender: z.enum(["user", "admin"]),
           subject: z.string(),
           body: z.string(),
+          imageUrl: z.string().nullable(),
+          status: z.string(),
           createdAt: z.string(),
         }),
       ),
@@ -5301,6 +5457,8 @@ export const Actions = {
           sender: m.sender,
           subject: m.subject,
           body: m.body,
+          imageUrl: m.imageUrl,
+          status: m.status,
           createdAt: m.createdAt.toISOString(),
         })),
       };
@@ -5323,9 +5481,40 @@ export const Actions = {
         sender: "admin",
         subject: "",
         body: args.body,
+        imageUrl: null,
+        status: "approved",
         readByAdmin: 1,
         readByUser: 0,
       });
+      ctx.invalidateQueries();
+      return { ok: true };
+    },
+  }),
+
+  adminApproveHelpMessage: defineAction({
+    description:
+      "Approves one user help appeal after the admin has read and solved it; the user then sees Approved instead of Pending in their Mailbox.",
+    request: z.object({
+      adminToken: z.string().min(1).max(200),
+      messageId: z.number().int().positive(),
+    }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args): Promise<{ ok: true }> {
+      await requireAdmin(ctx, args.adminToken);
+      const db = ctx.db<typeof schema>();
+      const rows = await db
+        .select()
+        .from(schema.messages)
+        .where(eq(schema.messages.id, args.messageId))
+        .limit(1);
+      const msg = rows[0];
+      if (!msg) throw new Error("That message no longer exists.");
+      if (msg.sender !== "user")
+        throw new Error("Only a user's own appeal can be approved.");
+      await db
+        .update(schema.messages)
+        .set({ status: "approved", readByAdmin: 1 })
+        .where(eq(schema.messages.id, args.messageId));
       ctx.invalidateQueries();
       return { ok: true };
     },
@@ -5880,6 +6069,193 @@ export const Actions = {
       } else {
         await db.update(schema.adminNotifications).set({ read: 1 });
       }
+      ctx.invalidateQueries();
+      return { ok: true };
+    },
+  }),
+
+  // ------------------------------------------------- announcements (broadcast)
+  //
+  // Owner broadcasts: one row reaches EVERY user in the notification
+  // bell — no code change or redeploy to post one. kind is
+  // "announcement" (news) or "event" (an upcoming event). Read state is
+  // per user (announcement_reads), so the bell badge counts only what
+  // this user has not seen yet.
+
+  getAnnouncements: defineAction({
+    description:
+      "All owner announcements/events for the signed-in user, newest first, with per-user read state and the unread count for the bell badge.",
+    request: z.object({ token: z.string().min(1).max(200) }),
+    response: z.object({
+      announcements: z.array(
+        z.object({
+          id: z.number(),
+          kind: z.enum(["announcement", "event"]),
+          title: z.string(),
+          body: z.string(),
+          createdAt: z.string(),
+          read: z.boolean(),
+        }),
+      ),
+      unreadCount: z.number(),
+    }),
+    async handler(ctx, args) {
+      const db = ctx.db<typeof schema>();
+      const user = await requireUser(ctx, args.token);
+      const rows = await db
+        .select()
+        .from(schema.announcements)
+        .orderBy(desc(schema.announcements.id))
+        .limit(100);
+      const reads = await db
+        .select()
+        .from(schema.announcementReads)
+        .where(eq(schema.announcementReads.userId, user.id));
+      const readIds = new Set(reads.map((r) => r.announcementId));
+      return {
+        announcements: rows.map((a) => ({
+          id: a.id,
+          kind: a.kind,
+          title: a.title,
+          body: a.body,
+          createdAt: a.createdAt.toISOString(),
+          read: readIds.has(a.id),
+        })),
+        unreadCount: rows.filter((a) => !readIds.has(a.id)).length,
+      };
+    },
+  }),
+
+  markAnnouncementsRead: defineAction({
+    description:
+      "Marks announcements as read for the signed-in user — one announcement, or all when no id is given; the bell badge drops accordingly.",
+    request: z.object({
+      token: z.string().min(1).max(200),
+      announcementId: z.number().int().positive().optional(),
+    }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args): Promise<{ ok: true }> {
+      const db = ctx.db<typeof schema>();
+      const user = await requireUser(ctx, args.token);
+      const targets = args.announcementId
+        ? [args.announcementId]
+        : (
+            await db
+              .select({ id: schema.announcements.id })
+              .from(schema.announcements)
+          ).map((a) => a.id);
+      for (const id of targets) {
+        await db
+          .insert(schema.announcementReads)
+          .values({ userId: user.id, announcementId: id })
+          .onConflictDoNothing();
+      }
+      ctx.invalidateQueries();
+      return { ok: true };
+    },
+  }),
+
+  adminListAnnouncements: defineAction({
+    description: "Admin: every broadcast announcement/event, newest first.",
+    request: z.object({ adminToken: z.string().min(1).max(200) }),
+    response: z.object({
+      announcements: z.array(
+        z.object({
+          id: z.number(),
+          kind: z.enum(["announcement", "event"]),
+          title: z.string(),
+          body: z.string(),
+          createdAt: z.string(),
+          updatedAt: z.string(),
+        }),
+      ),
+    }),
+    async handler(ctx, args) {
+      await requireAdmin(ctx, args.adminToken);
+      const db = ctx.db<typeof schema>();
+      const rows = await db
+        .select()
+        .from(schema.announcements)
+        .orderBy(desc(schema.announcements.id))
+        .limit(200);
+      return {
+        announcements: rows.map((a) => ({
+          id: a.id,
+          kind: a.kind,
+          title: a.title,
+          body: a.body,
+          createdAt: a.createdAt.toISOString(),
+          updatedAt: a.updatedAt.toISOString(),
+        })),
+      };
+    },
+  }),
+
+  adminCreateAnnouncement: defineAction({
+    description:
+      "Admin: posts a broadcast announcement/event — it appears in every user's notification bell immediately, no deploy needed.",
+    request: z.object({
+      adminToken: z.string().min(1).max(200),
+      kind: z.enum(["announcement", "event"]),
+      title: z.string().trim().min(1).max(120),
+      body: z.string().trim().min(1).max(2000),
+    }),
+    response: z.object({ ok: z.literal(true), id: z.number() }),
+    async handler(ctx, args) {
+      await requireAdmin(ctx, args.adminToken);
+      const db = ctx.db<typeof schema>();
+      const inserted = await db
+        .insert(schema.announcements)
+        .values({ kind: args.kind, title: args.title, body: args.body })
+        .returning({ id: schema.announcements.id });
+      ctx.invalidateQueries();
+      return { ok: true as const, id: inserted[0]?.id ?? 0 };
+    },
+  }),
+
+  adminUpdateAnnouncement: defineAction({
+    description: "Admin: edits a broadcast announcement/event; every user sees the new text at once.",
+    request: z.object({
+      adminToken: z.string().min(1).max(200),
+      id: z.number().int().positive(),
+      kind: z.enum(["announcement", "event"]),
+      title: z.string().trim().min(1).max(120),
+      body: z.string().trim().min(1).max(2000),
+    }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args): Promise<{ ok: true }> {
+      await requireAdmin(ctx, args.adminToken);
+      const db = ctx.db<typeof schema>();
+      await db
+        .update(schema.announcements)
+        .set({
+          kind: args.kind,
+          title: args.title,
+          body: args.body,
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.announcements.id, args.id));
+      ctx.invalidateQueries();
+      return { ok: true };
+    },
+  }),
+
+  adminDeleteAnnouncement: defineAction({
+    description: "Admin: deletes a broadcast announcement/event; it disappears from every user's bell.",
+    request: z.object({
+      adminToken: z.string().min(1).max(200),
+      id: z.number().int().positive(),
+    }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args): Promise<{ ok: true }> {
+      await requireAdmin(ctx, args.adminToken);
+      const db = ctx.db<typeof schema>();
+      await db
+        .delete(schema.announcementReads)
+        .where(eq(schema.announcementReads.announcementId, args.id));
+      await db
+        .delete(schema.announcements)
+        .where(eq(schema.announcements.id, args.id));
       ctx.invalidateQueries();
       return { ok: true };
     },
