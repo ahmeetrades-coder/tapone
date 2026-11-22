@@ -171,9 +171,46 @@ export const messages = sqliteTable("messages", {
   sender: text("sender", { enum: ["user", "admin"] }).notNull(),
   subject: text("subject").notNull().default(""),
   body: text("body").notNull(),
+  // Optional screenshot / photo the user attached to a help appeal
+  // (blob URL, same storage as profile pictures).
+  imageUrl: text("image_url"),
+  // Help-appeal status: "pending" until the admin approves the appeal
+  // in the Inbox; admin replies are stored as "approved".
+  status: text("status").notNull().default("pending"),
   readByAdmin: integer("read_by_admin").notNull().default(0),
   readByUser: integer("read_by_user").notNull().default(0),
   createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+// announcements — owner broadcasts: every row is shown to ALL users in
+// the notification bell. kind is "announcement" (news, e.g. "withdraw
+// will be late") or "event" (an upcoming event). The admin creates,
+// edits and deletes them from Admin → Announcements; posting one needs
+// no code change or redeploy — it reaches every user immediately.
+export const announcements = sqliteTable("announcements", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  kind: text("kind", { enum: ["announcement", "event"] })
+    .notNull()
+    .default("announcement"),
+  title: text("title").notNull(),
+  body: text("body").notNull(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+// announcementReads — per-user read state for announcements; a row means
+// this user has seen that announcement (the bell badge counts the rest).
+export const announcementReads = sqliteTable("announcement_reads", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id").notNull(),
+  announcementId: integer("announcement_id").notNull(),
+  readAt: integer("read_at", { mode: "timestamp_ms" })
     .notNull()
     .$defaultFn(() => new Date()),
 });
