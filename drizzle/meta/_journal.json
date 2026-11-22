@@ -141,6 +141,13 @@
       "when": 1795272613705,
       "tag": "0020_partner_callback_sig_format_and_divisor",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "6",
+      "when": 1795338600000,
+      "tag": "0021_help_images_and_announcements",
+      "breakpoints": true
     }
   ]
 }
