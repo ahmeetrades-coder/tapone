@@ -3514,6 +3514,10 @@ export const Actions = {
       const txId = (params[config.txnParam] ?? "").trim();
       const payoutRaw = (params[config.payoutParam] ?? "").trim();   
       const status = (params["status"] ?? "").trim();
+      // Moonetix signs the reward (after its user split), not the
+      // gross payout in "amount" — read it verbatim, never reformat.
+      // Missing reward => "" => the HMAC below cannot match, so the callback is rejected with "Invalid callback signature."
+      const rewardRaw = (params["reward"] ?? "").trim();
       if (!userId || !txId || !payoutRaw)
         throw new Error(
           `Missing callback parameters: this partner must send ${config.userParam}, ${config.txnParam} and ${config.payoutParam}.`,
@@ -3539,8 +3543,11 @@ export const Actions = {
           // "{user}:{txn}:{payout}" — the three values joined with
           // colons, in that order. Every other HMAC partner signs the
           // sorted name=value&name=value pairs.
+          // "moonetix" (Moonetix) signs "{txn}:{user}:{reward}:{status}"
+          // — the reward is the amount after Moonetix's user split;
+          // the credit itself still uses the gross payout in "amount".
           const expected =
-            config.sigFormat === "moonetix"               ? await partnerHmacHexRaw(                   config.secret,                   `${txId}:${userId}:${payoutRaw}:${status}`,                   hash,                 )               : config.sigFormat === "colon"
+            config.sigFormat === "moonetix"               ? await partnerHmacHexRaw(                   config.secret,                   `${txId}:${userId}:${rewardRaw}:${status}`,                   hash,                 )               : config.sigFormat === "colon"
               ? await partnerHmacHexRaw(
                   config.secret,
                   `${userId}:${txId}:${payoutRaw}`,
@@ -4709,7 +4716,7 @@ export const Actions = {
       // units per $1). Applied after the cents conversion.
       payoutDivisor: z.number().positive().max(1000000).default(1),
       // Which string an HMAC partner signs: the sorted name=value pairs
-      // ("params") or "{user}:{txn}:{payout}" ("colon", Offerwall.GG), or "{txn}:{user}:{payout}:{status}" ("moonetix", Moonetix).
+      // ("params") or "{user}:{txn}:{payout}" ("colon", Offerwall.GG), or "{txn}:{user}:{reward}:{status}" ("moonetix", Moonetix).
       // Only used for HMAC auth methods.
       sigFormat: z.enum(["params", "colon", "moonetix"]).default("params"),
       authMethod: z
