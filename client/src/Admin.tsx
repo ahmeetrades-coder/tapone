@@ -2836,7 +2836,7 @@ const AUTH_METHOD_LABELS: Record<PartnerCallbackRow["authMethod"], string> = {
 
 const SIG_FORMAT_LABELS: Record<PartnerCallbackRow["sigFormat"], string> = {
   params: "sorted name=value pairs",
-  colon: "user:transaction:amount",
+  colon: "user:transaction:amount",   moonetix: "tx:user:amount:status",
 };
 
 /**
@@ -2850,7 +2850,7 @@ function partnerCallbackUrl(origin: string, p: {
   userParam: string;
   txnParam: string;
   payoutParam: string;
-  authMethod: PartnerCallbackRow["authMethod"];
+  authMethod: PartnerCallbackRow["authMethod"];   sigFormat: PartnerCallbackRow["sigFormat"];
   secretParam: string;
 }): string {
   let url = `${origin}/partner-callback/${p.key}?${p.userParam}={user_id}&${p.txnParam}={transaction_id}&${p.payoutParam}={payout}`;
@@ -2858,7 +2858,7 @@ function partnerCallbackUrl(origin: string, p: {
     url += `&${p.secretParam}={secret}`;
   else if (p.authMethod !== "none" && p.secretParam)
     url += `&${p.secretParam}={signature}`;
-  return url;
+  if (p.sigFormat === "moonetix") url += "&status={status}"; return url;
 }
 
 // -------------------------------------------------------------- postbacks
@@ -3099,7 +3099,7 @@ function PartnerCallbacksTab({ token }: { token: string }) {
         the signature is the lowercase hex HMAC of every other parameter sorted by
         name and joined as <code className="font-semibold text-[var(--text)]">name=value&amp;name=value</code> —
         unless the partner signs the <em>user:transaction:amount</em> format instead
-        (Offerwall.GG does), in which case pick that format when you add it.
+        (Offerwall.GG does), in which case pick that format when you add it. Moonetix signs transaction, user, amount and status joined with colons, and a status 2 reversal never credits.
       </p>
 
       {error && (
@@ -3234,9 +3234,9 @@ function PartnerCallbacksTab({ token }: { token: string }) {
                       className={fieldCls}
                     >
                       <option value="params">Parameters — HMAC of sorted name=value&amp;name=value pairs</option>
-                      <option value="colon">User:transaction:amount — HMAC of &quot;{"{user}"}:{"{txn}"}:{"{payout}"}&quot; (Offerwall.GG)</option>
+                      <option value="colon">User:transaction:amount — HMAC of &quot;{"{user}"}:{"{txn}"}:{"{payout}"}&quot; (Offerwall.GG)</option> <option value="moonetix">Transaction:user:amount:status — HMAC of &quot;{"{txn}"}:{"{user}"}:{"{payout}"}:{"{status}"}&quot; (Moonetix)</option>
                     </select>
-                    <p className="mt-1 text-xs text-[var(--dim)]">Pick the one the partner&apos;s docs describe — Offerwall.GG signs the three values joined with colons.</p>
+                    <p className="mt-1 text-xs text-[var(--dim)]">Pick the one the partner&apos;s docs describe — Offerwall.GG signs the three values joined with colons. Moonetix signs transaction, user, amount and status joined with colons, and a status 2 reversal never credits.</p>
                   </div>
                 )}
                 <div>
