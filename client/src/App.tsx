@@ -34,15 +34,15 @@ export type StaticPage = "about" | "privacy" | "terms" | "contact" | "faq" | "co
 export function SignInCard({
   googleClientId,
   onSignedIn,
-  compact,
+  compact, onOpenLegal,
 }: {
   googleClientId: string;
   onSignedIn: (token: string) => void;
-  compact?: boolean;
+  compact?: boolean; onOpenLegal?: (page: "terms" | "privacy") => void;
 }) {
   const [network, setNetwork] = useState<NetworkInfo | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
-  const [blockedMsg, setBlockedMsg] = useState<string | null>(null);
+  const [blockedMsg, setBlockedMsg] = useState<string | null>(null); const [consented, setConsented] = useState(false); const [consentError, setConsentError] = useState<string | null>(null); const consentedRef = useRef(false);
   const gisRef = useRef<HTMLDivElement>(null);
   // The Google button's load state is always visible: "loading" shows a
   // note, "failed" shows the setup help panel — never a silent empty box.
@@ -114,7 +114,7 @@ export function SignInCard({
         return;
       }
       const rendered = renderGoogleButton(gisRef.current, googleClientId, (idToken) =>
-        signIn.mutate({ idToken }),
+        !consentedRef.current ? setConsentError("Please tick the box above to agree to the Terms of Service and Privacy Policy before signing in with Google.") : signIn.mutate({ idToken }),
       );
       if (!rendered) {
         setGisState("failed");
@@ -225,7 +225,7 @@ export function SignInCard({
           </p>
         </>
       )}
-      <div className="mt-4 flex min-h-[44px] justify-center" ref={gisRef} aria-label="Continue with Google" />
+      <label className="mt-4 flex cursor-pointer items-start gap-2.5 text-left text-sm leading-relaxed text-[var(--text)]"><input type="checkbox" checked={consented} onChange={(e) => { setConsented(e.target.checked); consentedRef.current = e.target.checked; if (e.target.checked) setConsentError(null); }} className="mt-0.5 h-5 w-5 shrink-0 accent-[var(--brand)]" /><span>I agree to the{" "}<button type="button" onClick={() => onOpenLegal?.("terms")} className="font-semibold text-[var(--brand-deep)] underline">Terms of Service</button>{" "}and{" "}<button type="button" onClick={() => onOpenLegal?.("privacy")} className="font-semibold text-[var(--brand-deep)] underline">Privacy Policy</button>.</span></label>{consentError && (<p role="alert" className="mt-2 text-center text-sm font-medium text-red-600 dark:text-red-400">{consentError}</p>)}<div className="relative mt-4"><div className="flex min-h-[44px] justify-center" ref={gisRef} aria-label="Continue with Google" />{!consented && (<button type="button" aria-label="Tick the box above to continue with Google" title="Tick the box above to agree to the Terms of Service and Privacy Policy" onClick={() => setConsentError("Please tick the box above to agree to the Terms of Service and Privacy Policy before signing in with Google.")} className="absolute inset-0 cursor-not-allowed rounded-xl bg-[var(--surface)]/60" />)}</div>
       {formError && (
         <p role="alert" className="mt-3 text-center text-sm font-medium text-red-600 dark:text-red-400">
           {formError}
@@ -494,7 +494,7 @@ export function ContentCard({ item, big }: { item: ContentItem; big?: boolean })
 
 // ------------------------------------------------------------ static text
 
-const STATIC_PAGES: Record<StaticPage, { title: string; body: string[] }> = {
+type StaticPageContent = { title: string; body: string[]; sections?: { heading: string; body: string[] }[]; }; const STATIC_PAGES: Record<StaticPage, StaticPageContent> = {
   about: {
     title: "About Us",
     body: [
@@ -506,19 +506,19 @@ const STATIC_PAGES: Record<StaticPage, { title: string; body: string[] }> = {
   privacy: {
     title: "Privacy Policy",
     body: [
-      "When you sign in with Google we store your name, email address and profile picture so we can run your account.",
-      "We record the IP address of your sign-in connection. It decides which offers and payment methods you see, and it cannot be changed manually. Connections through a VPN or proxy are not allowed.",
-      "We keep a record of your earnings, withdrawals and the messages you send us through Help, so payments can be reviewed and paid correctly.",
-      "We do not sell your personal information. Partner offerwalls receive only your TapOne user ID so completed offers can be credited to your account.",
+      "Last updated: 23 November 2026. TapOne launched on 19 November 2026. If you have any question about this policy, contact us at info@tapone.store or through Help inside your account.", ], sections: [ { heading: "1. What we collect", body: [ "When you sign in with Google we store your name, email address and profile picture so we can run your account. We also give you a unique Offer Token (your TapOne user ID), which is shown in your Profile.", "We record the IP address of your sign-in connection, and the country derived from it. Your country decides which offers, surveys, games and payment methods you see, and it cannot be changed manually.", "We keep a record of your earnings, withdrawals, level and check-in progress, referrals, and the messages you send us through Help, so payments can be reviewed and paid correctly.", "We store only the settings needed to run the site: your dark/light choice and your referral code when you arrive from an invite link.", ], }, { heading: "2. How we use your information", body: [ "To run your account, match offers and payment methods to your country, credit your earnings, and review and pay your withdrawals.", "To prevent fraud: VPN and proxy connections are not allowed, and accounts using fake details, emulators or location-spoofing can be blocked.", "To reply to the messages you send us through Help, and to tell the admin when a new user registers.", ], }, { heading: "3. What we share", body: [ "We do not sell your personal information.", "Partner offerwalls and survey providers receive only your TapOne user ID (your Offer Token) so that a completed offer or survey can be credited to your account. They do not receive your email address, IP address or payment details from us.", "Your payment details are shared only with the payment method you choose when you request a withdrawal, so that the payment can be sent to you.", ], },
+      { heading: "4. Cookies", body: [ "TapOne uses only the cookies and local storage needed to keep you signed in, remember your dark/light choice and keep your referral code when you arrive from an invite link.", "Partner offerwalls may set their own cookies when you open them, so completed offers can be credited to your account through the postback system.", "You can clear cookies in your browser at any time; you will simply need to sign in again.", ], }, { heading: "5. Your choices", body: [ "You can change your profile picture from your Profile, and you can change your username up to 3 times in your lifetime. Your country, flag and IP address are detected automatically from your sign-in connection and cannot be changed by you — they are visible only to the admin.", "You can sign out at any time. If you want your account reviewed, contact us through Help inside your account.", ], }, { heading: "6. Data safety", body: [ "Your data is stored on TapOne's server and is used only to run the site. Only the site owner (admin) can see users' full details, including IP address and country, so that payments and fraud can be checked.", ], },
+      { heading: "7. Contact", body: [ "For any privacy question, email info@tapone.store or send a message through Help inside your account.", ], },
+       
     ],
   },
   terms: {
-    title: "Terms & Conditions",
+    title: "Terms of Service",
     body: [
-      "One person, one account. Using a VPN, proxy, emulator or fake details to fake your location or complete offers is not allowed and leads to a blocked account.",
-      "Offer payouts are credited when our partner confirms completion through the postback system. Reversed or fraudulent completions are removed from the balance.",
-      "Withdrawals are reviewed and paid manually. Make sure your payment details are correct — payments sent to wrong details entered by you cannot be recovered.",
-      "TapOne has no deposits and no gambling. You can only withdraw money you earned.",
+      "Last updated: 23 November 2026. TapOne launched on 19 November 2026. By signing in to TapOne you agree to these terms. If you have any question, contact us at info@tapone.store or through Help inside your account.", ], sections: [ { heading: "1. What TapOne is", body: [ "TapOne is a rewards website. Members complete surveys, offers and games from our partner networks (offerwalls), and earn real dollars for every completed task. All amounts are in US dollars (USD) only — there are no coins, points or other currencies.", "TapOne has no deposits and no gambling. You can only withdraw money you earned. There are no gift cards.", ], }, { heading: "2. Your account", body: [ "One person, one account. You sign up and log in with Google only — there is no email or password form on TapOne.", "You must give accurate details. Using a VPN, proxy, emulator or fake details to fake your location or complete offers is not allowed and leads to a blocked account.", "You can change your username up to 3 times in your lifetime. After that the option locks. Your country is detected automatically from your sign-in connection and cannot be changed.", ], }, { heading: "3. How earnings work", body: [ "You keep 70% of every offer, survey and game payout, in dollars. TapOne keeps 30%.", "Offer payouts are credited only when our partner confirms the completion through the postback system. Reversed or fraudulent completions are removed from your balance.", "Level rewards and the weekly check-in bonus are credited automatically as shown in your account. When someone signs up with your invite code, you earn 8% of what they earn.", ], },
+      { heading: "4. Withdrawals", body: [ "The minimum withdrawal is $5.00. Withdrawals are reviewed and paid manually by the admin.", "Payment methods are matched to your account from your sign-in connection, so the methods you see depend on your country — for example Easypaisa and JazzCash in Pakistan, UPI in India, and PayPal, bank transfer, Wise, Payoneer or Binance USDT in other countries. Every method is shown with its logo.", "Make sure your payment details are correct — payments sent to wrong details entered by you cannot be recovered.", ], }, { heading: "5. Fair use", body: [ "Do not create multiple accounts, do not complete offers for other people, and do not use bots, scripts or any other trick to fake completions. Accounts that break these rules can be blocked by the admin, and unpaid earnings on a blocked account are not paid out.", "The admin can also ban a country, in which case no account can be created from that country at all.", ], }, { heading: "6. Content and availability", body: [ "Offers, surveys and games come from our partners, so availability, payouts and payment methods can change at any time. A partner may stop an offer or reverse a completion, and TapOne cannot pay for completions a partner does not confirm.", "TapOne is provided as-is. We do our best to keep the site running, but we are not responsible for partner offers that change or disappear.", ], },
+      { heading: "7. Changes to these terms", body: [ "We may update these terms when TapOne changes. The date at the top of this page shows the latest version. If you keep using TapOne after a change, you accept the updated terms.", ], },
+       
     ],
   },
   faq: {
@@ -587,8 +587,8 @@ export function App() {
     setHash(next);
   };
 
-  useEffect(() => {
-    captureReferralCode();
+const hashLegalPage: "terms" | "privacy" | null = hash === "#/terms" ? "terms" : hash === "#/privacy" ? "privacy" : null; const shownStaticPage: StaticPage | null = hashLegalPage ?? staticPage; const openLegal = (page: "terms" | "privacy") => { setStaticPage(null); navigate(`#/${page}`); }; useEffect(() => {
+    captureReferralCode(); if (window.location.pathname === "/terms" || window.location.pathname === "/privacy") { navigate(`#${window.location.pathname}`); }
     const onHash = () => setHash(window.location.hash);
     window.addEventListener("hashchange", onHash);
     // The footer's Wi-Fi/RSS owner entry notifies the shell directly —
@@ -668,7 +668,7 @@ export function App() {
             </button>
             <SignInCard
               googleClientId={home.data?.googleClientId ?? ""}
-              onSignedIn={(t) => setToken(t)}
+              onSignedIn={(t) => setToken(t)} onOpenLegal={openLegal}
             />
           </main>
         </div>
@@ -773,7 +773,7 @@ export function App() {
           </p>
           <SignInCard
             googleClientId={home.data?.googleClientId ?? ""}
-            onSignedIn={(t) => {
+            onOpenLegal={openLegal} onSignedIn={(t) => {
               setToken(t);
               goApp();
             }}
@@ -789,22 +789,22 @@ export function App() {
       </section>
 
       <main className="mx-auto w-full max-w-6xl px-3 sm:px-4">
-        {staticPage ? (
+        {shownStaticPage ? (
           <section className="py-10">
             <button
               type="button"
-              onClick={() => setStaticPage(null)}
+              onClick={() => { setStaticPage(null); if (hashLegalPage) navigate(""); }}
               className="mb-5 text-sm font-semibold text-[var(--dim)]"
             >
               ← Back
             </button>
-            <h1 className="font-display text-3xl font-extrabold">{STATIC_PAGES[staticPage].title}</h1>
+            <h1 className="font-display text-3xl font-extrabold">{STATIC_PAGES[shownStaticPage].title}</h1>
             <div className="mt-5 max-w-2xl space-y-4">
-              {STATIC_PAGES[staticPage].body.map((para) => (
+              {STATIC_PAGES[shownStaticPage].body.map((para) => (
                 <p key={para.slice(0, 24)} className="leading-relaxed text-[var(--dim)]">
                   {para}
                 </p>
-              ))}
+              ))}{STATIC_PAGES[shownStaticPage].sections?.map((section) => (<div key={section.heading} className="mt-8 max-w-2xl"><h2 className="font-display text-xl font-bold">{section.heading}</h2><div className="mt-3 space-y-4">{section.body.map((para) => (<p key={para.slice(0, 24)} className="leading-relaxed text-[var(--dim)]">{para}</p>))}</div></div>))}
             </div>
           </section>
         ) : (
@@ -938,9 +938,9 @@ export function App() {
             <p className="font-display text-sm font-bold uppercase tracking-wide text-white/50">About</p>
             <ul className="mt-3 space-y-2.5 text-sm font-semibold text-white/85">
               <li><button type="button" className="hover:text-white" onClick={() => setStaticPage("faq")}>FAQ</button></li>
-              <li><button type="button" className="hover:text-white" onClick={() => setStaticPage("privacy")}>Privacy Policy</button></li>
+              <li><button type="button" className="hover:text-white" onClick={() => openLegal("privacy")}>Privacy Policy</button></li>
               <li><button type="button" className="hover:text-white" onClick={() => setStaticPage("cookies")}>Cookie Policy</button></li>
-              <li><button type="button" className="hover:text-white" onClick={() => setStaticPage("terms")}>Terms of Service</button></li>
+              <li><button type="button" className="hover:text-white" onClick={() => openLegal("terms")}>Terms of Service</button></li>
             </ul>
           </nav>
           <nav aria-label="Services">
