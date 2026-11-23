@@ -1746,7 +1746,7 @@ const partnerCallbackShape = z.object({
   txnParam: z.string(),
   payoutParam: z.string(),
   payoutInCents: z.boolean(),
-  sigFormat: z.enum(["params", "colon"]),
+  sigFormat: z.enum(["params", "colon", "moonetix"]),
   payoutDivisor: z.number(),
   authMethod: z.enum(["none", "secret", "hmac_sha1", "hmac_sha256"]),
   secretParam: z.string(),
@@ -3512,7 +3512,8 @@ export const Actions = {
       const params = args.params;
       const userId = (params[config.userParam] ?? "").trim();
       const txId = (params[config.txnParam] ?? "").trim();
-      const payoutRaw = (params[config.payoutParam] ?? "").trim();
+      const payoutRaw = (params[config.payoutParam] ?? "").trim();   
+      const status = (params["status"] ?? "").trim();
       if (!userId || !txId || !payoutRaw)
         throw new Error(
           `Missing callback parameters: this partner must send ${config.userParam}, ${config.txnParam} and ${config.payoutParam}.`,
@@ -3539,7 +3540,7 @@ export const Actions = {
           // colons, in that order. Every other HMAC partner signs the
           // sorted name=value&name=value pairs.
           const expected =
-            config.sigFormat === "colon"
+            config.sigFormat === "moonetix"               ? await partnerHmacHexRaw(                   config.secret,                   `${txId}:${userId}:${payoutRaw}:${status}`,                   hash,                 )               : config.sigFormat === "colon"
               ? await partnerHmacHexRaw(
                   config.secret,
                   `${userId}:${txId}:${payoutRaw}`,
@@ -3556,7 +3557,7 @@ export const Actions = {
         }
       }
 
-      const payoutNumber = Number.parseFloat(payoutRaw);
+      const payoutNumber = Number.parseFloat(payoutRaw); if (config.sigFormat === "moonetix" && status !== "1") { return { status: "rejected", creditedCents: 0 }; }
       if (!Number.isFinite(payoutNumber))
         throw new Error("Invalid payout amount.");
       let payout =
@@ -4686,7 +4687,7 @@ export const Actions = {
 
   adminUpsertPartnerCallback: defineAction({
     description:
-      "Adds or edits a partner callback config: partner name + callback key, which parameters carry the user ID, transaction ID and payout (and whether the payout is in cents, and how many payout units make $1), and how callbacks are authenticated — no secret, a shared secret parameter, or an HMAC-SHA1 / HMAC-SHA256 signature — with the secret value and, for HMAC partners, which signature format they use (sorted name=value pairs, or the user:transaction:amount colon format Offerwall.GG uses). Saved configs take effect on the very next callback; no redeploy. Leaving the secret blank while editing keeps the stored one.",
+      "Adds or edits a partner callback config: partner name + callback key, which parameters carry the user ID, transaction ID and payout (and whether the payout is in cents, and how many payout units make $1), and how callbacks are authenticated — no secret, a shared secret parameter, or an HMAC-SHA1 / HMAC-SHA256 signature — with the secret value and, for HMAC partners, which signature format they use (sorted name=value pairs, the user:transaction:amount colon format Offerwall.GG uses, or the Moonetix tx:user:amount:status format — transaction, user, amount and status joined with colons). Saved configs take effect on the very next callback; no redeploy. Leaving the secret blank while editing keeps the stored one.",
     request: z.object({
       adminToken: z.string().min(1).max(200),
       id: z.number().int().positive().optional(),
@@ -4708,9 +4709,9 @@ export const Actions = {
       // units per $1). Applied after the cents conversion.
       payoutDivisor: z.number().positive().max(1000000).default(1),
       // Which string an HMAC partner signs: the sorted name=value pairs
-      // ("params") or "{user}:{txn}:{payout}" ("colon", Offerwall.GG).
+      // ("params") or "{user}:{txn}:{payout}" ("colon", Offerwall.GG), or "{txn}:{user}:{payout}:{status}" ("moonetix", Moonetix).
       // Only used for HMAC auth methods.
-      sigFormat: z.enum(["params", "colon"]).default("params"),
+      sigFormat: z.enum(["params", "colon", "moonetix"]).default("params"),
       authMethod: z
         .enum(["none", "secret", "hmac_sha1", "hmac_sha256"])
         .default("none"),
