@@ -3516,7 +3516,8 @@ export const Actions = {
       const status = (params["status"] ?? "").trim();
       // Moonetix signs the reward (after its user split), not the
       // gross payout in "amount" — read it verbatim, never reformat.
-      // Missing reward => "" => the HMAC below cannot match, so the callback is rejected with "Invalid callback signature."
+      // Missing reward => "" => the HMAC below cannot match, so the 
+      // callback is rejected with "Invalid callback signature."
       const rewardRaw = (params["reward"] ?? "").trim();
       if (!userId || !txId || !payoutRaw)
         throw new Error(
