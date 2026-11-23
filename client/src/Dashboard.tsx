@@ -2039,7 +2039,7 @@ function AffiliateTab({ token }: { token: string }) {
     queryFn: () => api.getAffiliate({ token }),
   });
   const [copied, setCopied] = useState(false);
-  const link = aff.data ? `https://tapone.store/?r=${aff.data.referralCode}` : "";
+  const link = aff.data ? `https://www.tapone.store/?r=${aff.data.referralCode}` : "";
   return (
     <div>
       <h1 className="font-display text-2xl font-extrabold sm:text-3xl">Affiliate</h1>
