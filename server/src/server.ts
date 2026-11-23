@@ -12,8 +12,6 @@
 //                  /data/app.db so the database survives redeploys on the
 //                  persistent disk — the app directory there is read-only)
 //   CLIENT_DIR     static client build to serve (default ./client/dist)
-//   SETTLE_TIME    daily contest settlement time "HH:MM" in SETTLE_TZ
-//                  (default 00:15 America/Los_Angeles, matching space.json)
 //
 // Behaviour:
 //   POST /actions { action, args }  — the exact envelope the built client
@@ -31,7 +29,6 @@
 //     ID, transaction ID, payout and signature).
 //   GET  /*                         — static files from CLIENT_DIR with an
 //     index.html fallback (the app is a hash-routed single page).
-//   Once a day at SETTLE_TIME it invokes the settleDailyContest action
 //   in-process — the same job space.json schedules inside Muse.
 //
 // The ctx handed to the actions mirrors the runtime contract: ctx.db is a
@@ -469,46 +466,3 @@ const server = Bun.serve({
 console.log(
   `[tapone] listening on http://${HOST}:${server.port} — db: ${DB_PATH}, client: ${CLIENT_DIR}`,
 );
-
-// ------------------------------------------- daily contest settlement timer
-
-// Same job space.json declares for the Muse runtime: settleDailyContest
-// once a day at 00:15 America/Los_Angeles. It only RECORDS winners; the
-// owner pays prizes from Admin → Contest Payouts.
-const SETTLE_TIME = process.env.SETTLE_TIME ?? "00:15";
-const SETTLE_TZ = process.env.SETTLE_TZ ?? "America/Los_Angeles";
-
-function msUntilNextSettle(): number {
-  const [h = 0, m = 15] = SETTLE_TIME.split(":").map(Number);
-  const now = new Date();
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: SETTLE_TZ,
-    hour: "numeric",
-    minute: "numeric",
-    hour12: false,
-  }).formatToParts(now);
-  const curH = Number(parts.find((p) => p.type === "hour")?.value ?? 0) % 24;
-  const curM = Number(parts.find((p) => p.type === "minute")?.value ?? 0);
-  let deltaMin = h * 60 + m - (curH * 60 + curM);
-  if (deltaMin <= 0) deltaMin += 24 * 60;
-  return deltaMin * 60_000 - (now.getSeconds() * 1000 + now.getMilliseconds());
-}
-
-function scheduleSettle(): void {
-  const ms = msUntilNextSettle();
-  console.log(`[tapone] next contest settlement in ${Math.round(ms / 60000)} min`);
-  setTimeout(async () => {
-    try {
-      const result = (await dispatch("settleDailyContest", {})) as {
-        settledDays?: number;
-      };
-      console.log(
-        `[tapone] settleDailyContest done (${result?.settledDays ?? 0} day(s) recorded)`,
-      );
-    } catch (err) {
-      console.error("[tapone] settleDailyContest failed:", err);
-    }
-    scheduleSettle();
-  }, ms);
-}
-scheduleSettle();

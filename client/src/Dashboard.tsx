@@ -16,7 +16,6 @@ export type DashboardTab =
   | "playtime"
   | "apps"
   | "partners"
-  | "leaderboard"
   | "level"
   | "cashout"
   | "withdraw"
@@ -34,7 +33,6 @@ const TABS: { id: DashboardTab; label: string; icon: (c?: string) => ReactNode }
   { id: "playtime", label: "Playtime", icon: Icons.game },
   { id: "apps", label: "Apps", icon: Icons.grid },
   { id: "partners", label: "Surveys partners", icon: Icons.users },
-  { id: "leaderboard", label: "Leaderboard", icon: Icons.trophy },
   { id: "level", label: "Level & Privileges", icon: Icons.chart },
   { id: "cashout", label: "Live Cashout", icon: Icons.wallet },
   { id: "withdraw", label: "Withdraw", icon: Icons.wallet },
@@ -342,7 +340,6 @@ export function Dashboard({
               {tab === "cashout" && <WithdrawTab token={token} />}
               {tab === "withdraw" && <WithdrawTab token={token} />}
               {tab === "history" && <HistoryTab token={token} />}
-              {tab === "leaderboard" && <LeaderboardTab token={token} />}
               {tab === "level" && <LevelTab token={token} go={pick} />}
               {tab === "invite" && <AffiliateTab token={token} />}
               {tab === "referrals" && <AffiliateTab token={token} />}
@@ -2034,270 +2031,6 @@ function LevelTab({ token, go }: { token: string; go: (t: DashboardTab) => void 
   );
 }
 
-// ---------------------------------------------------------- leaderboard tab
-
-/**
- * Live countdown to the end of the current Affiliate month (days,
- * hours, minutes, seconds, ticking every second). When it reaches
- * zero the board refetches: the server settles the finished month and
- * returns the fresh month's board.
- */
-function MonthCountdown({ endsAt, onElapsed }: { endsAt: string; onElapsed: () => void }) {
-  const [nowMs, setNowMs] = useState(() => Date.now());
-  const elapsedRef = useRef(false);
-  useEffect(() => {
-    const id = window.setInterval(() => setNowMs(Date.now()), 1000);
-    return () => window.clearInterval(id);
-  }, []);
-  const leftMs = Math.max(0, new Date(endsAt).getTime() - nowMs);
-  useEffect(() => {
-    if (leftMs <= 0 && !elapsedRef.current) {
-      elapsedRef.current = true;
-      onElapsed();
-    }
-  }, [leftMs, onElapsed]);
-  const totalSec = Math.floor(leftMs / 1000);
-  const cells: [string, number][] = [
-    ["Days", Math.floor(totalSec / 86400)],
-    ["Hours", Math.floor((totalSec % 86400) / 3600)],
-    ["Minutes", Math.floor((totalSec % 3600) / 60)],
-    ["Seconds", totalSec % 60],
-  ];
-  return (
-    <div className="mt-4" aria-label="Time left in this month's contest">
-      <div className="flex gap-2">
-        {cells.map(([label, value]) => (
-          <span
-            key={label}
-            className="flex min-w-16 flex-1 flex-col items-center rounded-2xl bg-[var(--surface)] px-2 py-2.5 ring-1 ring-[var(--border)]"
-          >
-            <span className="font-display text-2xl font-extrabold tabular-nums text-[var(--text)]">
-              {String(value).padStart(2, "0")}
-            </span>
-            <span className="text-[11px] font-bold uppercase tracking-wide text-[var(--dim)]">
-              {label}
-            </span>
-          </span>
-        ))}
-      </div>
-      <p className="mt-2 text-xs font-semibold text-[var(--dim)]">
-        When the timer hits zero, the winners are listed for the owner,
-        who pays the prizes from the admin panel — and a fresh board
-        starts.
-      </p>
-    </div>
-  );
-}
-
-/** One leaderboard row: rank badge, the user's profile picture (or
- *  their initial in the blue avatar circle when they have no picture),
- *  name, and their earnings/prize. Used for the board itself and for
- *  the standings inside the Join Now view — every ranked user shows
- *  with name + picture + earnings, Top 100, both contests. */
-function StandingRow({
-  rank,
-  name,
-  pictureUrl,
-  main,
-  sub,
-}: {
-  rank: number;
-  name: string;
-  pictureUrl: string | null;
-  main: string;
-  sub: string;
-}) {
-  return (
-    <li className="flex items-center gap-3 py-3">
-      <span
-        className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full font-display text-sm font-extrabold ${
-          rank === 1
-            ? "bg-[var(--gold)] text-[var(--ink)]"
-            : rank === 2
-              ? "bg-slate-300 text-[var(--ink)]"
-              : rank === 3
-                ? "bg-amber-700 text-white"
-                : "bg-[var(--surface-2)] text-[var(--dim)]"
-        }`}
-      >
-        {rank}
-      </span>
-      <span className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-full bg-[var(--avatar)] font-display text-sm font-extrabold text-white">
-        {pictureUrl ? (
-          <img src={pictureUrl} alt="" className="h-full w-full object-cover" />
-        ) : (
-          name.charAt(0).toUpperCase()
-        )}
-      </span>
-      <span className="min-w-0 flex-1 truncate text-sm font-semibold">{name}</span>
-      <span className="text-right">
-        <span className="block font-display text-base font-bold text-[var(--brand-deep)] dark:text-[var(--brand)]">
-          {main}
-        </span>
-        <span className="block text-xs text-[var(--dim)]">{sub}</span>
-      </span>
-    </li>
-  );
-}
-
-function LeaderboardTab({ token }: { token: string }) {
-  const [contest, setContest] = useState<"daily" | "affiliate">("daily");
-  const [showPrizes, setShowPrizes] = useState(false);
-  const board = useQuery({
-    queryKey: ["leaderboard", token],
-    queryFn: () => api.getLeaderboard({ token }),
-  });
-  const d = board.data;
-  const tiers = d ? (contest === "daily" ? d.dailyTiers : d.affiliateTiers) : [];
-  const rows = d
-    ? contest === "daily"
-      ? d.daily.map((r) => ({
-          rank: r.rank,
-          name: r.name,
-          pictureUrl: r.pictureUrl,
-          main: fmt(r.earnedCents),
-          sub: "earned today",
-        }))
-      : d.affiliateStandings.map((r) => ({
-          rank: r.rank,
-          name: r.name,
-          pictureUrl: r.pictureUrl,
-          main: r.prizeCents > 0 ? fmt(r.prizeCents) : "—",
-          sub: `${r.referrals} ${r.referrals === 1 ? "referral" : "referrals"} brought · Score ${r.score}`,
-        }))
-    : [];
-  const affiliateMonthLabel = d
-    ? new Date(`${d.affiliateMonthKey}-01T00:00:00`).toLocaleString("en-US", {
-        month: "long",
-        year: "numeric",
-      })
-    : "";
-  return (
-    <div>
-      <h1 className="font-display text-2xl font-extrabold sm:text-3xl">Leaderboard</h1>
-      <div className="mt-5 flex gap-2" role="tablist" aria-label="Contest">
-        {(
-          [
-            { id: "daily" as const, label: "🏆 Daily contest" },
-            { id: "affiliate" as const, label: "👥 Affiliate contest" },
-          ]
-        ).map((c) => (
-          <button
-            key={c.id}
-            type="button"
-            role="tab"
-            aria-selected={contest === c.id}
-            onClick={() => setContest(c.id)}
-            className={`rounded-full px-4 py-2.5 text-sm font-bold ring-1 transition ${
-              contest === c.id
-                ? "bg-[var(--brand)] text-white ring-[var(--brand)]"
-                : "bg-[var(--surface)] ring-[var(--border)]"
-            }`}
-          >
-            {c.label}
-          </button>
-        ))}
-      </div>
-      <div className="mt-4 overflow-hidden rounded-3xl bg-[var(--pill)] p-6 ring-1 ring-[var(--border)]">
-        <p className="text-sm font-semibold text-[var(--dim)]">
-          {contest === "daily" ? "Daily contest prize pool" : "Affiliate contest prize pool"}
-        </p>
-        <p className="mt-1 font-display text-4xl font-extrabold text-[var(--brand)]">
-          {d ? fmt(contest === "daily" ? d.dailyPoolCents : d.affiliatePoolCents) : "…"}
-        </p>
-        <p className="mt-2 max-w-md text-sm leading-relaxed text-[var(--dim)]">
-          {contest === "daily"
-            ? "Entry is automatic — every dollar you earn today enters you. When the day ends, the winners are listed for the owner, who pays each prize from the admin panel — it lands straight in the winner's balance."
-            : `This board is for ${affiliateMonthLabel} only — it starts fresh on the 1st of every month, and when the month ends the winners are listed for the owner, who pays each prize from the admin panel. Score = qualified referrals + 0.2 × their earnings this month (capped at $400 each) + 3 × referrals whose first withdrawal landed this month. A qualified referral has earned at least $0.10 this month.`}
-        </p>
-        {contest === "affiliate" && d && (
-          <>
-            <p className="mt-4 font-display text-sm font-bold text-[var(--text)]">
-              ⏳ {affiliateMonthLabel} contest ends in
-            </p>
-            <MonthCountdown endsAt={d.affiliateEndsAt} onElapsed={() => void board.refetch()} />
-          </>
-        )}
-        <button
-          type="button"
-          aria-expanded={showPrizes}
-          onClick={() => setShowPrizes((v) => !v)}
-          className="mt-4 rounded-full bg-[var(--brand)] px-8 py-3 font-display text-base font-bold text-white transition hover:bg-[var(--brand-deep)]"
-        >
-          Join Now
-        </button>
-        {showPrizes && (
-          <div className="mt-4 rounded-2xl bg-[var(--surface)] p-4 ring-1 ring-[var(--border)]">
-            <p className="text-sm font-bold">
-              {contest === "daily" ? "Who is winning today" : "Who is winning this month"}
-            </p>
-            {board.isPending ? (
-              <p className="mt-2 text-sm text-[var(--dim)]">Loading…</p>
-            ) : rows.length > 0 ? (
-              <ol className="mt-1 divide-y divide-[var(--border)]">
-                {rows.map((r) => (
-                  <StandingRow key={r.rank} {...r} />
-                ))}
-              </ol>
-            ) : (
-              <p className="mt-2 text-sm text-[var(--dim)]">
-                {contest === "affiliate"
-                  ? "Nobody is on this month's board yet — invite friends to be the first."
-                  : "Nobody is on the board yet — be the first."}
-              </p>
-            )}
-            <p className="mt-3 text-sm font-bold">
-              {contest === "daily" ? "Daily contest prizes" : "Affiliate contest prizes"}
-            </p>
-            <ul className="mt-2 divide-y divide-[var(--border)]">
-              {tiers.map((tier) => (
-                <li key={tier.label} className="flex items-center justify-between py-2 text-sm">
-                  <span className="font-semibold">{tier.label}</span>
-                  <span className="font-display font-bold text-[var(--brand-deep)] dark:text-[var(--brand)]">
-                    {tier.prizeCents > 0 ? fmt(tier.prizeCents) : "$0"}
-                  </span>
-                </li>
-              ))}
-            </ul>
-            <p className="mt-2 text-xs font-semibold text-[var(--dim)]">
-              You are in automatically — just earn. No sign-up step needed.
-            </p>
-          </div>
-        )}
-      </div>
-      {d?.lastDailyPayout && (
-        <p className="mt-4 rounded-2xl bg-[var(--pill)] px-4 py-3 text-sm font-semibold ring-1 ring-[var(--border)]" role="status">
-          🏆 Yesterday's Daily winner: <span className="font-display font-extrabold">{d.lastDailyPayout.winnerName}</span>{" "}
-          took 1st place (<span className="font-display font-extrabold text-[var(--brand)]">{fmt(d.lastDailyPayout.amountCents)}</span>)
-          — the owner pays the prizes from the admin panel.
-        </p>
-      )}
-      {contest === "affiliate" && d?.lastAffiliatePayout && (
-        <p className="mt-4 rounded-2xl bg-[var(--pill)] px-4 py-3 text-sm font-semibold ring-1 ring-[var(--border)]" role="status">
-          🏆 Last month's Affiliate winner: <span className="font-display font-extrabold">{d.lastAffiliatePayout.winnerName}</span>{" "}
-          took 1st place (<span className="font-display font-extrabold text-[var(--brand)]">{fmt(d.lastAffiliatePayout.amountCents)}</span>)
-          — the owner pays the prizes from the admin panel.
-        </p>
-      )}
-      {board.isPending ? (
-        <p className="mt-6 text-sm text-[var(--dim)]">Loading…</p>
-      ) : rows.length > 0 ? (
-        <ol className="mt-5 divide-y divide-[var(--border)] rounded-2xl bg-[var(--surface)] px-4 ring-1 ring-[var(--border)]">
-          {rows.map((r) => (
-            <StandingRow key={r.rank} {...r} />
-          ))}
-        </ol>
-      ) : (
-        <div className="mt-5 rounded-3xl border-2 border-dashed border-[var(--border)] bg-[var(--surface)] px-6 py-10 text-center text-sm text-[var(--dim)]">
-          {contest === "affiliate"
-            ? "Nobody is on this month's board yet — invite friends to be the first."
-            : "Nobody is on the board yet — be the first."}
-        </div>
-      )}
-    </div>
-  );
-}
-
 // ------------------------------------------------------------ affiliate tab
 
 function AffiliateTab({ token }: { token: string }) {
@@ -2665,7 +2398,7 @@ function ProfileTab({
             </form>
           )}
           <p className="mt-2 text-xs leading-relaxed text-[var(--dim)]">
-            This is the name shown on the leaderboard and to your referrals.
+            This is the name shown to your referrals.
             Your email address stays the same. You can change your display
             name 3 times in total —{" "}
             <strong className="text-[var(--text)]">

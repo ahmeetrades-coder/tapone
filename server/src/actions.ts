@@ -1,7 +1,7 @@
 // TapOne actions: Google sign-in with IP/country lock + VPN block, content
 // (offerwalls / surveys / games) managed by the admin and read by everyone,
 // dollar withdrawals by country, admin approve/reject, help + mailbox,
-// leaderboards, affiliate commissions, and the offerwall postback endpoint.
+// affiliate commissions, and the offerwall postback endpoint.
 
 import {
 defineAction,
@@ -9,7 +9,7 @@ z,
 type ActionsModule,
 type Ctx,
 } from "@hatch/space-sdk";
-import { and, desc, eq, gte, sql } from "drizzle-orm";
+import { and, desc, eq, gte } from "drizzle-orm";
 import type { BatchItem } from "drizzle-orm/batch";
 import * as schema from "./schema";
 
@@ -22,8 +22,6 @@ const DEFAULT_SETTINGS: Record<string, string> = {
     "34580127521-1jbjmo47er7e64jd42s4b13m2kkje2r1.apps.googleusercontent.com",
   admin_username: "admin",
   admin_password: "tapone-admin-2026",
-  daily_pool_cents: "10000",
-  affiliate_pool_cents: "150000",
   min_withdraw_cents: "500",
   user_share_pct: "70",
   affiliate_earning_pct: "8",
@@ -47,12 +45,6 @@ const DEFAULT_SETTINGS: Record<string, string> = {
   // levels RewardJoy-verified; rewards the owner's $1,000 split).
   level_cents_per_level: "100",
   level_titles_json: "",
-  // Contest prize tiers by rank, comma-separated cents. Empty = the
-  // built-in RewardJoy-verified tables (Daily: 100 ranks summing to
-  // $100; Affiliate: 25 ranks summing to $1,500). Owner-editable in
-  // Admin → Settings → Contest prize tiers.
-  daily_tiers_cents: "",
-  affiliate_tiers_cents: "",
   // Built-in withdraw methods per country, as JSON
   // { "PK": ["easypaisa", ...], "DEFAULT": [...] } written from
   // Admin → Withdraw Methods. Empty = the built-in table in code
@@ -1149,477 +1141,6 @@ async function syncWeeklyCheckin(db: DB, userId: number): Promise<void> {
   await checkLevelUps(db, userId);
 }
 
-/** Daily $100 prize tiers by rank (RewardJoy-verified): sums to $100. */
-const DEFAULT_DAILY_TIERS_CENTS: number[] = [
-  2500, 1000, 500, 400, 300, // 1st-5th
-  200, 200, 200, 200, 200, // 6th-10th
-  ...Array(10).fill(100), // 11th-20th
-  ...Array(30).fill(60), // 21st-50th
-  ...Array(50).fill(30), // 51st-100th
-];
-
-/** Parses a comma-separated cents tier list from settings; any
- *  malformed value falls back to the built-in table. */
-function parseTierList(
-  raw: string | undefined,
-  fallback: number[],
-  maxLen: number,
-): number[] {
-  const parts = (raw ?? "")
-    .split(",")
-    .map((s) => Number.parseInt(s.trim(), 10));
-  if (
-    parts.length >= 1 &&
-    parts.length <= maxLen &&
-    parts.every((n) => Number.isFinite(n) && n >= 0 && n <= 100_000_000)
-  ) {
-    return parts;
-  }
-  return [...fallback];
-}
-
-function dailyTiersFrom(settings: Record<string, string>): number[] {
-  return parseTierList(settings["daily_tiers_cents"], DEFAULT_DAILY_TIERS_CENTS, 150);
-}
-
-function affiliateTiersFrom(settings: Record<string, string>): number[] {
-  return parseTierList(
-    settings["affiliate_tiers_cents"],
-    DEFAULT_AFFILIATE_TIERS_CENTS,
-    100,
-  );
-}
-
-function dailyPrizeForRank(
-  rank: number,
-  tiers: readonly number[] = DEFAULT_DAILY_TIERS_CENTS,
-): number {
-  if (rank < 1 || rank > 150) return 0;
-  return tiers[rank - 1] ?? 0;
-}
-
-function ordinal(n: number): string {
-  const mod100 = n % 100;
-  if (mod100 >= 11 && mod100 <= 13) return `${n}th`;
-  switch (n % 10) {
-    case 1:
-      return `${n}st`;
-    case 2:
-      return `${n}nd`;
-    case 3:
-      return `${n}rd`;
-    default:
-      return `${n}th`;
-  }
-}
-
-/** Groups a tier list into display rows: consecutive ranks with the
- *  same prize collapse into one "6th–10th" style row. */
-function tierSummary(
-  tiers: readonly number[],
-): { label: string; prizeCents: number }[] {
-  const out: { label: string; prizeCents: number }[] = [];
-  let start = 0;
-  for (let i = 1; i <= tiers.length; i++) {
-    if (i === tiers.length || tiers[i] !== tiers[start]) {
-      const from = start + 1;
-      const to = i;
-      out.push({
-        label: from === to ? ordinal(from) : `${ordinal(from)}–${ordinal(to)}`,
-        prizeCents: tiers[start] ?? 0,
-      });
-      start = i;
-    }
-  }
-  return out;
-}
-
-/**
- * Settles the Daily contest for a finished day using the prize tiers.
- * Entry is automatic by earning. NO money moves here (owner order
- * 2026-11-19 ~23:48 PST): the winners are only RECORDED as pending
- * contest_awards — the owner pays each prize himself from Admin →
- * Contest Payouts, and only then does the prize land in the winner's
- * balance and history. Users whose chargeback rate is above 7% are
- * excluded. Idempotent via contest_awards rows.
- */
-async function settleDailyContestFor(
-  db: DB,
-  periodKey: string,
-): Promise<{ status: "paid" | "already_settled" | "no_earners"; winnerUserId: number | null; amountCents: number }> {
-  // A day that has not finished yet (today or a future day) must never
-  // be settled: its standings are still changing, and writing the
-  // no-earners marker now would freeze the day and hide its real winner
-  // later. Legitimate callers only ever pass finished days.
-  if (periodKey >= dayKeyOf(new Date())) {
-    return { status: "no_earners", winnerUserId: null, amountCents: 0 };
-  }
-  const existing = await db
-    .select()
-    .from(schema.contestAwards)
-    .where(eq(schema.contestAwards.periodKey, periodKey))
-    .limit(1);
-  if (existing[0]) {
-    const top = await db
-      .select()
-      .from(schema.contestAwards)
-      .where(
-        and(
-          eq(schema.contestAwards.periodKey, periodKey),
-          eq(schema.contestAwards.rank, 1),
-        ),
-      )
-      .limit(1);
-    const all = await db
-      .select()
-      .from(schema.contestAwards)
-      .where(eq(schema.contestAwards.periodKey, periodKey));
-    // Self-heal the winner-summary row from the recorded rank-1 award,
-    // so the leaderboard's "last winner" banner is right even if an old
-    // no-earners marker row exists for this day.
-    if (top[0]) {
-      await db
-        .insert(schema.contestPayouts)
-        .values({
-          contest: "daily",
-          periodKey,
-          winnerUserId: top[0].userId,
-          amountCents: top[0].amountCents,
-        })
-        .onConflictDoUpdate({
-          target: [schema.contestPayouts.contest, schema.contestPayouts.periodKey],
-          set: {
-            winnerUserId: top[0].userId,
-            amountCents: top[0].amountCents,
-          },
-        });
-    }
-    return {
-      status: "already_settled",
-      winnerUserId: top[0]?.userId ?? null,
-      amountCents: all.reduce((s, a) => s + a.amountCents, 0),
-    };
-  }
-  // Prize tiers are the owner's live settings (Admin → Settings).
-  const dailyTiers = dailyTiersFrom(await getSettings(db));
-  const [y = 1970, m = 1, d = 1] = periodKey.split("-").map(Number);
-  const dayStart = new Date(y, m - 1, d);
-  const dayEnd = new Date(y, m - 1, d + 1);
-  const txns = await db
-    .select()
-    .from(schema.transactions)
-    .where(
-      and(
-        eq(schema.transactions.kind, "offer_credit"),
-        gte(schema.transactions.createdAt, dayStart),
-      ),
-    )
-    .limit(10000);
-  const dayTxns = txns.filter((tx) => tx.createdAt < dayEnd);
-  const byUser = new Map<number, number>();
-  for (const tx of dayTxns)
-    byUser.set(tx.userId, (byUser.get(tx.userId) ?? 0) + tx.amountCents);
-  const ranked: { userId: number; earned: number }[] = [];
-  for (const [uid, sum] of byUser) {
-    if (sum <= 0) continue;
-    const rate = await chargebackRatePct(db, uid);
-    if (rate > 7) continue; // chargeback above 7% is excluded
-    ranked.push({ userId: uid, earned: sum });
-  }
-  ranked.sort((a, b) => b.earned - a.earned || a.userId - b.userId);
-  if (ranked.length === 0) {
-    await db
-      .insert(schema.contestPayouts)
-      .values({
-        contest: "daily",
-        periodKey,
-        winnerUserId: null,
-        amountCents: 0,
-      })
-      .onConflictDoNothing();
-    return { status: "no_earners", winnerUserId: null, amountCents: 0 };
-  }
-  const statements: BatchItem<"sqlite">[] = [];
-  let total = 0;
-  ranked.slice(0, 150).forEach((entry, i) => {
-    const rank = i + 1;
-    const prize = dailyPrizeForRank(rank, dailyTiers);
-    if (prize <= 0) return;
-    total += prize;
-    // Recorded as PENDING — the owner pays it from Admin → Contest
-    // Payouts; nothing is credited to any balance here.
-    statements.push(
-      db.insert(schema.contestAwards).values({
-        contest: "daily",
-        periodKey,
-        userId: entry.userId,
-        rank,
-        amountCents: prize,
-        status: "pending",
-        releaseAt: null,
-      }),
-    );
-  });
-  statements.push(
-    db
-      .insert(schema.contestPayouts)
-      .values({
-        contest: "daily",
-        periodKey,
-        winnerUserId: ranked[0]?.userId ?? null,
-        amountCents: dailyPrizeForRank(1, dailyTiers),
-      })
-      // Upsert, not do-nothing: if a no-earners marker row somehow
-      // exists for this day already, the real winner must replace it —
-      // the leaderboard's "last winner" banner reads this row.
-      .onConflictDoUpdate({
-        target: [schema.contestPayouts.contest, schema.contestPayouts.periodKey],
-        set: {
-          winnerUserId: ranked[0]?.userId ?? null,
-          amountCents: dailyPrizeForRank(1, dailyTiers),
-        },
-      }),
-  );
-  const [first, ...rest] = statements;
-  if (first) await db.batch([first, ...rest]);
-  return {
-    status: "paid",
-    winnerUserId: ranked[0]?.userId ?? null,
-    amountCents: total,
-  };
-}
-
-/** Records yesterday's Daily winners (pending owner payment). Never throws. */
-async function settleYesterdayIfNeeded(db: DB): Promise<void> {
-  try {
-    const yesterday = shiftDayKey(dayKeyOf(new Date()), -1);
-    await settleDailyContestFor(db, yesterday);
-  } catch {
-    /* settlement must never break a page load; the schedule retries */
-  }
-}
-
-// ------------------------------------------ affiliate contest (monthly)
-// AFFILIATE CONTEST — MONTHLY (owner orders 2026-11-19 ~23:46 PST):
-// the $1,500 Affiliate contest runs per CALENDAR month. The board
-// shows, for every ranked user: how many people they brought that
-// month (referral signups in the month), their Score, and the prize
-// for their rank — rank 1 is the highest score, then descending.
-// Score = Q + 0.2 × E + 3 × W, computed on THIS month's referrals
-// only: Q = of this month's signups, those who earned at least $0.10
-// this month; E = those referrals' offer earnings this month, in
-// dollars, capped at $400 each; W = of this month's signups, those
-// whose first approved withdrawal landed this month. When the month
-// ends the board starts fresh and the finished month's winners are
-// recorded as pending awards — the owner pays each prize himself
-// from Admin → Contest Payouts (no automatic payout). Settlement is
-// idempotent and runs lazily from getLeaderboard and from the daily
-// settlement schedule.
-/** Affiliate $1,500 prize tiers by rank (sums to exactly $1,500). */
-const DEFAULT_AFFILIATE_TIERS_CENTS: number[] = [
-  50000, 30000, 15000, 8500, 6500, // 1st–5th
-  5000, 4500, 4000, 3500, 3000, // 6th–10th
-  ...Array(5).fill(2000), // 11th–15th
-  ...Array(5).fill(1500), // 16th–20th
-  ...Array(5).fill(500), // 21st–25th
-];
-
-function affiliatePrizeForRank(
-  rank: number,
-  tiers: readonly number[] = DEFAULT_AFFILIATE_TIERS_CENTS,
-): number {
-  if (rank < 1) return 0;
-  return tiers[rank - 1] ?? 0;
-}
-
-/** "YYYY-MM" for the month containing the date (server-local). */
-function monthKeyOf(d: Date): string {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-}
-
-function monthRange(monthKey: string): { start: Date; end: Date } {
-  const [y = 1970, m = 1] = monthKey.split("-").map(Number);
-  return { start: new Date(y, m - 1, 1), end: new Date(y, m, 1) };
-}
-
-function previousMonthKey(monthKey: string): string {
-  const [y = 1970, m = 1] = monthKey.split("-").map(Number);
-  return monthKeyOf(new Date(y, m - 2, 1));
-}
-
-interface AffiliateStandingRow {
-  userId: number;
-  /** People this user brought in the month (all referral signups). */
-  referrals: number;
-  /** Of those, how many earned at least $0.10 in the month. */
-  qualifiedReferrals: number;
-  score: number;
-}
-
-/** The month's Affiliate standings, best score first. */
-async function computeAffiliateStandings(
-  db: DB,
-  monthKey: string,
-): Promise<AffiliateStandingRow[]> {
-  const { start, end } = monthRange(monthKey);
-  const allUsers = await db.select().from(schema.users);
-  const monthRefs = allUsers.filter(
-    (u) => u.referredById != null && u.createdAt >= start && u.createdAt < end,
-  );
-  if (monthRefs.length === 0) return [];
-  const monthRefIds = new Set(monthRefs.map((u) => u.id));
-  const txns = await db
-    .select()
-    .from(schema.transactions)
-    .where(
-      and(
-        eq(schema.transactions.kind, "offer_credit"),
-        gte(schema.transactions.createdAt, start),
-      ),
-    )
-    .limit(10000);
-  const earnedInMonth = new Map<number, number>();
-  for (const t of txns) {
-    if (t.createdAt >= end) continue;
-    if (!monthRefIds.has(t.userId)) continue;
-    earnedInMonth.set(t.userId, (earnedInMonth.get(t.userId) ?? 0) + t.amountCents);
-  }
-  const approved = await db
-    .select()
-    .from(schema.withdrawals)
-    .where(eq(schema.withdrawals.status, "approved"));
-  const firstWithdrawalAt = new Map<number, Date>();
-  for (const w of approved) {
-    const at = w.decidedAt ?? w.createdAt;
-    const cur = firstWithdrawalAt.get(w.userId);
-    if (!cur || at < cur) firstWithdrawalAt.set(w.userId, at);
-  }
-  const byInviter = new Map<number, AffiliateStandingRow>();
-  for (const r of monthRefs) {
-    const inviterId = r.referredById;
-    if (inviterId == null) continue;
-    const row = byInviter.get(inviterId) ?? {
-      userId: inviterId,
-      referrals: 0,
-      qualifiedReferrals: 0,
-      score: 0,
-    };
-    row.referrals += 1;
-    const earned = earnedInMonth.get(r.id) ?? 0;
-    if (earned >= 10) {
-      row.qualifiedReferrals += 1;
-      row.score += 1;
-    }
-    row.score += 0.2 * (Math.min(40000, earned) / 100);
-    const fw = firstWithdrawalAt.get(r.id);
-    if (fw && fw >= start && fw < end) row.score += 3;
-    byInviter.set(inviterId, row);
-  }
-  const rows = [...byInviter.values()]
-    .map((r) => ({ ...r, score: Math.round(r.score * 100) / 100 }))
-    .filter((r) => r.score > 0);
-  rows.sort((a, b) => b.score - a.score || a.userId - b.userId);
-  return rows;
-}
-
-/**
- * Settles a finished Affiliate month: RECORDS every winner (ranks
- * 1–25) as a pending contest award. NO money moves here — the owner
- * pays each prize himself from Admin → Contest Payouts.
- * Idempotent via the contest_payouts marker row.
- */
-async function settleAffiliateMonthFor(db: DB, monthKey: string): Promise<void> {
-  const marker = await db
-    .select()
-    .from(schema.contestPayouts)
-    .where(
-      and(
-        eq(schema.contestPayouts.contest, "affiliate"),
-        eq(schema.contestPayouts.periodKey, monthKey),
-      ),
-    )
-    .limit(1);
-  if (marker[0]) return;
-  // Prize tiers are the owner's live settings (Admin → Settings).
-  const affiliateTiers = affiliateTiersFrom(await getSettings(db));
-  const standings = await computeAffiliateStandings(db, monthKey);
-  const statements: BatchItem<"sqlite">[] = [];
-  standings.slice(0, 100).forEach((row, i) => {
-    const rank = i + 1;
-    const prize = affiliatePrizeForRank(rank, affiliateTiers);
-    if (prize <= 0) return;
-    statements.push(
-      db.insert(schema.contestAwards).values({
-        contest: "affiliate",
-        periodKey: monthKey,
-        userId: row.userId,
-        rank,
-        amountCents: prize,
-        status: "pending",
-        releaseAt: null,
-      }),
-    );
-  });
-  statements.push(
-    db
-      .insert(schema.contestPayouts)
-      .values({
-        contest: "affiliate",
-        periodKey: monthKey,
-        winnerUserId: standings[0]?.userId ?? null,
-        amountCents: standings.length > 0 ? affiliatePrizeForRank(1, affiliateTiers) : 0,
-      })
-      .onConflictDoNothing(),
-  );
-  const [first, ...rest] = statements;
-  if (first) await db.batch([first, ...rest]);
-}
-
-/** Records last month's Affiliate winners (pending owner payment). Never throws. */
-async function settleAffiliateMonthIfNeeded(db: DB): Promise<void> {
-  try {
-    await settleAffiliateMonthFor(db, previousMonthKey(monthKeyOf(new Date())));
-  } catch {
-    /* settlement must never break a page load; the schedule retries */
-  }
-}
-
-/**
- * Pays ONE pending contest award into the winner's balance — the only
- * path that ever moves contest prize money (owner order 2026-11-19
- * ~23:48 PST: no automatic contest payout; the owner pays from Admin
- * → Contest Payouts). Marks the award paid, credits balance + total
- * earned, and writes the contest_prize ledger row the winner sees in
- * their history. Idempotent: an already-paid award pays nothing again.
- */
-async function payContestAward(
-  db: DB,
-  award: typeof schema.contestAwards.$inferSelect,
-): Promise<"paid" | "already_paid"> {
-  if (award.status !== "pending") return "already_paid";
-  const contestLabel = award.contest === "affiliate" ? "Affiliate" : "Daily";
-  await db.batch([
-    db
-      .update(schema.contestAwards)
-      .set({ status: "paid" })
-      .where(eq(schema.contestAwards.id, award.id)),
-    db
-      .update(schema.users)
-      .set({
-        balanceCents: sql`${schema.users.balanceCents} + ${award.amountCents}`,
-        totalEarnedCents: sql`${schema.users.totalEarnedCents} + ${award.amountCents}`,
-      })
-      .where(eq(schema.users.id, award.userId)),
-    db.insert(schema.transactions).values({
-      userId: award.userId,
-      kind: "contest_prize",
-      amountCents: award.amountCents,
-      note: `${contestLabel} contest prize — rank #${award.rank} for ${award.periodKey}`,
-    }),
-  ]);
-  await checkLevelUps(db, award.userId);
-  return "paid";
-}
 
 const SURVEY_NETWORK_HINTS = ["survey", "cpx", "bitlabs", "theorem", "cherries", "prime opinion", "prime"];
 
@@ -2440,7 +1961,7 @@ async function findBannedCountry(
 export const Actions = {
   getPublicHome: defineAction({
     description:
-      "Public landing data: Google client id, featured games, priced items for all three sections (offerwalls, surveys, games), section counts, contest pools, recent approved payouts.",
+      "Public landing data: Google client id, featured games, priced items for all three sections (offerwalls, surveys, games), section counts, recent approved payouts.",
     request: z.object({}),
     response: z.object({
       googleClientId: z.string(),
@@ -2453,8 +1974,6 @@ export const Actions = {
         surveys: z.number(),
         games: z.number(),
       }),
-      dailyPoolCents: z.number(),
-      affiliatePoolCents: z.number(),
       minWithdrawCents: z.number(),
       socialLinks: z.array(
         z.object({ platform: z.string(), label: z.string(), url: z.string() }),
@@ -2514,8 +2033,6 @@ export const Actions = {
           surveys: items.filter((i) => i.kind === "survey").length,
           games: items.filter((i) => i.kind === "game").length,
         },
-        dailyPoolCents: settingInt(settings, "daily_pool_cents"),
-        affiliatePoolCents: settingInt(settings, "affiliate_pool_cents"),
         minWithdrawCents: settingInt(settings, "min_withdraw_cents"),
         socialLinks: socialLinksFrom(settings),
         recentPayouts: payouts.map((p) => ({
@@ -3139,146 +2656,6 @@ export const Actions = {
     },
   }),
 
-  getLeaderboard: defineAction({
-    description:
-      "Daily contest (today's offer earnings) and Affiliate contest leaderboards. Every ranked row (Top 100, highest first) carries the user's name, profile picture and earnings so the board shows who is at each rank. The Affiliate contest is MONTHLY: standings cover the current calendar month only — for every ranked user, how many people they brought this month, their score (highest first) and the prize for their rank — plus the exact moment the month ends (for the live countdown) and last month's winner. Opening this board records yesterday's Daily winners and last month's Affiliate winners (as pending awards the owner pays from the admin panel) if they are due.",
-    request: z.object({ token: z.string().max(200).optional() }),
-    response: z.object({
-      dailyPoolCents: z.number(),
-      affiliatePoolCents: z.number(),
-      affiliateMonthKey: z.string(),
-      affiliateEndsAt: z.string(),
-      lastDailyPayout: z
-        .object({
-          periodKey: z.string(),
-          winnerName: z.string(),
-          amountCents: z.number(),
-        })
-        .nullable(),
-      lastAffiliatePayout: z
-        .object({
-          periodKey: z.string(),
-          winnerName: z.string(),
-          amountCents: z.number(),
-        })
-        .nullable(),
-      dailyTiers: z.array(
-        z.object({ label: z.string(), prizeCents: z.number() }),
-      ),
-      affiliateTiers: z.array(
-        z.object({ label: z.string(), prizeCents: z.number() }),
-      ),
-      affiliateStandings: z.array(
-        z.object({
-          rank: z.number(),
-          name: z.string(),
-          // The ranked user's profile picture (their uploaded photo
-          // or Google picture), null when they have none — the board
-          // rows show it next to the name, initial-letter avatar as
-          // the fallback. Name + picture + earnings for EVERY row,
-          // both contests, up to rank 100 (owner order 2026-11-21).
-          pictureUrl: z.string().nullable(),
-          referrals: z.number(),
-          qualifiedReferrals: z.number(),
-          score: z.number(),
-          prizeCents: z.number(),
-        }),
-      ),
-      daily: z.array(
-        z.object({
-          rank: z.number(),
-          name: z.string(),
-          pictureUrl: z.string().nullable(),
-          earnedCents: z.number(),
-        }),
-      ),
-    }),
-    async handler(ctx) {
-      const db = ctx.db<typeof schema>();
-      await settleYesterdayIfNeeded(db);
-      await settleAffiliateMonthIfNeeded(db);
-      const settings = await getSettings(db);
-      const dayStart = new Date();
-      dayStart.setHours(0, 0, 0, 0);
-      const todays = await db
-        .select()
-        .from(schema.transactions)
-        .where(
-          and(
-            eq(schema.transactions.kind, "offer_credit"),
-            gte(schema.transactions.createdAt, dayStart),
-          ),
-        )
-        .limit(5000);
-      const allUsers = await db.select().from(schema.users);
-      const userById = new Map(allUsers.map((u) => [u.id, u]));
-      const dailyMap = new Map<number, number>();
-      for (const t of todays)
-        dailyMap.set(t.userId, (dailyMap.get(t.userId) ?? 0) + t.amountCents);
-      const daily = [...dailyMap.entries()]
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 100)
-        .map(([userId, earned], i) => ({
-          rank: i + 1,
-          name: userById.get(userId)?.name ?? "User",
-          pictureUrl: userById.get(userId)?.pictureUrl ?? null,
-          earnedCents: earned,
-        }));
-      // Affiliate contest: THIS calendar month's standings only — a
-      // fresh board every month. Rank 1 is the highest score.
-      const currentMonth = monthKeyOf(new Date());
-      const monthStandings = await computeAffiliateStandings(db, currentMonth);
-      const affiliateTiers = affiliateTiersFrom(settings);
-      const affiliateStandings = monthStandings.slice(0, 100).map((row, i) => ({
-        rank: i + 1,
-        name: userById.get(row.userId)?.name ?? "User",
-        pictureUrl: userById.get(row.userId)?.pictureUrl ?? null,
-        referrals: row.referrals,
-        qualifiedReferrals: row.qualifiedReferrals,
-        score: row.score,
-        prizeCents: affiliatePrizeForRank(i + 1, affiliateTiers),
-      }));
-      const payoutRows = await db
-        .select()
-        .from(schema.contestPayouts)
-        .orderBy(desc(schema.contestPayouts.id))
-        .limit(20);
-      const lastPaidDaily = payoutRows.find(
-        (r) => r.contest === "daily" && r.winnerUserId != null && r.amountCents > 0,
-      );
-      const lastDailyPayout = lastPaidDaily
-        ? {
-            periodKey: lastPaidDaily.periodKey,
-            winnerName: userById.get(lastPaidDaily.winnerUserId ?? -1)?.name ?? "Winner",
-            amountCents: lastPaidDaily.amountCents,
-          }
-        : null;
-      const lastPaidAffiliate = payoutRows.find(
-        (r) => r.contest === "affiliate" && r.winnerUserId != null && r.amountCents > 0,
-      );
-      const lastAffiliatePayout = lastPaidAffiliate
-        ? {
-            periodKey: lastPaidAffiliate.periodKey,
-            winnerName: userById.get(lastPaidAffiliate.winnerUserId ?? -1)?.name ?? "Winner",
-            amountCents: lastPaidAffiliate.amountCents,
-          }
-        : null;
-      return {
-        dailyPoolCents: settingInt(settings, "daily_pool_cents"),
-        affiliatePoolCents: settingInt(settings, "affiliate_pool_cents"),
-        affiliateMonthKey: currentMonth,
-        affiliateEndsAt: monthRange(currentMonth).end.toISOString(),
-        lastDailyPayout,
-        lastAffiliatePayout,
-        // Prize tables shown to users are derived from the owner's
-        // live tier settings, so an admin edit shows here at once.
-        dailyTiers: tierSummary(dailyTiersFrom(settings)),
-        affiliateTiers: tierSummary(affiliateTiers),
-        affiliateStandings,
-        daily,
-      };
-    },
-  }),
 
   getAffiliate: defineAction({
     description:
@@ -3626,67 +3003,7 @@ export const Actions = {
     },
   }),
 
-  getMyContest: defineAction({
-    description:
-      "Whether the signed-in user has joined today's Daily contest and the Affiliate contest, with both prize pools.",
-    request: z.object({ token: z.string().min(1).max(200) }),
-    response: z.object({
-      dailyPoolCents: z.number(),
-      affiliatePoolCents: z.number(),
-      dailyJoined: z.boolean(),
-      affiliateJoined: z.boolean(),
-    }),
-    async handler(ctx, args) {
-      const db = ctx.db<typeof schema>();
-      const settings = await getSettings(db);
-      const user = await requireUser(ctx, args.token);
-      const joins = await db
-        .select()
-        .from(schema.contestJoins)
-        .where(eq(schema.contestJoins.userId, user.id));
-      const todayKey = dayKeyOf(new Date());
-      return {
-        dailyPoolCents: settingInt(settings, "daily_pool_cents"),
-        affiliatePoolCents: settingInt(settings, "affiliate_pool_cents"),
-        dailyJoined: joins.some((j) => j.contest === "daily" && j.periodKey === todayKey),
-        affiliateJoined: joins.some((j) => j.contest === "affiliate"),
-      };
-    },
-  }),
 
-  joinContest: defineAction({
-    description:
-      "Joins the signed-in user to the Daily contest (today) or the Affiliate contest. Joining twice is a no-op.",
-    request: z.object({
-      token: z.string().min(1).max(200),
-      contest: z.enum(["daily", "affiliate"]),
-    }),
-    response: z.object({ ok: z.literal(true), alreadyJoined: z.boolean() }),
-    async handler(ctx, args): Promise<{ ok: true; alreadyJoined: boolean }> {
-      const db = ctx.db<typeof schema>();
-      const user = await requireUser(ctx, args.token);
-      const periodKey = args.contest === "daily" ? dayKeyOf(new Date()) : "ALL";
-      const existing = await db
-        .select()
-        .from(schema.contestJoins)
-        .where(
-          and(
-            eq(schema.contestJoins.userId, user.id),
-            eq(schema.contestJoins.contest, args.contest),
-            eq(schema.contestJoins.periodKey, periodKey),
-          ),
-        )
-        .limit(1);
-      if (existing[0]) return { ok: true, alreadyJoined: true };
-      await db.insert(schema.contestJoins).values({
-        userId: user.id,
-        contest: args.contest,
-        periodKey,
-      });
-      ctx.invalidateQueries();
-      return { ok: true, alreadyJoined: false };
-    },
-  }),
 
   getLevel: defineAction({
     description:
@@ -3870,7 +3187,7 @@ export const Actions = {
 
   updateDisplayName: defineAction({
     description:
-      "Changes the signed-in user's display name (1–40 characters). Lifetime limit: 3 changes per account — every successful change is counted on the user row, and once all 3 are used the name is locked and further changes are refused. Saving the name the user already has is not a change and is never counted. The name lives on the user row, so a new name shows at once everywhere the name appears — leaderboard, referrals, winner banners, admin lists. The Google email on the account never changes.",
+      "Changes the signed-in user's display name (1–40 characters). Lifetime limit: 3 changes per account — every successful change is counted on the user row, and once all 3 are used the name is locked and further changes are refused. Saving the name the user already has is not a change and is never counted. The name lives on the user row, so a new name shows at once everywhere the name appears — referrals, winner banners, admin lists. The Google email on the account never changes.",
     request: z.object({
       token: z.string().min(1).max(200),
       name: z
@@ -3933,40 +3250,6 @@ export const Actions = {
   // owner removed that option entirely (2026-11-19). The admin's Block
   // account option (adminSetUserBlocked) is separate and stays.
 
-  settleDailyContest: defineAction({
-    description:
-      "Records the Daily contest winners for yesterday (or a given finished day) using the prize tiers, as pending awards — no money moves; the owner pays each prize from Admin → Contest Payouts. Also records last month's Affiliate winners if due. Idempotent — safe for the daily schedule to call.",
-    request: z.object({ periodKey: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional() }),
-    response: z.object({
-      status: z.enum(["paid", "already_settled", "no_earners"]),
-      periodKey: z.string(),
-      winnerUserId: z.number().nullable(),
-      winnerName: z.string().nullable(),
-      amountCents: z.number(),
-    }),
-    async handler(ctx, args) {
-      const db = ctx.db<typeof schema>();
-      const todayKey = dayKeyOf(new Date());
-      const periodKey = args.periodKey ?? shiftDayKey(todayKey, -1);
-      if (periodKey >= todayKey)
-        throw new Error("Only a finished day can be settled.");
-      const result = await settleDailyContestFor(db, periodKey);
-      // The daily schedule also records last month's Affiliate winners
-      // the first time it runs in a new month.
-      await settleAffiliateMonthIfNeeded(db);
-      let winnerName: string | null = null;
-      if (result.winnerUserId != null) {
-        const rows = await db
-          .select()
-          .from(schema.users)
-          .where(eq(schema.users.id, result.winnerUserId))
-          .limit(1);
-        winnerName = rows[0]?.name ?? null;
-      }
-      ctx.invalidateQueries();
-      return { ...result, periodKey, winnerName };
-    },
-  }),
 
   postback: defineAction({
     description:
@@ -4401,8 +3684,6 @@ export const Actions = {
       settings: z.object({
         googleClientId: z.string(),
         adminUsername: z.string(),
-        dailyPoolCents: z.number(),
-        affiliatePoolCents: z.number(),
         minWithdrawCents: z.number(),
         userSharePct: z.number(),
         affiliateEarningPct: z.number(),
@@ -4413,8 +3694,6 @@ export const Actions = {
         levelRewardCents: z.number(),
         checkinGoalCents: z.number(),
         checkinRewardsCents: z.array(z.number()),
-        dailyTiersCents: z.array(z.number()),
-        affiliateTiersCents: z.array(z.number()),
         levelCentsPerLevel: z.number(),
         levelTitles: z.array(
           z.object({
@@ -4474,8 +3753,6 @@ export const Actions = {
         settings: {
           googleClientId: settings["google_client_id"] ?? "",
           adminUsername: settings["admin_username"] ?? "",
-          dailyPoolCents: settingInt(settings, "daily_pool_cents"),
-          affiliatePoolCents: settingInt(settings, "affiliate_pool_cents"),
           minWithdrawCents: settingInt(settings, "min_withdraw_cents"),
           userSharePct: settingInt(settings, "user_share_pct"),
           affiliateEarningPct: settingInt(settings, "affiliate_earning_pct"),
@@ -4486,8 +3763,6 @@ export const Actions = {
           levelRewardCents: settingInt(settings, "level_reward_cents"),
           checkinGoalCents: checkinGoalFrom(settings),
           checkinRewardsCents: checkinRewardsFrom(settings),
-          dailyTiersCents: dailyTiersFrom(settings),
-          affiliateTiersCents: affiliateTiersFrom(settings),
           levelCentsPerLevel: levelConfigFrom(settings).centsPerLevel,
           levelTitles: levelConfigFrom(settings).titles.map((t) => ({
             name: t.name,
@@ -4773,182 +4048,8 @@ export const Actions = {
     },
   }),
 
-  adminListContestPayouts: defineAction({
-    description:
-      "Contest Payouts for the owner: Daily and Affiliate winner groups by finished day/month — every winner's rank, username and prize, each award pending or paid — plus the most recently paid prizes. Contest prizes are never paid automatically; the owner pays them from here.",
-    request: z.object({ adminToken: z.string().min(1).max(200) }),
-    response: z.object({
-      daily: z.array(
-        z.object({
-          periodKey: z.string(),
-          pendingCents: z.number(),
-          awards: z.array(
-            z.object({
-              id: z.number(),
-              rank: z.number(),
-              userName: z.string(),
-              amountCents: z.number(),
-              status: z.enum(["pending", "paid"]),
-            }),
-          ),
-        }),
-      ),
-      affiliate: z.array(
-        z.object({
-          periodKey: z.string(),
-          pendingCents: z.number(),
-          awards: z.array(
-            z.object({
-              id: z.number(),
-              rank: z.number(),
-              userName: z.string(),
-              amountCents: z.number(),
-              status: z.enum(["pending", "paid"]),
-            }),
-          ),
-        }),
-      ),
-      recentPaid: z.array(
-        z.object({
-          contest: z.enum(["daily", "affiliate"]),
-          periodKey: z.string(),
-          rank: z.number(),
-          userName: z.string(),
-          amountCents: z.number(),
-        }),
-      ),
-    }),
-    async handler(ctx, args) {
-      await requireAdmin(ctx, args.adminToken);
-      const db = ctx.db<typeof schema>();
-      // Make sure finished periods are recorded before listing.
-      await settleYesterdayIfNeeded(db);
-      await settleAffiliateMonthIfNeeded(db);
-      const awards = await db
-        .select()
-        .from(schema.contestAwards)
-        .orderBy(desc(schema.contestAwards.id))
-        .limit(2000);
-      const users = await db.select().from(schema.users);
-      const nameById = new Map(users.map((u) => [u.id, u.name]));
-      const group = (contest: "daily" | "affiliate", maxGroups: number) => {
-        const byPeriod = new Map<string, typeof awards>();
-        for (const a of awards) {
-          if (a.contest !== contest) continue;
-          const list = byPeriod.get(a.periodKey) ?? [];
-          list.push(a);
-          byPeriod.set(a.periodKey, list);
-        }
-        return [...byPeriod.entries()]
-          .sort((a, b) => (a[0] < b[0] ? 1 : -1))
-          .slice(0, maxGroups)
-          .map(([periodKey, list]) => ({
-            periodKey,
-            pendingCents: list
-              .filter((a) => a.status === "pending")
-              .reduce((s, a) => s + a.amountCents, 0),
-            awards: [...list]
-              .sort((a, b) => a.rank - b.rank)
-              .map((a) => ({
-                id: a.id,
-                rank: a.rank,
-                userName: nameById.get(a.userId) ?? "User",
-                amountCents: a.amountCents,
-                status: a.status,
-              })),
-          }));
-      };
-      const recentPaid = awards
-        .filter((a) => a.status === "paid")
-        .slice(0, 20)
-        .map((a) => ({
-          contest: a.contest,
-          periodKey: a.periodKey,
-          rank: a.rank,
-          userName: nameById.get(a.userId) ?? "User",
-          amountCents: a.amountCents,
-        }));
-      return {
-        daily: group("daily", 14),
-        affiliate: group("affiliate", 6),
-        recentPaid,
-      };
-    },
-  }),
 
-  adminPayContestAward: defineAction({
-    description:
-      "Pays one pending contest prize into the winner's balance (the winner sees it in their balance and history). Already-paid awards pay nothing again.",
-    request: z.object({
-      adminToken: z.string().min(1).max(200),
-      awardId: z.number().int().positive(),
-    }),
-    response: z.object({
-      status: z.enum(["paid", "already_paid"]),
-      userName: z.string(),
-      amountCents: z.number(),
-    }),
-    async handler(ctx, args) {
-      await requireAdmin(ctx, args.adminToken);
-      const db = ctx.db<typeof schema>();
-      const rows = await db
-        .select()
-        .from(schema.contestAwards)
-        .where(eq(schema.contestAwards.id, args.awardId))
-        .limit(1);
-      const award = rows[0];
-      if (!award) throw new Error("Contest award not found.");
-      const status = await payContestAward(db, award);
-      const userRows = await db
-        .select()
-        .from(schema.users)
-        .where(eq(schema.users.id, award.userId))
-        .limit(1);
-      ctx.invalidateQueries();
-      return {
-        status,
-        userName: userRows[0]?.name ?? "User",
-        amountCents: award.amountCents,
-      };
-    },
-  }),
 
-  adminPayAllContestAwards: defineAction({
-    description:
-      "Pays every pending contest prize for one finished day (Daily) or month (Affiliate) into the winners' balances at once.",
-    request: z.object({
-      adminToken: z.string().min(1).max(200),
-      contest: z.enum(["daily", "affiliate"]),
-      periodKey: z.string().trim().min(4).max(10),
-    }),
-    response: z.object({ paidCount: z.number(), totalCents: z.number() }),
-    async handler(ctx, args) {
-      await requireAdmin(ctx, args.adminToken);
-      const db = ctx.db<typeof schema>();
-      const rows = await db
-        .select()
-        .from(schema.contestAwards)
-        .where(
-          and(
-            eq(schema.contestAwards.contest, args.contest),
-            eq(schema.contestAwards.periodKey, args.periodKey),
-            eq(schema.contestAwards.status, "pending"),
-          ),
-        )
-        .limit(500);
-      let paidCount = 0;
-      let totalCents = 0;
-      for (const award of rows) {
-        const status = await payContestAward(db, award);
-        if (status === "paid") {
-          paidCount += 1;
-          totalCents += award.amountCents;
-        }
-      }
-      ctx.invalidateQueries();
-      return { paidCount, totalCents };
-    },
-  }),
 
   adminListWithdrawMethods: defineAction({
     description:
@@ -5782,7 +4883,6 @@ export const Actions = {
           offersCompleted: z.number(),
           checkins: z.number(),
           checkinCents: z.number(),
-          contestPrizeCents: z.number(),
           referrals: z.number(),
           totalEarnedCents: z.number(),
           balanceCents: z.number(),
@@ -5824,14 +4924,6 @@ export const Actions = {
         if (u.referredById != null)
           referralCounts.set(u.referredById, (referralCounts.get(u.referredById) ?? 0) + 1);
       }
-      const prizeTxns = await db
-        .select()
-        .from(schema.transactions)
-        .where(eq(schema.transactions.kind, "contest_prize"))
-        .limit(10000);
-      const prizeByUser = new Map<number, number>();
-      for (const tx of prizeTxns)
-        prizeByUser.set(tx.userId, (prizeByUser.get(tx.userId) ?? 0) + tx.amountCents);
       const users = allUsers.map((u) => {
         const offers = offersByUser.get(u.id) ?? 0;
         const surveys = surveysByUser.get(u.id) ?? 0;
@@ -5848,7 +4940,6 @@ export const Actions = {
           offersCompleted: offers,
           checkins: ci.count,
           checkinCents: ci.cents,
-          contestPrizeCents: prizeByUser.get(u.id) ?? 0,
           referrals: referralCounts.get(u.id) ?? 0,
           totalEarnedCents: u.totalEarnedCents,
           balanceCents: u.balanceCents,
@@ -6263,12 +5354,10 @@ export const Actions = {
 
   adminUpdateSettings: defineAction({
     description:
-      "Updates site settings: Google client ID, contest pools, minimum withdrawal, revenue share, affiliate rates, postback secret, TheoremReach secret key, the weekly check-in goal + 7 day rewards, the Daily and Affiliate contest prize tiers, the level pace and title table, and the admin username/password.",
+      "Updates site settings: Google client ID, minimum withdrawal, revenue share, affiliate rates, postback secret, TheoremReach secret key, the weekly check-in goal + 7 day rewards, the level pace and title table, and the admin username/password.",
     request: z.object({
       adminToken: z.string().min(1).max(200),
       googleClientId: z.string().trim().max(300).optional(),
-      dailyPoolCents: z.number().int().nonnegative().max(100_000_000).optional(),
-      affiliatePoolCents: z.number().int().nonnegative().max(100_000_000).optional(),
       minWithdrawCents: z.number().int().nonnegative().max(100_000_000).optional(),
       userSharePct: z.number().int().min(1).max(100).optional(),
       affiliateEarningPct: z.number().int().min(0).max(100).optional(),
@@ -6281,16 +5370,6 @@ export const Actions = {
       checkinRewardsCents: z
         .array(z.number().int().min(0).max(100_000))
         .length(7)
-        .optional(),
-      dailyTiersCents: z
-        .array(z.number().int().min(0).max(100_000_000))
-        .min(1)
-        .max(150)
-        .optional(),
-      affiliateTiersCents: z
-        .array(z.number().int().min(0).max(100_000_000))
-        .min(1)
-        .max(100)
         .optional(),
       levelCentsPerLevel: z.number().int().min(1).max(1_000_000).optional(),
       levelTitles: z
@@ -6326,10 +5405,6 @@ export const Actions = {
       const updates: [string, string][] = [];
       if (args.googleClientId !== undefined)
         updates.push(["google_client_id", args.googleClientId]);
-      if (args.dailyPoolCents !== undefined)
-        updates.push(["daily_pool_cents", String(args.dailyPoolCents)]);
-      if (args.affiliatePoolCents !== undefined)
-        updates.push(["affiliate_pool_cents", String(args.affiliatePoolCents)]);
       if (args.minWithdrawCents !== undefined)
         updates.push(["min_withdraw_cents", String(args.minWithdrawCents)]);
       if (args.userSharePct !== undefined)
@@ -6350,10 +5425,6 @@ export const Actions = {
         updates.push(["checkin_goal_cents", String(args.checkinGoalCents)]);
       if (args.checkinRewardsCents !== undefined)
         updates.push(["checkin_rewards_cents", args.checkinRewardsCents.join(",")]);
-      if (args.dailyTiersCents !== undefined)
-        updates.push(["daily_tiers_cents", args.dailyTiersCents.join(",")]);
-      if (args.affiliateTiersCents !== undefined)
-        updates.push(["affiliate_tiers_cents", args.affiliateTiersCents.join(",")]);
       if (args.levelCentsPerLevel !== undefined)
         updates.push(["level_cents_per_level", String(args.levelCentsPerLevel)]);
       if (args.levelTitles !== undefined) {
@@ -6412,8 +5483,6 @@ export const Actions = {
       googleClientId: z.string(),
       adminUsername: z.string(),
       postbackSecretSet: z.boolean(),
-      dailyPoolCents: z.number(),
-      affiliatePoolCents: z.number(),
       minWithdrawCents: z.number(),
       userSharePct: z.number(),
       affiliateEarningPct: z.number(),
@@ -6431,8 +5500,6 @@ export const Actions = {
         googleClientId: settings["google_client_id"] ?? "",
         adminUsername: settings["admin_username"] ?? "",
         postbackSecretSet: (settings["postback_secret"] ?? "") !== "",
-        dailyPoolCents: settingInt(settings, "daily_pool_cents"),
-        affiliatePoolCents: settingInt(settings, "affiliate_pool_cents"),
         minWithdrawCents: settingInt(settings, "min_withdraw_cents"),
         userSharePct: settingInt(settings, "user_share_pct"),
         affiliateEarningPct: settingInt(settings, "affiliate_earning_pct"),

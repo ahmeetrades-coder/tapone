@@ -20,13 +20,12 @@ import { Wordmark, goHome } from "./App";
 
 const FIELDS = actionFields<typeof Actions>();
 
-type AdminTab = "overview" | "users" | "stats" | "payouts" | "withdrawals" | "methods" | "content" | "inbox" | "notifications" | "announcements" | "countries" | "postbacks" | "callbacks" | "settings" | "deploy";
+type AdminTab = "overview" | "users" | "stats" | "withdrawals" | "methods" | "content" | "inbox" | "notifications" | "announcements" | "countries" | "postbacks" | "callbacks" | "settings" | "deploy";
 
 const ADMIN_TABS: { id: AdminTab; label: string }[] = [
   { id: "overview", label: "Overview" },
   { id: "users", label: "Users" },
   { id: "stats", label: "Challenge Stats" },
-  { id: "payouts", label: "Contest Payouts" },
   { id: "withdrawals", label: "Withdrawals" },
   { id: "methods", label: "Withdraw Methods" },
   { id: "content", label: "Offerwalls / Surveys / Games" },
@@ -124,7 +123,6 @@ export function Admin() {
         {tab === "overview" && <Overview token={token} onAuthFail={signOut} />}
         {tab === "users" && <UsersTab token={token} />}
         {tab === "stats" && <StatsTab token={token} />}
-        {tab === "payouts" && <ContestPayoutsTab token={token} />}
         {tab === "withdrawals" && <WithdrawalsTab token={token} />}
         {tab === "methods" && <WithdrawMethodsTab token={token} />}
         {tab === "content" && <ContentTab token={token} />}
@@ -406,7 +404,7 @@ function DeployTab({ token }: { token: string }) {
     ["drizzle/", "SQLite migrations 0001–0013, applied in order on a fresh database"],
     ["package.json + bun.lock", "Dependencies and the install / build / start scripts"],
     ["bunfig.toml + tsconfig.base.json", "Bun and shared TypeScript config"],
-    ["space.json", "App metadata + the daily 00:15 contest schedule"],
+    ["space.json", "App metadata"],
     ["CNAME", "Custom domain declaration — the file's single line is tapone.store, so the published site opens on the owner's own domain"],
     ["README.md + DEPLOY.md", "Full source guide and step-by-step deploy instructions (in the repo root)"],
     [".env.example", "Every configuration value a host needs, with names"],
@@ -432,7 +430,6 @@ function DeployTab({ token }: { token: string }) {
     "bun run build:client             # client -> client/dist/",
     "DATABASE_PATH=/data/app.db bun run start   # standalone server (PORT comes from the host)",
     "# The server applies drizzle/ migrations itself on first run and",
-    "# runs the daily 00:15 contest settlement in-process — no extra cron.",
     "# Copy the existing app.db to /data/app.db first to keep all users,",
     "# balances and settings (never through git — the repo is public).",
   ].join("\n");
@@ -567,8 +564,6 @@ function DeployTab({ token }: { token: string }) {
             </div>
             {(
               [
-                ["DAILY_POOL_CENTS", `${fmt(d.dailyPoolCents)} Daily contest pool`],
-                ["AFFILIATE_POOL_CENTS", `${fmt(d.affiliatePoolCents)} Affiliate contest pool`],
                 ["MIN_WITHDRAW_CENTS", `${fmt(d.minWithdrawCents)} minimum withdrawal`],
                 ["USER_SHARE_PCT", `${d.userSharePct}% of each postback payout goes to the user`],
                 ["AFFILIATE_EARNING_PCT", `${d.affiliateEarningPct}% referral earning commission`],
@@ -923,185 +918,6 @@ function UsersTab({ token }: { token: string }) {
 
 // ------------------------------------------------------------- withdrawals
 
-function ContestPayoutsTab({ token }: { token: string }) {
-  const queryClient = useQueryClient();
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
-
-  const list = useQuery({
-    queryKey: ["admin-contest-payouts", token],
-    queryFn: () => api.adminListContestPayouts({ adminToken: token }),
-  });
-
-  const invalidate = () => {
-    void queryClient.invalidateQueries({ queryKey: ["admin-contest-payouts", token] });
-    void queryClient.invalidateQueries({ queryKey: ["admin-overview", token] });
-  };
-
-  const payOne = useMutation({
-    mutationFn: async (input: { awardId: number }) =>
-      api.adminPayContestAward({ adminToken: token, awardId: input.awardId }),
-    onSuccess: (r) => {
-      setNotice(
-        r.status === "paid"
-          ? `Paid ${fmt(r.amountCents)} to ${r.userName} — it is in their balance and history now.`
-          : `${r.userName}'s prize was already paid.`,
-      );
-      invalidate();
-    },
-    onError: (e) => setError(e.message),
-  });
-
-  const payAll = useMutation({
-    mutationFn: async (input: { contest: "daily" | "affiliate"; periodKey: string }) =>
-      api.adminPayAllContestAwards({
-        adminToken: token,
-        contest: input.contest,
-        periodKey: input.periodKey,
-      }),
-    onSuccess: (r) => {
-      setNotice(
-        r.paidCount > 0
-          ? `Paid ${r.paidCount} ${r.paidCount === 1 ? "prize" : "prizes"} — ${fmt(r.totalCents)} in total.`
-          : "Nothing pending to pay for that period.",
-      );
-      invalidate();
-    },
-    onError: (e) => setError(e.message),
-  });
-
-  const busy = payOne.isPending || payAll.isPending;
-  const d = list.data;
-
-  const renderGroup = (
-    contest: "daily" | "affiliate",
-    g: NonNullable<typeof d>["daily"][number],
-  ) => {
-    const pendingCount = g.awards.filter((a) => a.status === "pending").length;
-    const title =
-      contest === "daily"
-        ? g.periodKey
-        : new Date(`${g.periodKey}-01T00:00:00`).toLocaleString("en-US", {
-            month: "long",
-            year: "numeric",
-          });
-    return (
-      <div key={`${contest}-${g.periodKey}`} className="rounded-2xl bg-[var(--surface)] p-4 ring-1 ring-[var(--border)] sm:p-5">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <p className="font-display text-base font-extrabold">{title}</p>
-            <p className="text-xs font-semibold text-[var(--dim)]">
-              {pendingCount > 0
-                ? `${pendingCount} ${pendingCount === 1 ? "prize" : "prizes"} waiting — ${fmt(g.pendingCents)}`
-                : "All prizes paid"}
-            </p>
-          </div>
-          {pendingCount > 0 && (
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => payAll.mutate({ contest, periodKey: g.periodKey })}
-              className="rounded-full bg-[var(--brand)] px-4 py-2 text-sm font-bold text-white transition hover:bg-[var(--brand-deep)] disabled:opacity-60"
-            >
-              Pay all ({fmt(g.pendingCents)})
-            </button>
-          )}
-        </div>
-        <ul className="mt-3 divide-y divide-[var(--border)]">
-          {g.awards.map((a) => (
-            <li key={a.id} className="flex items-center gap-3 py-2.5">
-              <span
-                className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full font-display text-xs font-extrabold ${
-                  a.rank === 1
-                    ? "bg-[var(--gold)] text-[var(--ink)]"
-                    : a.rank === 2
-                      ? "bg-slate-300 text-[var(--ink)]"
-                      : a.rank === 3
-                        ? "bg-amber-700 text-white"
-                        : "bg-[var(--surface-2)] text-[var(--dim)]"
-                }`}
-              >
-                {a.rank}
-              </span>
-              <span className="min-w-0 flex-1 truncate text-sm font-semibold">{a.userName}</span>
-              <span className="font-display text-sm font-bold">{fmt(a.amountCents)}</span>
-              {a.status === "pending" ? (
-                <button
-                  type="button"
-                  disabled={busy}
-                  onClick={() => payOne.mutate({ awardId: a.id })}
-                  className="rounded-full bg-[var(--brand)] px-4 py-1.5 text-xs font-bold text-white transition hover:bg-[var(--brand-deep)] disabled:opacity-60"
-                >
-                  Pay
-                </button>
-              ) : (
-                <span className="rounded-full bg-[var(--brand)]/15 px-3 py-1 text-xs font-bold text-[var(--brand-deep)] dark:text-[var(--brand)]">
-                  PAID
-                </span>
-              )}
-            </li>
-          ))}
-        </ul>
-      </div>
-    );
-  };
-
-  return (
-    <div>
-      <h1 className="font-display text-2xl font-extrabold">Contest Payouts</h1>
-      <p className="mt-1 max-w-xl text-sm text-[var(--dim)]">
-        Contest prizes are never paid automatically. When a day (Daily) or a
-        month (Affiliate) ends, its winners appear here — press Pay on a
-        winner, or Pay all for the whole period, and the prize lands in that
-        winner's balance and history right away.
-      </p>
-      {error && (
-        <p role="alert" className="mt-3 text-sm font-medium text-red-600 dark:text-red-400">{error}</p>
-      )}
-      {notice && (
-        <p role="status" className="mt-3 text-sm font-semibold text-[var(--brand-deep)] dark:text-[var(--brand)]">{notice}</p>
-      )}
-      {list.isPending ? (
-        <p className="mt-4 text-sm text-[var(--dim)]">Loading…</p>
-      ) : d ? (
-        <>
-          <h2 className="mt-6 font-display text-lg font-bold">🏆 Daily contest winners</h2>
-          {d.daily.length > 0 ? (
-            <div className="mt-3 space-y-3">{d.daily.map((g) => renderGroup("daily", g))}</div>
-          ) : (
-            <p className="mt-2 text-sm text-[var(--dim)]">No finished days yet — yesterday's winners will appear here.</p>
-          )}
-          <h2 className="mt-8 font-display text-lg font-bold">👥 Affiliate contest winners</h2>
-          {d.affiliate.length > 0 ? (
-            <div className="mt-3 space-y-3">{d.affiliate.map((g) => renderGroup("affiliate", g))}</div>
-          ) : (
-            <p className="mt-2 text-sm text-[var(--dim)]">No finished months yet — last month's winners will appear here when the month ends.</p>
-          )}
-          {d.recentPaid.length > 0 && (
-            <>
-              <h2 className="mt-8 font-display text-lg font-bold">Recently paid</h2>
-              <ul className="mt-3 divide-y divide-[var(--border)] rounded-2xl bg-[var(--surface)] px-4 ring-1 ring-[var(--border)]">
-                {d.recentPaid.map((p, i) => (
-                  <li key={i} className="flex items-center justify-between gap-3 py-2.5 text-sm">
-                    <span className="font-semibold">
-                      {p.userName}{" "}
-                      <span className="font-normal text-[var(--dim)]">
-                        · {p.contest === "affiliate" ? "Affiliate" : "Daily"} · rank #{p.rank} · {p.periodKey}
-                      </span>
-                    </span>
-                    <span className="font-display font-bold text-[var(--brand-deep)] dark:text-[var(--brand)]">
-                      {fmt(p.amountCents)}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </>
-          )}
-        </>
-      ) : null}
-    </div>
-  );
-}
 
 function WithdrawalsTab({ token }: { token: string }) {
   const queryClient = useQueryClient();
@@ -2404,7 +2220,6 @@ function StatsTab({ token }: { token: string }) {
                   ["Surveys completed", String(u.surveysCompleted)],
                   ["All offers completed", String(u.offersCompleted)],
                   ["Check-ins", `${u.checkins} (${fmt(u.checkinCents)})`],
-                  ["Contest prizes won", fmt(u.contestPrizeCents)],
                   ["Referrals", String(u.referrals)],
                 ].map(([k, v]) => (
                   <div key={k}>
@@ -3561,8 +3376,6 @@ function SettingsTab({ token }: { token: string }) {
   const s = overview.data?.settings;
 
   const [googleClientId, setGoogleClientId] = useState("");
-  const [dailyPool, setDailyPool] = useState("");
-  const [affiliatePool, setAffiliatePool] = useState("");
   const [minWithdraw, setMinWithdraw] = useState("");
   const [userSharePct, setUserSharePct] = useState("");
   const [affiliateEarningPct, setAffiliateEarningPct] = useState("");
@@ -3571,8 +3384,6 @@ function SettingsTab({ token }: { token: string }) {
   const [theoremReachSecret, setTheoremReachSecret] = useState("");
   const [checkinGoal, setCheckinGoal] = useState("");
   const [checkinDays, setCheckinDays] = useState<string[]>(["", "", "", "", "", "", ""]);
-  const [dailyTiersText, setDailyTiersText] = useState("");
-  const [affiliateTiersText, setAffiliateTiersText] = useState("");
   const [centsPerLevel, setCentsPerLevel] = useState("");
   const [titleRows, setTitleRows] = useState<
     { name: string; level: string; standardPct: string; enhancedPct: string; reward: string }[]
@@ -3589,8 +3400,6 @@ function SettingsTab({ token }: { token: string }) {
   useEffect(() => {
     if (s && !hydrated) {
       setGoogleClientId(s.googleClientId);
-      setDailyPool((s.dailyPoolCents / 100).toFixed(2));
-      setAffiliatePool((s.affiliatePoolCents / 100).toFixed(2));
       setMinWithdraw((s.minWithdrawCents / 100).toFixed(2));
       setUserSharePct(String(s.userSharePct));
       setAffiliateEarningPct(String(s.affiliateEarningPct));
@@ -3598,8 +3407,6 @@ function SettingsTab({ token }: { token: string }) {
       setAdminUsername(s.adminUsername);
       setCheckinGoal((s.checkinGoalCents / 100).toFixed(2));
       setCheckinDays(s.checkinRewardsCents.map((c) => (c / 100).toFixed(2)));
-      setDailyTiersText(s.dailyTiersCents.map((c) => (c / 100).toFixed(2)).join(", "));
-      setAffiliateTiersText(s.affiliateTiersCents.map((c) => (c / 100).toFixed(2)).join(", "));
       setCentsPerLevel((s.levelCentsPerLevel / 100).toFixed(2));
       setTitleRows(
         s.levelTitles.map((t) => ({
@@ -3617,11 +3424,9 @@ function SettingsTab({ token }: { token: string }) {
 
   const save = useMutation({
     mutationFn: async () => {
-      const dailyPoolCents = toCents(dailyPool);
-      const affiliatePoolCents = toCents(affiliatePool);
       const minWithdrawCents = toCents(minWithdraw);
-      if (dailyPoolCents === null || affiliatePoolCents === null || minWithdrawCents === null)
-        throw new Error("Pool and minimum amounts must be valid dollar amounts.");
+      if (minWithdrawCents === null)
+        throw new Error("Minimum withdrawal must be a valid dollar amount.");
       const pct = (raw: string, label: string) => {
         const n = Number.parseInt(raw, 10);
         if (!Number.isFinite(n) || n < 0 || n > 100)
@@ -3635,22 +3440,6 @@ function SettingsTab({ token }: { token: string }) {
       const checkinRewardsCents = checkinDays.map((d) => toCents(d));
       if (checkinRewardsCents.some((c) => c === null))
         throw new Error("Every check-in day amount (Monday to Sunday) must be a valid dollar amount.");
-      // Contest prize tiers: comma-separated dollar amounts, rank 1 first.
-      const parseTiers = (text: string, label: string, max: number): number[] => {
-        const parts = text.split(/[\s,]+/).filter(Boolean);
-        if (parts.length === 0)
-          throw new Error(`${label}: enter at least one prize amount.`);
-        if (parts.length > max)
-          throw new Error(`${label}: at most ${max} ranks.`);
-        return parts.map((p) => {
-          const v = Number.parseFloat(p);
-          if (!Number.isFinite(v) || v < 0)
-            throw new Error(`${label}: "${p}" is not a valid prize amount.`);
-          return Math.round(v * 100);
-        });
-      };
-      const dailyTiersCents = parseTiers(dailyTiersText, "Daily contest tiers", 150);
-      const affiliateTiersCents = parseTiers(affiliateTiersText, "Affiliate contest tiers", 100);
       // Levels: earnings per level + the title table.
       const levelCentsPerLevel = toCents(centsPerLevel);
       if (levelCentsPerLevel === null || levelCentsPerLevel < 1)
@@ -3681,8 +3470,6 @@ function SettingsTab({ token }: { token: string }) {
       return api.adminUpdateSettings({
         adminToken: token,
         googleClientId: googleClientId.trim(),
-        dailyPoolCents,
-        affiliatePoolCents,
         minWithdrawCents,
         userSharePct: pct(userSharePct, "User share"),
         affiliateEarningPct: pct(affiliateEarningPct, "Affiliate earning commission"),
@@ -3691,8 +3478,6 @@ function SettingsTab({ token }: { token: string }) {
         theoremReachSecret: theoremReachSecret.trim() === "" ? undefined : theoremReachSecret.trim(),
         checkinGoalCents,
         checkinRewardsCents: checkinRewardsCents as number[],
-        dailyTiersCents,
-        affiliateTiersCents,
         levelCentsPerLevel,
         levelTitles,
         socialDiscord: (social["discord"] ?? "").trim(),
@@ -3842,14 +3627,6 @@ function SettingsTab({ token }: { token: string }) {
           <h2 className="font-display text-lg font-bold">Money</h2>
           <div className="mt-3 grid gap-4 sm:grid-cols-3">
             <div>
-              <label htmlFor="set-daily" className="text-sm font-semibold">Daily contest pool ($)</label>
-              <input id="set-daily" value={dailyPool} onChange={(e) => setDailyPool(e.target.value)} inputMode="decimal" className={fieldCls} />
-            </div>
-            <div>
-              <label htmlFor="set-aff" className="text-sm font-semibold">Affiliate contest pool ($)</label>
-              <input id="set-aff" value={affiliatePool} onChange={(e) => setAffiliatePool(e.target.value)} inputMode="decimal" className={fieldCls} />
-            </div>
-            <div>
               <label htmlFor="set-min" className="text-sm font-semibold">Minimum withdrawal ($)</label>
               <input id="set-min" value={minWithdraw} onChange={(e) => setMinWithdraw(e.target.value)} inputMode="decimal" className={fieldCls} />
             </div>
@@ -3908,45 +3685,6 @@ function SettingsTab({ token }: { token: string }) {
           </div>
         </section>
 
-        <section className="rounded-3xl bg-[var(--surface)] p-5 ring-1 ring-[var(--border)] sm:p-6">
-          <h2 className="font-display text-lg font-bold">Contest prize tiers</h2>
-          <p className="mt-1 text-sm leading-relaxed text-[var(--dim)]">
-            The prize for each rank, in dollars, separated by commas — rank 1
-            first. These are the exact amounts recorded for the winners (you
-            pay them from Contest Payouts) and shown on the Leaderboard. Keep
-            the totals in line with the pools above: the built-in Daily table
-            sums to $100 over 100 ranks, the Affiliate table to $1,500 over
-            25 ranks.
-          </p>
-          <div className="mt-3">
-            <label htmlFor="set-daily-tiers" className="text-sm font-semibold">
-              Daily contest tiers ($) — total{" "}
-              ${dailyTiersText.split(/[\s,]+/).filter(Boolean).reduce((sum, p) => sum + (Number.parseFloat(p) || 0), 0).toFixed(2)}
-              {" "}over {dailyTiersText.split(/[\s,]+/).filter(Boolean).length} ranks
-            </label>
-            <textarea
-              id="set-daily-tiers"
-              value={dailyTiersText}
-              onChange={(e) => setDailyTiersText(e.target.value)}
-              rows={3}
-              className={fieldCls}
-            />
-          </div>
-          <div className="mt-4">
-            <label htmlFor="set-aff-tiers" className="text-sm font-semibold">
-              Affiliate contest tiers ($) — total{" "}
-              ${affiliateTiersText.split(/[\s,]+/).filter(Boolean).reduce((sum, p) => sum + (Number.parseFloat(p) || 0), 0).toFixed(2)}
-              {" "}over {affiliateTiersText.split(/[\s,]+/).filter(Boolean).length} ranks
-            </label>
-            <textarea
-              id="set-aff-tiers"
-              value={affiliateTiersText}
-              onChange={(e) => setAffiliateTiersText(e.target.value)}
-              rows={3}
-              className={fieldCls}
-            />
-          </div>
-        </section>
 
         <section className="rounded-3xl bg-[var(--surface)] p-5 ring-1 ring-[var(--border)] sm:p-6">
           <h2 className="font-display text-lg font-bold">Levels &amp; Title Rewards</h2>

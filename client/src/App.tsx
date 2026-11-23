@@ -1,9 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { SafeAreaTopScrim } from "@hatch/space-sdk/client";
-import { actionFields } from "@hatch/space-sdk/fields" with { type: "macro" };
 import { api, type ApiResponse } from "./api";
-import type { Actions } from "../../server/src/actions";
 import {
 Icons,
 captureReferralCode,
@@ -25,7 +23,6 @@ import { Dashboard, type DashboardTab } from "./Dashboard";
 import { Admin } from "./Admin";
 import squirrelMascot from "./assets/squirrel-mascot.png";
 
-const FIELDS = actionFields<typeof Actions>();
 
 type HomeData = ApiResponse<typeof api, "getPublicHome">;
 type ContentItem = HomeData["featuredGames"][number];
@@ -766,12 +763,6 @@ export function App() {
           </a>
           <div className="mt-6 flex flex-wrap justify-center gap-2 text-[13px] font-semibold lg:justify-start">
             <span className="rounded-full bg-[var(--pill)] px-3 py-1.5 text-[var(--text)] ring-1 ring-[var(--border)]">
-              🏆 Daily pool {home.data ? fmt(home.data.dailyPoolCents) : "…"}
-            </span>
-            <span className="rounded-full bg-[var(--pill)] px-3 py-1.5 text-[var(--text)] ring-1 ring-[var(--border)]">
-              👥 Affiliate pool {home.data ? fmt(home.data.affiliatePoolCents) : "…"}
-            </span>
-            <span className="rounded-full bg-[var(--pill)] px-3 py-1.5 text-[var(--text)] ring-1 ring-[var(--border)]">
               💵 Min. withdrawal {home.data ? fmt(home.data.minWithdrawCents) : "…"}
             </span>
           </div>
@@ -818,7 +809,7 @@ export function App() {
           </section>
         ) : (
           <>
-            {/* Offers, Surveys, Playtime/Games and Leaderboard live ONLY
+            {/* Offers, Surveys and Playtime/Games live ONLY
                 inside the signed-in dashboard — never on this pre-login
                 page (owner order). The public page is: hero + sign-in,
                 how it works, redeem, FAQ, recent payouts. */}
@@ -956,7 +947,6 @@ export function App() {
             <p className="font-display text-sm font-bold uppercase tracking-wide text-white/50">Services</p>
             <ul className="mt-3 space-y-2.5 text-sm font-semibold text-white/85">
               <li><button type="button" className="hover:text-white" onClick={() => goApp("help")}>Support</button></li>
-              <li><button type="button" className="hover:text-white" onClick={() => goApp("leaderboard")}>Challenge</button></li>
               <li><button type="button" className="hover:text-white" onClick={() => goApp("invite")}>Affiliate</button></li>
             </ul>
           </nav>
