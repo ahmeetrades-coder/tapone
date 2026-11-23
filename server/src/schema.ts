@@ -340,8 +340,8 @@ export const partnerCallbacks = sqliteTable("partner_callbacks", {
   //            joined as name=value&name=value (the original scheme)
   //   colon  — hex HMAC of "{user}:{txn}:{payout}" — the user ID,
   //            transaction ID and payout values joined with colons, in
-  //            that order (the scheme Offerwall.GG uses).
-  sigFormat: text("sig_format", { enum: ["params", "colon"] })
+  //            that order (the scheme Offerwall.GG uses).   //   moonetix — HMAC-SHA256 of "{txn}:{user}:{payout}:{status}".
+  sigFormat: text("sig_format", { enum: ["params", "colon", "moonetix"] })
     .notNull()
     .default("params"),
   // Units of the partner's payout that make $1 (1 = the payout already
