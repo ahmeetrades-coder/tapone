@@ -506,10 +506,118 @@ type StaticPageContent = { title: string; body: string[]; sections?: { heading: 
   privacy: {
     title: "Privacy Policy",
     body: [
-      "Last updated: 23 November 2026. TapOne launched on 19 November 2026. If you have any question about this policy, contact us at info@tapone.store or through Help inside your account.", ], sections: [ { heading: "1. What we collect", body: [ "When you sign in with Google we store your name, email address and profile picture so we can run your account. We also give you a unique Offer Token (your TapOne user ID), which is shown in your Profile.", "We record the IP address of your sign-in connection, and the country derived from it. Your country decides which offers, surveys, games and payment methods you see, and it cannot be changed manually.", "We keep a record of your earnings, withdrawals, level and check-in progress, referrals, and the messages you send us through Help, so payments can be reviewed and paid correctly.", "We store only the settings needed to run the site: your dark/light choice and your referral code when you arrive from an invite link.", ], }, { heading: "2. How we use your information", body: [ "To run your account, match offers and payment methods to your country, credit your earnings, and review and pay your withdrawals.", "To prevent fraud: VPN and proxy connections are not allowed, and accounts using fake details, emulators or location-spoofing can be blocked.", "To reply to the messages you send us through Help, and to tell the admin when a new user registers.", ], }, { heading: "3. What we share", body: [ "We do not sell your personal information.", "Partner offerwalls and survey providers receive only your TapOne user ID (your Offer Token) so that a completed offer or survey can be credited to your account. They do not receive your email address, IP address or payment details from us.", "Your payment details are shared only with the payment method you choose when you request a withdrawal, so that the payment can be sent to you.", ], },
-      { heading: "4. Cookies", body: [ "TapOne uses only the cookies and local storage needed to keep you signed in, remember your dark/light choice and keep your referral code when you arrive from an invite link.", "Partner offerwalls may set their own cookies when you open them, so completed offers can be credited to your account through the postback system.", "You can clear cookies in your browser at any time; you will simply need to sign in again.", ], }, { heading: "5. Your choices", body: [ "You can change your profile picture from your Profile, and you can change your username up to 3 times in your lifetime. Your country, flag and IP address are detected automatically from your sign-in connection and cannot be changed by you — they are visible only to the admin.", "You can sign out at any time. If you want your account reviewed, contact us through Help inside your account.", ], }, { heading: "6. Data safety", body: [ "Your data is stored on TapOne's server and is used only to run the site. Only the site owner (admin) can see users' full details, including IP address and country, so that payments and fraud can be checked.", ], },
-      { heading: "7. Contact", body: [ "For any privacy question, email info@tapone.store or send a message through Help inside your account.", ], },
-       
+      "Last updated: 23 November 2026. TapOne launched on 19 November 2026. TapOne is available to users worldwide, including users in the European Union and in California, USA. This policy explains what personal data we collect, why we collect it, who we share it with, how long we keep it, and the rights you have over your data under the EU General Data Protection Regulation (GDPR) and the California Consumer Privacy Act (CCPA), as amended by the California Privacy Rights Act (CPRA). If you have any question about this policy, contact us at info@tapone.store or through Help inside your account.",
+    ],
+    sections: [
+      {
+        heading: "1. Who we are",
+        body: [
+          "TapOne is a rewards website operated by Mohammed Ahmed. You can contact us about privacy at info@tapone.store or through Help inside your account.",
+          "TapOne is the data controller for the personal data described in this policy. Our partner offerwalls and survey providers are separate controllers for the data they collect on their own pages, and their own privacy policies apply there.",
+        ],
+      },
+      {
+        heading: "2. What we collect",
+        body: [
+          "When you sign in with Google we store your name, email address and profile picture so we can run your account. We also give you a unique Offer Token (your TapOne user ID), which is shown in your Profile.",
+          "We record the IP address of your sign-in connection, and the country derived from it. Your country decides which offers, surveys, games and payment methods you see, and it cannot be changed manually.",
+          "We keep a record of your earnings, withdrawals, level and check-in progress, referrals, and the messages you send us through Help, so payments can be reviewed and paid correctly.",
+          "We store only the settings needed to run the site: your dark/light choice and your referral code when you arrive from an invite link.",
+          "We do not collect sensitive personal information such as your precise location, health information, or government ID numbers. We do not knowingly collect personal data from children under 16; if we learn that we have, we will delete it.",
+        ],
+      },
+      {
+        heading: "3. How we use your information",
+        body: [
+          "To run your account, match offers and payment methods to your country, credit your earnings, and review and pay your withdrawals.",
+          "To prevent fraud: VPN and proxy connections are not allowed, and accounts using fake details, emulators or location-spoofing can be blocked.",
+          "To reply to the messages you send us through Help, and to tell the admin when a new user registers.",
+          "To improve TapOne and to meet our payment and record-keeping duties.",
+        ],
+      },
+      {
+        heading: "4. Lawful basis for processing (GDPR)",
+        body: [
+          "Consent: when you tick the box on the registration page agreeing to this Privacy Policy and our Terms of Service, you consent to us processing your data as described here. You can withdraw your consent at any time (see section 11).",
+          "Contract: we process your account, earnings and withdrawal data because it is needed to provide the TapOne service you signed up for.",
+          "Legitimate interests: we process IP address, country and completion records to prevent fraud, to pay the right person, and to keep TapOne secure.",
+          "Legal obligation: we keep withdrawal and payment records for as long as needed for accounting and payment review.",
+        ],
+      },
+      {
+        heading: "5. What we share",
+        body: [
+          "We do not sell your personal information, and we do not share your personal information for cross-context behavioural advertising.",
+          "Partner offerwalls and survey providers receive only your TapOne user ID (your Offer Token) so that a completed offer or survey can be credited to your account. They do not receive your email address, IP address or payment details from us.",
+          "When you open a partner offerwall or survey, that partner may collect data directly from you on its own pages under its own privacy policy. TapOne does not control that collection.",
+          "Your payment details are shared only with the payment method you choose when you request a withdrawal, so that the payment can be sent to you.",
+          "We share data with Google only to sign you in with your Google account. We do not share your data with anyone else except when the law requires it.",
+        ],
+      },
+      {
+        heading: "6. Cookies",
+        body: [
+          "TapOne uses only the cookies and local storage needed to keep you signed in, remember your dark/light choice and keep your referral code when you arrive from an invite link.",
+          "Partner offerwalls may set their own cookies when you open them, so completed offers can be credited to your account through the postback system.",
+          "You can clear cookies in your browser at any time; you will simply need to sign in again.",
+        ],
+      },
+      {
+        heading: "7. Data retention",
+        body: [
+          "We keep your account data for as long as your account is active and you keep using TapOne.",
+          "Earnings and withdrawal records are kept for as long as needed to review and pay withdrawals and to keep payment records, even after an account is closed.",
+          "When you ask us to delete your data, we will delete what we can and tell you about anything we must keep for payment, fraud or legal reasons.",
+        ],
+      },
+      {
+        heading: "8. Data safety",
+        body: [
+          "Your data is stored on TapOne's server and is used only to run the site. Only the site owner (admin) can see users' full details, including IP address and country, so that payments and fraud can be checked.",
+          "We take reasonable steps to protect your data, but no website can guarantee complete security. If you think your account has been misused, contact us through Help inside your account.",
+        ],
+      },
+      {
+        heading: "9. Your rights under the GDPR (EU users)",
+        body: [
+          "If you are in the European Union or the United Kingdom, you have the right to ask us for a copy of your personal data, to correct data that is wrong, and to ask us to delete your data or to limit how we use it.",
+          "You also have the right to receive your data in a portable form, to object to processing based on legitimate interests, and to withdraw your consent at any time. Withdrawing consent does not make past processing unlawful.",
+          "You have the right to complain to your local data protection authority if you think we have handled your data unfairly.",
+          "To exercise any of these rights, email info@tapone.store or send a message through Help inside your account. We will answer within one month, and we may ask you to confirm your identity from your signed-in account so we do not give your data to someone else.",
+        ],
+      },
+      {
+        heading: "10. Your rights under the CCPA and CPRA (California users)",
+        body: [
+          "If you are a California resident, you have the right to know what personal information we collect about you, the categories and sources of that information, why we collect it, and who we share it with. This policy gives you that information in sections 2, 3 and 5.",
+          "You have the right to ask us to delete your personal information and to correct information that is wrong, subject to the payment and fraud records described in section 7.",
+          "You have the right to opt out of the sale or sharing of your personal information. TapOne does not sell your personal information and does not share it for cross-context behavioural advertising, so there is nothing to opt out of, but you can still send us an opt-out request and we will confirm it.",
+          "We do not collect sensitive personal information, and we do not use or disclose sensitive personal information, so the CCPA right to limit the use of sensitive personal information does not apply.",
+          "We will not discriminate against you for exercising any CCPA right. We will not charge you a different price, give you a different quality of service, or deny you TapOne because you exercised a right.",
+          "To exercise any of these rights, email info@tapone.store or send a message through Help inside your account. We will verify your request from your signed-in account and answer within 45 days, as the CCPA requires. You may also use an authorised agent, who must show written permission from you.",
+        ],
+      },
+      {
+        heading: "11. Your choices and withdrawing consent",
+        body: [
+          "You can change your profile picture from your Profile, and you can change your username up to 3 times in your lifetime. Your country, flag and IP address are detected automatically from your sign-in connection and cannot be changed by you — they are visible only to the admin.",
+          "You can sign out at any time. If you want your account and data reviewed or deleted, contact us through Help inside your account or at info@tapone.store.",
+          "You can withdraw your consent at any time by asking us to close your account. TapOne needs the data in section 2 to run your account, credit earnings and pay withdrawals, so closing your account ends the service.",
+        ],
+      },
+      {
+        heading: "12. Changes to this policy",
+        body: [
+          "We may update this policy when TapOne changes or when privacy law changes. The date at the top of this page shows the latest version.",
+          "If you keep using TapOne after a change, you accept the updated policy. If a change affects your rights, we will point it out on the site.",
+        ],
+      },
+      {
+        heading: "13. Contact",
+        body: [
+          "For any privacy question, or to exercise any right in sections 9, 10 or 11, email info@tapone.store or send a message through Help inside your account.",
+        ],
+      },
     ],
   },
   terms: {
