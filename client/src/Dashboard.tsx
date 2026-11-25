@@ -1440,6 +1440,10 @@ function FeedGamePopup({
       api.getOfferwallGgGameDetail({
         token,
         offerId: game.offerId ?? "",
+        // The card's own total: the server uses it as a last resort
+        // to recover the placement exchange rate, because the detail
+        // endpoint returns no currency block of its own.
+        totalCents: game.payoutCents,
       }),
     enabled: hasDetail,
     staleTime: 60_000,
