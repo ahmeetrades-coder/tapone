@@ -1232,18 +1232,25 @@ function GameCard({
 /**
  * One game from a partner's own items feed (listGameFeed): the same
  * card as an admin-added game — artwork, title, payout — but tapping
- * opens that game's own link directly, exactly like a survey card
- * (feed games carry no milestone table, so there is no popup).
+ * it now opens the payout popup first (FeedGamePopup), exactly like
+ * an admin-added game, instead of jumping straight out to the
+ * game's own link. PLAY AND EARN inside the popup is what opens
+ * the link.
  */
-function FeedGameCard({ game }: { game: FeedGame }) {
+function FeedGameCard({
+  game,
+  onOpen,
+}: {
+  game: FeedGame;
+  onOpen: () => void;
+}) {
   const [imgOk, setImgOk] = useState(true);
   const art = game.imageUrl ?? game.providerImageUrl;
   const title = game.title ?? game.provider;
   return (
-    <a
-      href={game.url}
-      target="_blank"
-      rel="noreferrer"
+    <button
+      type="button"
+      onClick={onOpen}
       role="listitem"
       aria-label={`${title} — earn ${fmt(game.payoutCents)}`}
       className="w-36 flex-none overflow-hidden rounded-2xl bg-[var(--surface)] text-left ring-1 ring-[var(--border)] transition hover:ring-[var(--brand)] sm:w-44"
@@ -1274,7 +1281,7 @@ function FeedGameCard({ game }: { game: FeedGame }) {
           </span>
         </span>
       </span>
-    </a>
+    </button>
   );
 }
 
@@ -1406,6 +1413,184 @@ function GamePopup({
   );
 }
 
+/**
+ * Detail popup for a FEED game (listGameFeed): tapping a feed card no
+ * longer jumps straight out to the game's link. It opens this popup
+ * INSIDE TapOne first — the same green header / thumbnail / PLAY AND
+ * EARN shell as GamePopup — with the payout ladder fetched live from
+ * Offerwall.GG (getOfferwallGgGameDetail → goals): one row per step,
+ * each with the dollars the user earns for it, and a Total row. A
+ * single-step game has no goals, so the popup shows the total only —
+ * no levels are ever invented. PLAY AND EARN opens the game's link.
+ */
+function FeedGamePopup({
+  game,
+  token,
+  onClose,
+}: {
+  game: FeedGame;
+  token: string;
+  onClose: () => void;
+}) {
+  const title = game.title ?? game.provider;
+  const hasDetail = game.offerId != null;
+  const detail = useQuery({
+    queryKey: ["game-detail", game.key],
+    queryFn: () =>
+      api.getOfferwallGgGameDetail({
+        token,
+        offerId: game.offerId ?? "",
+      }),
+    enabled: hasDetail,
+    staleTime: 60_000,
+  });
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  const d = detail.data;
+  const goals = d?.found ? d.goals : [];
+  // Steps this user already completed for this game (from their
+  // credited Offerwall.GG postbacks): ticked in the table below.
+  // The set is empty until a goal actually pays — ticks are never
+  // shown from guesswork. Requires the Offerwall.GG dashboard
+  // callback URL to carry &offerId={offerId}&goalId={goalId}.
+  const completed = new Set(d?.completedGoalIds ?? []);
+  const total = d?.found ? d.totalCents : game.payoutCents;
+  const art = d?.imageUrl ?? game.imageUrl ?? game.providerImageUrl;
+  const playUrl = d?.url ?? game.url;
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 sm:items-center sm:p-6"
+      role="dialog"
+      aria-modal="true"
+      aria-label={title}
+      onClick={onClose}
+    >
+      <div
+        className="max-h-[92vh] w-full max-w-lg overflow-y-auto rounded-t-3xl bg-[var(--surface)] shadow-2xl sm:rounded-3xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between gap-3 bg-green-600 px-5 py-4 text-white">
+          <h2 className="min-w-0 truncate font-display text-lg font-extrabold">
+            {title}
+          </h2>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            className="flex h-9 w-9 flex-none items-center justify-center rounded-full bg-white/15 transition hover:bg-white/25"
+          >
+            {Icons.x("h-5 w-5")}
+          </button>
+        </div>
+        {art && (
+          <img
+            src={art}
+            alt={title}
+            className="aspect-video w-full object-cover"
+          />
+        )}
+        <div className="px-5 py-4">
+          <p className="text-xs font-bold uppercase tracking-wide text-[var(--dim)]">
+            {game.provider}
+          </p>
+          {d?.description && (
+            <p className="mt-2 text-sm leading-relaxed text-[var(--dim)]">
+              {d.description}
+            </p>
+          )}
+          {d?.requirements && (
+            <p className="mt-2 text-sm leading-relaxed text-[var(--dim)]">
+              <span className="font-bold text-[var(--text)]">
+                Requirements:{" "}
+              </span>
+              {d.requirements}
+            </p>
+          )}
+          {hasDetail && detail.isPending ? (
+            <p className="mt-4 text-sm font-semibold text-[var(--dim)]">
+              Loading payout steps…
+            </p>
+          ) : hasDetail && (detail.isError || (d && !d.found)) ? (
+            <p className="mt-4 text-sm font-semibold text-[var(--dim)]">
+              Couldn&apos;t load the payout steps for this game — the total
+              below is still what you can earn.
+            </p>
+          ) : null}
+          {goals.length > 0 ? (
+            <table className="mt-4 w-full text-sm">
+              <thead>
+                <tr className="border-b border-[var(--border)] text-left text-xs font-extrabold uppercase tracking-wide text-[var(--dim)]">
+                  <th scope="col" className="py-2 pr-3">Event</th>
+                  <th scope="col" className="py-2 text-right">Cash</th>
+                </tr>
+              </thead>
+              <tbody>
+                {goals.map((m, i) => {
+                  const done = m.goalId !== "" && completed.has(m.goalId);
+                  return (
+                  <tr
+                    key={`${m.event}-${i}`}
+                    className="border-b border-[var(--border)]/60"
+                  >
+                    <td className="py-2.5 pr-3 font-semibold text-[var(--text)]">
+                      {m.event}
+                      {m.optional && (
+                        <span className="ml-2 rounded-full bg-[var(--surface-2)] px-2 py-0.5 text-[11px] font-bold text-[var(--dim)]">
+                          Bonus
+                        </span>
+                      )}
+                      {done && (
+                        <span className="ml-2 rounded-full bg-green-600 px-2 py-0.5 text-[11px] font-bold text-white">
+                          ✓ Done
+                        </span>
+                      )}
+                    </td>
+                    <td className="py-2.5 text-right font-display font-extrabold text-green-600 dark:text-green-400">
+                      {fmt(m.amountCents)}
+                    </td>
+                  </tr>
+                  );
+                })}
+              </tbody>
+              <tfoot>
+                <tr>
+                  <td className="py-2.5 pr-3 font-display font-extrabold text-[var(--text)]">
+                    Total
+                  </td>
+                  <td className="py-2.5 text-right font-display font-extrabold text-green-600 dark:text-green-400">
+                    {fmt(total)}
+                  </td>
+                </tr>
+              </tfoot>
+            </table>
+          ) : total > 0 ? (
+            <p className="mt-4 text-sm font-semibold text-[var(--dim)]">
+              Complete this game to earn{" "}
+              <span className="font-display font-extrabold text-green-600 dark:text-green-400">
+                {fmt(total)}
+              </span>
+              .
+            </p>
+          ) : null}
+          <a
+            href={playUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="mt-5 block rounded-full bg-green-600 px-6 py-3.5 text-center font-display text-base font-extrabold uppercase tracking-wide text-white transition hover:bg-green-700"
+          >
+            Play and Earn {fmt(total)}
+          </a>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 type GameEntry =
   | { source: "admin"; name: string; platform: string; item: GameItem }
   | { source: "feed"; name: string; platform: string; item: FeedGame };
@@ -1462,6 +1647,7 @@ function GamesSection({ token }: { token: string }) {
     ),
   ];
   const [openId, setOpenId] = useState<number | null>(null);
+  const [openFeed, setOpenFeed] = useState<FeedGame | null>(null);
 
   // No partner filter: the Games tab shows individual games only
   // (owner order 2026-11-25) — there is no "Gaming Partners"
@@ -1482,7 +1668,11 @@ function GamesSection({ token }: { token: string }) {
         onOpen={() => setOpenId(entry.item.id)}
       />
     ) : (
-      <FeedGameCard key={key} game={entry.item} />
+      <FeedGameCard
+        key={key}
+        game={entry.item}
+        onOpen={() => setOpenFeed(entry.item)}
+      />
     );
 
   return (
@@ -1551,6 +1741,13 @@ function GamesSection({ token }: { token: string }) {
       )}
       {openItem && (
         <GamePopup item={openItem} onClose={() => setOpenId(null)} />
+      )}
+      {openFeed && (
+        <FeedGamePopup
+          game={openFeed}
+          token={token}
+          onClose={() => setOpenFeed(null)}
+        />
       )}
     </div>
   );
