@@ -920,7 +920,7 @@ const hashLegalPage: "terms" | "privacy" | null = hash === "#/terms" ? "terms" :
             {/* Offers, Surveys and Playtime/Games live ONLY
                 inside the signed-in dashboard — never on this pre-login
                 page (owner order). The public page is: hero + sign-in,
-                how it works, redeem, FAQ, recent payouts. */}
+                how it works, FAQ, recent payouts. */}
 
             {/* how it works */}
             <section className="pb-10" aria-label="How it works">
@@ -949,27 +949,6 @@ const hashLegalPage: "terms" | "privacy" | null = hash === "#/terms" ? "terms" :
                     <p className="mt-1.5 text-sm leading-relaxed text-[var(--dim)]">{step.text}</p>
                   </div>
                 ))}
-              </div>
-            </section>
-
-            {/* redeem — Start earning now (2nd place, like RewardJoy) */}
-            <section className="pb-10" aria-label="Redeem">
-              <div className="rounded-3xl bg-[var(--pill)] p-6 ring-1 ring-[var(--border)] sm:p-8">
-                <h2 className="font-display text-2xl font-extrabold sm:text-3xl">Redeem your earnings</h2>
-                <p className="mt-2 max-w-xl text-sm leading-relaxed text-[var(--dim)]">
-                  When your balance reaches the minimum withdrawal
-                  ({home.data ? fmt(home.data.minWithdrawCents) : "$5"}),
-                  cash out to Easypaisa, JazzCash, PayPal, bank transfer, Wise,
-                  Payoneer, UPI or Binance USDT — the methods available to you
-                  are shown in your account. No deposits, ever: you only redeem
-                  what you earned.
-                </p>
-                <a
-                  href="#signup"
-                  className="mt-5 inline-flex items-center rounded-full bg-[var(--brand)] px-8 py-3.5 font-display text-base font-bold text-white shadow-lg shadow-[var(--brand)]/30 transition hover:bg-[var(--brand-deep)]"
-                >
-                  Start earning now
-                </a>
               </div>
             </section>
 
