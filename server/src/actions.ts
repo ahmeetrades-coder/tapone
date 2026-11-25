@@ -1668,9 +1668,10 @@ async function getOfferwallGgPerUsd(
  * (SINGULAR) keeps only games — the API returns 0 offers for
  * `category=games` (plural) for every country/device, and 37
  * offers for PK/Android with `category=game` (API test, live,
- * 2026-11-25; the key itself was fine, no 401/403). No surveys:
- * Offerwall.GG separate surveys were expressly forbidden by the
- * owner, 2026-11-23, and this adapter never asks for them. The
+ * 2026-11-25; the key itself was fine, no 401/403). Surveys live
+ * in their own adapter (offerwallGgSurveys, GET /api/v1/surveys)
+ * — the 2026-11-23 no-surveys order was superseded by the owner
+ * on 2026-11-25; this adapter still never asks for them. The
  * per-offer `clickUrl` is only returned
  * when userId is passed, so tapping a card opens that one game
  * through Offerwall.GG's click tracker and the completion credits
@@ -1779,6 +1780,163 @@ async function offerwallGgGames(
     .map((raw, i) => mapOfferwallGgOffer(raw, i, partner, perUsd, ctx.sharePct))
     .filter((s): s is SurveyFeedItem => s !== null);
   offerwallGgGamesCache.set(cacheKey, { at: Date.now(), items });
+  return items;
+}
+
+// Per-user cache for the Offerwall.GG surveys feed — same 120 s
+// per user+device as games (the panels keep a list for a few
+// minutes per user anyway; /surveys is rate-limited separately).
+const offerwallGgSurveysCache = new Map<
+  string,
+  { at: number; items: SurveyFeedItem[] }
+>();
+
+/**
+ * Offerwall.GG surveys feed — a SEPARATE endpoint from the offers
+ * catalogue (offerwall.gg/developers, OpenAPI 3.1, tag "Surveys"):
+ *
+ *   GET https://offerwall.gg/api/v1/surveys?appId=<public key>
+ *       &userId=<Offer Token>&ip=<sign-in IP>&country=<locked country>
+ *       &device=android|iphone&userAgent=…&limit=50
+ *   Header: X-Api-Key: <secret key from Admin → Settings>
+ *
+ * NOT /api/v1/offers?category=survey(s): the offers endpoint has
+ * no survey category that returns these panels' surveys — the
+ * dedicated /surveys endpoint is the only route, and it is the
+ * one the wall itself draws its Surveys tab from. userId, ip and
+ * country are REQUIRED (missing any of them = HTTP 422); the
+ * panels match per person from the ip / country / userAgent WE
+ * send, so each user sees the surveys matched to THEIR country/IP
+ * — the same rule as the wall and the games feed. userAgent is
+ * strongly recommended: without it the panels see the server's
+ * own agent, treat it as a bot, and return nothing per-user.
+ *
+ * RESPONSE (data.surveys[], data.currency, data.user):
+ *   { id, title ("Survey · 12 min"), description, image,
+ *     lengthMinutes (null when the panel does not say),
+ *     rating (null when unpublished),
+ *     payoutUsd (what the placement earns, in USD),
+ *     reward (the same amount in the placement's currency),
+ *     rewardFormatted, rewardIsVariable, clickUrl }
+ * There is NO panel/provider name or logo field on a survey — the
+ * survey's own `image` is the only picture the API returns (and
+ * the worked example in the spec has image: ""), so the card
+ * falls back to the Offerwall.GG logo from the Content row
+ * (SurveyCard already does imageUrl ?? providerImageUrl).
+ * Prime Survey / CPX / any other panel are therefore NOT
+ * identified per survey — do not claim a card shows "the Prime
+ * Survey logo" unless the API starts returning one.
+ *
+ * PAYOUT — same one-step formula as the games mapper, read from
+ * the live callback code, not guessed:
+ *   - The postback sends currencyAmount in the placement's
+ *     currency; payout = currencyAmount / payoutDivisor (1000);
+ *     applyRewardCredit credits round(payout * 100 * share/100).
+ *   - payoutUsd IS that gross in dollars (reward / perUsd), so
+ *     userCents = round(payoutUsd * sharePct). Worked example
+ *     from the spec: payoutUsd 0.875, reward 875, perUsd 1000 →
+ *     userCents = round(0.875 * 70) = 61¢ — exactly what the
+ *     postback credits (875 units → $0.875 → 61¢). The reward /
+ *     perUsd path is kept only as a fallback for a survey that
+ *     carries no payoutUsd. The 70% is applied ONCE here; routing
+ *     through mapFeedSurvey would read `reward` as DOLLARS
+ *     (875 → $875 gross → $612.50 on the card), which is why this
+ *     adapter has its own mapper.
+ *   - NO $1 minimum (owner rule 2026-11-25): surveys typically
+ *     pay $0.10–$2.00, so every survey that rounds to at least 1¢
+ *     for the user lists. Dropped only: no clickUrl, no positive
+ *     payout, or a user share that rounds to $0.00 (that would
+ *     credit $0.00 — the same $0 rule as everywhere else).
+ * Click opens the survey's clickUrl in a new tab (SurveyCard
+ * already does this); completion credits through the existing
+ * Offerwall.GG partner callback (colon, divisor 1000) — no new
+ * callback, no popup, no levels: surveys are click-and-open.
+ */
+function mapOfferwallGgSurvey(
+  raw: unknown,
+  index: number,
+  partner: { name: string; imageUrl: string | null },
+  perUsd: number,
+  sharePct: number,
+): SurveyFeedItem | null {
+  const rec = feedRecord(raw);
+  if (!rec) return null;
+  const clickUrl = feedStr(rec, ["clickUrl", "click_url"]);
+  if (!clickUrl || !/^https?:\/\//i.test(clickUrl)) return null;
+  // payoutUsd first (direct gross dollars); reward/perUsd fallback.
+  const payoutUsd = feedNum(rec, ["payoutUsd", "payout_usd"]);
+  const reward = feedNum(rec, ["reward"]);
+  const userCents =
+    payoutUsd != null && payoutUsd > 0
+      ? Math.round(payoutUsd * sharePct)
+      : reward != null && reward > 0 && Number.isFinite(perUsd) && perUsd > 0
+        ? Math.round((reward / perUsd) * sharePct)
+        : null;
+  if (userCents == null || userCents < 1) return null;
+  const mins = feedNum(rec, [
+    "lengthMinutes",
+    "length_minutes",
+    "length",
+    "minutes",
+    "loi",
+    "duration",
+  ]);
+  const surveyId = feedStr(rec, ["id", "survey_id"]) ?? String(index);
+  return {
+    key: `Offerwall.GG:survey:${surveyId}:${index}`,
+    // No popup for surveys: no numeric offer id is ever needed.
+    offerId: null,
+    provider: partner.name,
+    providerImageUrl: partner.imageUrl,
+    // The survey's own image when the panel sent one (often ""); the
+    // card falls back to the Offerwall.GG logo when this is null.
+    imageUrl: feedStr(rec, ["image", "image_url", "thumbnail_url", "thumbnail", "icon"]),
+    title: feedStr(rec, ["title", "name"]),
+    payoutCents: userCents,
+    minutes: mins != null && mins > 0 && mins <= 600 ? Math.round(mins) : null,
+    url: clickUrl,
+  };
+}
+
+async function offerwallGgSurveys(
+  item: ContentRow,
+  user: UserRow,
+  ctx: PartnerFeedCtx,
+): Promise<SurveyFeedItem[]> {
+  if (!ctx.offerwallggApiKey || !ctx.offerwallggAppId) return [];
+  // /surveys is 422 without the user's own ip + country — never
+  // call it with the server's identity (the panels would answer
+  // for the data centre and usually return nothing).
+  if (!user.ip || !user.countryCode) return [];
+  const cacheKey = `${user.id}:${ctx.device}`;
+  const cached = offerwallGgSurveysCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < 120_000) return cached.items;
+  const params = new URLSearchParams({
+    appId: ctx.offerwallggAppId,
+    userId: user.offerToken ?? user.userCode,
+    ip: user.ip,
+    country: user.countryCode,
+    device: ctx.device,
+    limit: "50",
+  });
+  if (ctx.userAgent) params.set("userAgent", ctx.userAgent);
+  const json = await fetchFeedJson(
+    `https://offerwall.gg/api/v1/surveys?${params.toString()}`,
+    { "X-Api-Key": ctx.offerwallggApiKey },
+  );
+  const dataRec = feedRecord(json)?.["data"];
+  const data = feedRecord(dataRec);
+  const perUsd = data ? feedNum(feedRecord(data["currency"]) ?? {}, ["perUsd"]) : null;
+  const list = data && Array.isArray(data["surveys"]) ? data["surveys"] : null;
+  if (!list || perUsd == null) return [];
+  const partner = {
+    name: item.provider || item.title,
+    imageUrl: item.imageUrl ?? null,
+  };
+  const items = list
+    .map((raw, i) => mapOfferwallGgSurvey(raw, i, partner, perUsd, ctx.sharePct))
+    .filter((s): s is SurveyFeedItem => s !== null);
+  offerwallGgSurveysCache.set(cacheKey, { at: Date.now(), items });
   return items;
 }
 
@@ -1961,6 +2119,12 @@ function surveyFeedForPartner(
   if (key.includes("theoremreach") || key.includes("theorem reach"))
     return theoremReachSurveys(item, user, ctx);
   if (key.includes("cpx")) return cpxSurveys(item, user, ctx);
+  // Offerwall.GG has its own Surveys API (see offerwallGgSurveys):
+  // its surveys come from GET /api/v1/surveys, never from the
+  // generic feed — the generic mapper would read its unit rewards
+  // as dollars (875 units → $875 on the card).
+  if (key.includes("offerwall.gg") || key.includes("offerwallgg"))
+    return offerwallGgSurveys(item, user, ctx);
   // No dedicated adapter: the generic feed still lists this
   // partner's individual surveys when the admin saved a Feed URL
   // for it; otherwise it contributes nothing here (its wall card
@@ -2823,13 +2987,39 @@ export const Actions = {
   listSurveyFeed: defineAction({
     description:
       "The signed-in user's individual surveys, pulled live from every active survey partner the admin has added (TheoremReach, CPX, …) and visible in the user's country: the partner matched them to this user's account/IP, and each entry carries that survey's own entry link, the payout the user will earn (their revenue share) and its length in minutes. Partner walls/websites are never returned — only individual surveys.",
-    request: z.object({ token: z.string().min(1).max(200) }),
+    request: z.object({
+      token: z.string().min(1).max(200),
+      // The visitor's device + user agent — the survey panels
+      // match per person from these (same as the Games tab).
+      device: z.enum(["android", "iphone"]).optional(),
+      userAgent: z.string().max(512).optional(),
+    }),
     response: z.object({ surveys: z.array(surveyFeedItemShape) }),
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
       const user = await requireUser(ctx, args.token);
       const settings = await getSettings(db);
       const sharePct = settingInt(settings, "user_share_pct") || 70;
+      const device: "android" | "iphone" =
+        args.device === "iphone" ? "iphone" : "android";
+      // Offerwall.GG's appId is the 32-character PUBLIC key in its
+      // own wall URL (Admin → Content → Offerwall.GG → Offer URL
+      // …/wall/<publicKey>?userId=…). It is public, never a secret.
+      // Same lookup as listGameFeed.
+      const wallRows = await db
+        .select()
+        .from(schema.contentItems)
+        .where(
+          and(
+            eq(schema.contentItems.kind, "offerwall"),
+            eq(schema.contentItems.active, 1),
+          ),
+        );
+      const offerwallGgWall = wallRows.find((r) =>
+        partnerKeyOf(r.provider, r.title).includes("offerwall.gg"),
+      );
+      const offerwallggAppId =
+        offerwallGgWall?.url.match(/\/wall\/([A-Za-z0-9]{32})/)?.[1] ?? "";
       const rows = await db
         .select()
         .from(schema.contentItems)
@@ -2854,9 +3044,9 @@ export const Actions = {
         sharePct,
         theoremReachSecret: settings["theoremreach_secret"] ?? "",
         offerwallggApiKey: settings["offerwallgg_api_key"] ?? "",
-        offerwallggAppId: "",
-        device: "android",
-        userAgent: "",
+        offerwallggAppId,
+        device,
+        userAgent: args.userAgent?.trim() ?? "",
       };
       const perPartner = await Promise.all(
         partners.map((p) => surveyFeedForPartner(p, user, feedCtx)),
