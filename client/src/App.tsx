@@ -1026,8 +1026,8 @@ const hashLegalPage: "terms" | "privacy" | null = hash === "#/terms" ? "terms" :
                   ))}
                 </ul>
               </section>
-            )}
-          <</>
+           )}
+          </>
         )}
       </main>
 
