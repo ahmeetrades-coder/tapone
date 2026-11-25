@@ -1662,13 +1662,14 @@ function mapOfferwallGgOffer(
   // credit. The old code rounded twice (gross to whole cents, then
   // 70% of that) and floored at 1 cent: a 7-coin reward is $0.007
   // gross, $0.0049 to the user, yet displayed $0.01 while crediting
-  // $0.00. Games whose true share is under a cent are dropped
-  // instead of listed. NOTE: this deliberately replaces the
-  // double-rounded payout, so a few displayed prices move by 1c
+  // $0.00. OWNER RULE 2026-11-25: no game under $1.00 lists at all —
+  // every $0.xx price ($0.01, $0.03, $0.25, any $0.xx) is dropped,
+  // only games paying $1.00+ show. NOTE: this deliberately replaces
+  // the double-rounded payout, so a few displayed prices move by 1c
   // (e.g. a 3577-coin game: $2.51 -> $2.50) — that is the exact
   // amount the user will actually be credited.
   const userCents = Math.round((reward / perUsd) * sharePct);
-  if (userCents <= 0) return null;
+  if (userCents < 100) return null;
   const offerId =
     feedStr(rec, ["id", "externalId", "offer_id"]) ?? String(index);
   return {
@@ -1925,7 +1926,15 @@ function gameFeedForPartner(
   // wall with an Items feed URL lists its individual games in the
   // Games tab exactly like survey partners list surveys. The row's
   // Category filter (e.g. "game") is applied inside genericFeedItems.
-  return genericFeedItems(item, user, ctx.sharePct);
+  // OWNER RULE 2026-11-25: no game under $1.00 lists — the same
+  // $1.00 minimum as mapOfferwallGgOffer, applied here as a filter
+  // (not inside mapFeedSurvey, which is SHARED with the Surveys tab
+  // and must keep listing sub-$1 surveys). At present no other game
+  // partner has a feed row, so this is future-proofing only.
+  // (gameFeedForPartner is not async, so the filter rides on .then.)
+  return genericFeedItems(item, user, ctx.sharePct).then((items) =>
+    items.filter((s) => s.payoutCents >= 100),
+  );
 }
 
 /**
