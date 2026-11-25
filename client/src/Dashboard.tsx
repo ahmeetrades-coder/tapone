@@ -896,9 +896,20 @@ type FeedGame = ApiResponse<typeof api, "listGameFeed">["games"][number];
  * here: tapping a survey card opens THAT survey directly.
  */
 function SurveysSection({ token }: { token: string }) {
+  // Surveys are matched per user AND per device by the panels, so
+  // the visitor's device + user agent ride along (same as Games).
+  // No popup here: tapping a survey card opens that survey
+  // directly in a new tab (SurveyCard), never a detail view.
+  const device = detectDevicePlatform();
   const query = useQuery({
-    queryKey: ["survey-feed", token],
-    queryFn: () => api.listSurveyFeed({ token }),
+    queryKey: ["survey-feed", token, device],
+    queryFn: () =>
+      api.listSurveyFeed({
+        token,
+        device: device === "ios" ? "iphone" : "android",
+        userAgent:
+          typeof navigator !== "undefined" ? navigator.userAgent : undefined,
+      }),
     staleTime: 60_000,
   });
   const surveys = query.data?.surveys ?? [];
