@@ -19,7 +19,7 @@ renderGoogleButton,
 setSessionToken,
 type NetworkInfo,
 } from "./lib";
-import { Dashboard, type DashboardTab } from "./Dashboard"; import { LiveCompletionsFeed, TopEarnersList } from "./LiveFeed";
+import { Dashboard, type DashboardTab } from "./Dashboard";
 import { Admin } from "./Admin";
 import squirrelMascot from "./assets/squirrel-mascot.png";
 
@@ -1027,7 +1027,7 @@ const hashLegalPage: "terms" | "privacy" | null = hash === "#/terms" ? "terms" :
                 </ul>
               </section>
             )}
-          <LiveCompletionsFeed /> <TopEarnersList /> </>
+          <</>
         )}
       </main>
 
