@@ -31,6 +31,11 @@ const DEFAULT_SETTINGS: Record<string, string> = {
   // Used ONLY to verify the HMAC-SHA1 signature on TheoremReach reward
   // callbacks; empty = callbacks are accepted unverified (not safe).
   theoremreach_secret: "",
+  // Offerwall.GG JSON API secret key (Offerwall.GG dashboard -> API).
+  // Server-only: never sent to any client. Used ONLY as the
+  // X-Api-Key header when fetching the Offerwall.GG games feed.
+  // Empty = the Games tab shows no Offerwall.GG games (and no error).
+  offerwallgg_api_key: "",
   checkin_bonus_cents: "5",
   level_reward_cents: "50",
   // Weekly check-in (owner-editable in Admin → Settings → Money): the
@@ -1225,6 +1230,12 @@ const contentShape = z.object({
 // user-facing payloads (it can carry a partner API key).
 const adminContentShape = contentShape.extend({
   feedUrl: z.string().nullable(),
+  // Generic feed controls (see schema.ts). The feed secret itself is
+  // NEVER sent to the client — only whether one is stored.
+  feedAuthKind: z.enum(["none", "bearer"]),
+  feedCategory: z.string(),
+  feedCategoryMode: z.enum(["include", "exclude"]),
+  feedSecretSet: z.boolean(),
 });
 
 /** Parses the stored game-milestones JSON; anything malformed = none. */
@@ -1287,7 +1298,15 @@ function publicContent(row: typeof schema.contentItems.$inferSelect) {
 }
 
 function adminContent(row: typeof schema.contentItems.$inferSelect) {
-  return { ...publicContent(row), feedUrl: row.feedUrl ?? null };
+  return {
+    ...publicContent(row),
+    feedUrl: row.feedUrl ?? null,
+    feedAuthKind: row.feedAuthKind === "bearer" ? ("bearer" as const) : ("none" as const),
+    feedCategory: row.feedCategory ?? "",
+    feedCategoryMode:
+      row.feedCategoryMode === "exclude" ? ("exclude" as const) : ("include" as const),
+    feedSecretSet: row.feedSecret !== "",
+  };
 }
 
 /**
@@ -1420,6 +1439,9 @@ function mapFeedSurvey(
     // TheoremReach's Surveys API names the per-survey link
     // "entry_link" — it must win over any generic field.
     "entry_link",
+    "clickUrl",
+    "click_url",
+    "start_url",
     "link",
     "url",
     "offer_url",
@@ -1465,7 +1487,13 @@ function mapFeedSurvey(
     key: `${partner.name}:${offerId}:${index}`,
     provider: partner.name,
     providerImageUrl: partner.imageUrl,
-    imageUrl: feedStr(rec, ["image", "image_url", "thumbnail", "icon"]),
+    imageUrl: feedStr(rec, [
+      "image",
+      "image_url",
+      "thumbnail_url",
+      "thumbnail",
+      "icon",
+    ]),
     title: feedStr(rec, ["name", "title"]),
     payoutCents: Math.max(1, Math.round((grossCents * sharePct) / 100)),
     minutes: mins != null && mins > 0 && mins <= 600 ? Math.round(mins) : null,
@@ -1473,12 +1501,15 @@ function mapFeedSurvey(
   };
 }
 
-async function fetchFeedJson(url: string): Promise<unknown | null> {
+async function fetchFeedJson(
+  url: string,
+  extraHeaders?: Record<string, string>,
+): Promise<unknown | null> {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), 8000);
   try {
     const res = await fetch(url, {
-      headers: { accept: "application/json" },
+      headers: { accept: "application/json", ...(extraHeaders ?? {}) },
       signal: ctl.signal,
     });
     if (!res.ok) return null;
@@ -1498,7 +1529,160 @@ type PartnerFeedCtx = {
   // TheoremReach app Secret Key (Admin → Settings). Required to sign
   // Surveys API requests and the per-survey entry links.
   theoremReachSecret: string;
+  // Offerwall.GG JSON API credentials for the games feed below.
+  // offerwallggApiKey is the secret key (Admin → Settings,
+  // server-only); offerwallggAppId is the 32-character PUBLIC key
+  // read from the Offerwall.GG wall URL in Admin → Content.
+  // device is the Games tab toggle ("android" | "iphone") and
+  // userAgent is the visitor's browser user agent, forwarded so
+  // Offerwall.GG matches per-user offers instead of the server's.
+  offerwallggApiKey: string;
+  offerwallggAppId: string;
+  device: "android" | "iphone";
+  userAgent: string;
 };
+
+/**
+ * Category filter for generic feeds (Admin → Content → Category on
+ * a survey/game row). Raw items carry their category either as a
+ * `category` string or a `categories` array (Offerwall.GG uses the
+ * array). Empty category = no filtering. "include" keeps only that
+ * category; "exclude" drops it. An item with no category info at
+ * all is dropped by "include" and kept by "exclude".
+ */
+function feedCategoryMatches(
+  raw: unknown,
+  category: string,
+  mode: string,
+): boolean {
+  const wanted = category.trim().toLowerCase();
+  if (!wanted) return true;
+  const rec = feedRecord(raw);
+  const cats: string[] = [];
+  if (rec) {
+    const single = rec["category"];
+    if (typeof single === "string" && single.trim())
+      cats.push(single.trim().toLowerCase());
+    const many = rec["categories"];
+    if (Array.isArray(many))
+      for (const c of many)
+        if (typeof c === "string" && c.trim())
+          cats.push(c.trim().toLowerCase());
+  }
+  const hit = cats.includes(wanted);
+  return mode === "exclude" ? !hit : hit;
+}
+
+// Per-user cache for the Offerwall.GG games feed: Offerwall.GG
+// allows 120 /offers requests per minute per IP, and the Games tab
+// refetches on every toggle — 120s per user+device is plenty.
+const offerwallGgGamesCache = new Map<
+  string,
+  { at: number; items: SurveyFeedItem[] }
+>();
+
+/**
+ * Offerwall.GG games feed (offerwall.gg/developers, OpenAPI 3.1).
+ *
+ *   GET https://offerwall.gg/api/v1/offers?appId=<public key>
+ *       &userId=<Offer Token>&country=<locked country>
+ *       &device=android|iphone&ip=<sign-in IP>&userAgent=…
+ *       &category=games&limit=50&sort=recommended
+ *   Header: X-Api-Key: <secret key from Admin → Settings>
+ *
+ * Offerwall.GG targets the offers itself from the country, device,
+ * IP and user agent we send, so each user sees the games matched to
+ * THEIR country/IP — the same rule as the wall. `category=games`
+ * keeps only games (no surveys: Offerwall.GG separate surveys were
+ * expressly forbidden by the owner, 2026-11-23, and this adapter
+ * never asks for them). The per-offer `clickUrl` is only returned
+ * when userId is passed, so tapping a card opens that one game
+ * through Offerwall.GG's click tracker and the completion credits
+ * through the existing Offerwall.GG partner callback.
+ *
+ * PAYOUT — read from the live callback code, not guessed (see
+ * PATCH.md for the full derivation):
+ *   - The API `reward` is in the placement's own currency, and
+ *     `data.currency.perUsd` says how many units make $1 (TapOne's
+ *     placement: 1000). Gross publisher revenue in dollars is
+ *     therefore reward / perUsd — the same dollars the postback
+ *     computes as currencyAmount / payoutDivisor (1000).
+ *   - The user is credited 70% of that gross by applyRewardCredit
+ *     (user_share_pct), exactly as the postback does.
+ *   - So the card shows payoutCents = round(reward / perUsd * 100)
+ *     * 70 / 100, with the 70% applied ONCE here. Passing the gross
+ *     through mapFeedSurvey would apply it a second time (49%),
+ *     which is why this adapter has its own mapper.
+ */
+function mapOfferwallGgOffer(
+  raw: unknown,
+  index: number,
+  partner: { name: string; imageUrl: string | null },
+  perUsd: number,
+  sharePct: number,
+): SurveyFeedItem | null {
+  const rec = feedRecord(raw);
+  if (!rec) return null;
+  const clickUrl = feedStr(rec, ["clickUrl", "click_url"]);
+  if (!clickUrl || !/^https?:\/\//i.test(clickUrl)) return null;
+  const reward = feedNum(rec, ["reward"]);
+  if (reward == null || reward <= 0 || !Number.isFinite(perUsd) || perUsd <= 0)
+    return null;
+  const grossCents = Math.round((reward / perUsd) * 100);
+  if (grossCents <= 0) return null;
+  const offerId =
+    feedStr(rec, ["id", "externalId", "offer_id"]) ?? String(index);
+  return {
+    key: `Offerwall.GG:${offerId}:${index}`,
+    provider: partner.name,
+    providerImageUrl: partner.imageUrl,
+    imageUrl: feedStr(rec, ["image", "image_url", "thumbnail_url", "thumbnail", "icon"]),
+    title: feedStr(rec, ["name", "title"]),
+    payoutCents: Math.max(1, Math.round((grossCents * sharePct) / 100)),
+    minutes: null,
+    url: clickUrl,
+  };
+}
+
+async function offerwallGgGames(
+  item: ContentRow,
+  user: UserRow,
+  ctx: PartnerFeedCtx,
+): Promise<SurveyFeedItem[]> {
+  if (!ctx.offerwallggApiKey || !ctx.offerwallggAppId) return [];
+  const cacheKey = `${user.id}:${ctx.device}`;
+  const cached = offerwallGgGamesCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < 120_000) return cached.items;
+  const params = new URLSearchParams({
+    appId: ctx.offerwallggAppId,
+    userId: user.offerToken ?? user.userCode,
+    category: "games",
+    limit: "50",
+    sort: "recommended",
+    device: ctx.device,
+  });
+  if (user.countryCode) params.set("country", user.countryCode);
+  if (user.ip) params.set("ip", user.ip);
+  if (ctx.userAgent) params.set("userAgent", ctx.userAgent);
+  const json = await fetchFeedJson(
+    `https://offerwall.gg/api/v1/offers?${params.toString()}`,
+    { "X-Api-Key": ctx.offerwallggApiKey },
+  );
+  const dataRec = feedRecord(json)?.["data"];
+  const data = feedRecord(dataRec);
+  const perUsd = data ? feedNum(feedRecord(data["currency"]) ?? {}, ["perUsd"]) : null;
+  const list = data && Array.isArray(data["offers"]) ? data["offers"] : null;
+  if (!list || perUsd == null) return [];
+  const partner = {
+    name: item.provider || item.title,
+    imageUrl: item.imageUrl ?? null,
+  };
+  const items = list
+    .map((raw, i) => mapOfferwallGgOffer(raw, i, partner, perUsd, ctx.sharePct))
+    .filter((s): s is SurveyFeedItem => s !== null);
+  offerwallGgGamesCache.set(cacheKey, { at: Date.now(), items });
+  return items;
+}
 
 /**
  * TheoremReach Surveys API (theoremreach.com/docs/surveys_api).
@@ -1644,10 +1828,27 @@ async function genericFeedItems(
     name: item.provider || item.title,
     imageUrl: item.imageUrl ?? null,
   };
-  const json = await fetchFeedJson(personalizeContentUrl(feedUrl, user));
+  // Bearer auth for feeds that need it (Admin → Content → Feed
+  // auth on this row): the secret is server-only and never reaches
+  // a browser — it travels only in this server-to-partner request.
+  const headers =
+    item.feedAuthKind === "bearer" && item.feedSecret
+      ? { Authorization: `Bearer ${item.feedSecret}` }
+      : undefined;
+  const json = await fetchFeedJson(
+    personalizeContentUrl(feedUrl, user),
+    headers,
+  );
   const list = json == null ? null : feedList(json);
   if (!list) return [];
   return list
+    .filter((raw) =>
+      feedCategoryMatches(
+        raw,
+        item.feedCategory ?? "",
+        item.feedCategoryMode ?? "include",
+      ),
+    )
     .map((raw, i) => mapFeedSurvey(raw, i, partner, sharePct))
     .filter((s): s is SurveyFeedItem => s !== null);
 }
@@ -1675,9 +1876,16 @@ function gameFeedForPartner(
   user: UserRow,
   ctx: PartnerFeedCtx,
 ): Promise<SurveyFeedItem[]> {
-  // No dedicated game-wall APIs yet: the generic feed is the route —
-  // a game wall with an Items feed URL lists its individual games in
-  // the Games tab exactly like survey partners list surveys.
+  const key = partnerKeyOf(item.provider, item.title);
+  // Offerwall.GG has its own JSON API (see offerwallGgGames): its
+  // games come from that API, never from the generic feed — the
+  // generic mapper would read its unit rewards as dollars.
+  if (key.includes("offerwall.gg") || key.includes("offerwallgg"))
+    return offerwallGgGames(item, user, ctx);
+  // Every other game partner: the generic feed is the route — a game
+  // wall with an Items feed URL lists its individual games in the
+  // Games tab exactly like survey partners list surveys. The row's
+  // Category filter (e.g. "game") is applied inside genericFeedItems.
   return genericFeedItems(item, user, ctx.sharePct);
 }
 
@@ -1754,6 +1962,70 @@ async function partnerHmacHex(
   return partnerHmacHexRaw(secret, canonical, hash);
 }
 
+/**
+ * Replaces every {placeholder} in an admin-typed signature template
+ * with the value exactly as received. Placeholders are the four
+ * roles every callback carries — {user} {tx} {amount} {status} —
+ * plus any parameter name the admin configured for this partner.
+ * Returns null when the template has an unclosed brace or a
+ * placeholder that is neither a role nor a configured parameter
+ * name. A null here is a config error (the admin is told at save
+ * time), never a silent mismatch. Templates are only string
+ * substitution — no code runs from them.
+ */
+function resolveSigTemplate(
+  template: string,
+  values: { user: string; tx: string; amount: string; status: string },
+  params: Record<string, string>,
+): string | null {
+  let out = "";
+  let i = 0;
+  while (i < template.length) {
+    const open = template.indexOf("{", i);
+    if (open === -1) {
+      out += template.slice(i);
+      break;
+    }
+    out += template.slice(i, open);
+    const close = template.indexOf("}", open + 1);
+    if (close === -1) return null;
+    const name = template.slice(open + 1, close).trim();
+    if (name === "user") out += values.user;
+    else if (name === "tx") out += values.tx;
+    else if (name === "amount") out += values.amount;
+    else if (name === "status") out += values.status;
+    else if (name !== "" && name in params) out += params[name] ?? "";
+    else return null;
+    i = close + 1;
+  }
+  return out;
+}
+
+/**
+ * Save-time check for an admin-typed template: returns an error
+ * message for the admin, or null when the template is usable.
+ * `paramNames` are the parameter names configured for this partner
+ * (user / transaction / payout / status — never the secret
+ * parameter, which must never be part of the signed string).
+ */
+function sigTemplateError(
+  template: string,
+  paramNames: string[],
+): string | null {
+  if (!template.trim())
+    return "Type the signature template — e.g. {tx}:{user}:{amount}:{status}.";
+  if (template.length > 200)
+    return "The signature template must be 200 characters or fewer.";
+  const probe = resolveSigTemplate(
+    template,
+    { user: "", tx: "", amount: "", status: "" },
+    Object.fromEntries(paramNames.filter(Boolean).map((n) => [n, ""])),
+  );
+  if (probe === null)
+    return "The signature template has an unknown {placeholder} or an unclosed brace. Allowed: {user} {tx} {amount} {status} and the parameter names you configured for this partner.";
+  return null;
+}
+
 /** Constant-time string compare for secrets and signatures. */
 function secretsEqual(a: string, b: string): boolean {
   if (a.length !== b.length) return false;
@@ -1772,13 +2044,20 @@ const partnerCallbackShape = z.object({
   txnParam: z.string(),
   payoutParam: z.string(),
   payoutInCents: z.boolean(),
-  sigFormat: z.enum(["params", "colon", "moonetix"]),
+  sigFormat: z.enum(["params", "colon", "moonetix", "custom"]),
+  sigTemplate: z.string().nullable(),
+  statusParam: z.string(),
+  statusCreditValue: z.string(),
   payoutDivisor: z.number(),
   authMethod: z.enum(["none", "secret", "hmac_sha1", "hmac_sha256"]),
   secretParam: z.string(),
   // The secret value itself is NEVER sent back to the client — only
   // whether one is stored (same rule as the postback secrets).
   secretSet: z.boolean(),
+  // The wall-link salt itself is NEVER sent back either — only
+  // whether one is stored.
+  linkHashSaltSet: z.boolean(),
+  linkHashParam: z.string(),
   active: z.boolean(),
   createdAt: z.string(),
 });
@@ -1795,10 +2074,15 @@ function publicPartnerCallback(
     payoutParam: row.payoutParam,
     payoutInCents: row.payoutInCents === 1,
     sigFormat: row.sigFormat,
+    sigTemplate: row.sigTemplate ?? null,
+    statusParam: row.statusParam,
+    statusCreditValue: row.statusCreditValue,
     payoutDivisor: row.payoutDivisor,
     authMethod: row.authMethod,
     secretParam: row.secretParam,
     secretSet: row.secret !== "",
+    linkHashSaltSet: row.linkHashSalt !== "",
+    linkHashParam: row.linkHashParam,
     active: row.active === 1,
     createdAt: row.createdAt.toISOString(),
   };
@@ -2344,6 +2628,23 @@ export const Actions = {
       const visible = rows.filter((r) =>
         visibleInCountry(r.countries, countryCode),
       );
+      // Wall-link signing salts, keyed by partner name: when the
+      // admin saved a salt for a partner (Admin → Partner
+      // Callbacks), the personalised wall link below is signed with
+      // it, so the partner's hash check can stay ON. Partners
+      // without a salt keep today's unsigned link.
+      const signingRows = await db
+        .select()
+        .from(schema.partnerCallbacks)
+        .where(eq(schema.partnerCallbacks.active, 1));
+      const linkSigning = new Map<string, { salt: string; param: string }>();
+      for (const cb of signingRows) {
+        if (!cb.linkHashSalt) continue;
+        linkSigning.set(partnerKeyOf(cb.name, cb.key), {
+          salt: cb.linkHashSalt,
+          param: cb.linkHashParam || "hash",
+        });
+      }
       // One card per partner in Offers / Surveys partners (owner
       // order 2026-11-21): duplicate rows for the same partner —
       // e.g. TheoremReach added twice — collapse to a single card,
@@ -2368,14 +2669,33 @@ export const Actions = {
         deduped = kept;
       }
       return {
-        items: deduped.map((r) => {
-          const item = publicContent(r);
-          // Signed-in users get a personal link: {user_id} → their
-          // Offer Token, {transaction_id} → a fresh unique ID, so a
-          // completed offer/survey can be credited back to them.
-          if (viewer) item.url = personalizeContentUrl(item.url, viewer);
-          return item;
-        }),
+        items: await Promise.all(
+          deduped.map(async (r) => {
+            const item = publicContent(r);
+            // Signed-in users get a personal link: {user_id} → their
+            // Offer Token, {transaction_id} → a fresh unique ID, so a
+            // completed offer/survey can be credited back to them.
+            if (viewer) {
+              item.url = personalizeContentUrl(item.url, viewer);
+              // Signed wall link: HMAC-SHA256(salt, user Offer Token),
+              // the scheme Moonetix documents for its wall links.
+              // Only the server ever sees the salt.
+              const signing = linkSigning.get(
+                partnerKeyOf(r.provider, r.title),
+              );
+              if (signing && item.url) {
+                const sig = await partnerHmacHexRaw(
+                  signing.salt,
+                  viewer.offerToken ?? viewer.userCode,
+                  "SHA-256",
+                );
+                const sep = item.url.includes("?") ? "&" : "?";
+                item.url = `${item.url}${sep}${signing.param}=${sig}`;
+              }
+            }
+            return item;
+          }),
+        ),
       };
     },
   }),
@@ -2413,6 +2733,10 @@ export const Actions = {
       const feedCtx: PartnerFeedCtx = {
         sharePct,
         theoremReachSecret: settings["theoremreach_secret"] ?? "",
+        offerwallggApiKey: settings["offerwallgg_api_key"] ?? "",
+        offerwallggAppId: "",
+        device: "android",
+        userAgent: "",
       };
       const perPartner = await Promise.all(
         partners.map((p) => surveyFeedForPartner(p, user, feedCtx)),
@@ -2431,15 +2755,44 @@ export const Actions = {
   listGameFeed: defineAction({
     description:
       "The signed-in user's individual games, pulled live from every active game partner that exposes an items feed (Admin → Content → Items feed URL) and visible in the user's country: each entry carries that game's own link and the payout the user will earn (their revenue share). This is how a game WALL's own games reach the same Games tab as admin-added games (listContent), with the same per-user IP/country matching and the same callback crediting on completion.",
-    request: z.object({ token: z.string().min(1).max(200) }),
+    request: z.object({
+      token: z.string().min(1).max(200),
+      // The Games tab's Android/iOS toggle — Offerwall.GG (and any
+      // device-aware feed) is asked for this device's games.
+      device: z.enum(["android", "iphone"]).optional(),
+      userAgent: z.string().max(512).optional(),
+    }),
     response: z.object({ games: z.array(surveyFeedItemShape) }),
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
       const user = await requireUser(ctx, args.token);
       const settings = await getSettings(db);
+      const device: "android" | "iphone" =
+        args.device === "iphone" ? "iphone" : "android";
+      // Offerwall.GG's appId is the 32-character PUBLIC key in its
+      // own wall URL (Admin → Content → Offerwall.GG → Offer URL
+      // …/wall/<publicKey>?userId=…). It is public, never a secret.
+      const wallRows = await db
+        .select()
+        .from(schema.contentItems)
+        .where(
+          and(
+            eq(schema.contentItems.kind, "offerwall"),
+            eq(schema.contentItems.active, 1),
+          ),
+        );
+      const offerwallGgWall = wallRows.find((r) =>
+        partnerKeyOf(r.provider, r.title).includes("offerwall.gg"),
+      );
+      const offerwallggAppId =
+        offerwallGgWall?.url.match(/\/wall\/([A-Za-z0-9]{32})/)?.[1] ?? "";
       const feedCtx: PartnerFeedCtx = {
         sharePct: settingInt(settings, "user_share_pct") || 70,
         theoremReachSecret: settings["theoremreach_secret"] ?? "",
+        offerwallggApiKey: settings["offerwallgg_api_key"] ?? "",
+        offerwallggAppId,
+        device,
+        userAgent: args.userAgent?.trim() ?? "",
       };
       const rows = await db
         .select()
@@ -3593,25 +3946,76 @@ export const Actions = {
           // "moonetix" (Moonetix) signs "{txn}:{user}:{reward}:{status}"
           // — the reward is the amount after Moonetix's user split;
           // the credit itself still uses the gross payout in "amount".
-          const expected =
-            config.sigFormat === "moonetix"               ? await partnerHmacHexRaw(                   config.secret,                   `${txId}:${userId}:${rewardRaw}:${status}`,                   hash,                 )               : config.sigFormat === "colon"
-              ? await partnerHmacHexRaw(
-                  config.secret,
-                  `${userId}:${txId}:${payoutRaw}`,
-                  hash,
-                )
-              : await partnerHmacHex(
-                  config.secret,
-                  params,
-                  config.secretParam,
-                  hash,
-                );
+          // The status value, when the partner sends one: from the
+          // admin-named status parameter, or "status" when none is
+          // named (Moonetix sends "status").
+          const statusRaw = (
+            params[config.statusParam || "status"] ?? ""
+          ).trim();
+          // Which string this partner signs depends on its format:
+          // "colon" (Offerwall.GG) signs "{user}:{txn}:{payout}";
+          // "moonetix" signs "{txn}:{user}:{reward}:{status}" where
+          // the reward is the amount AFTER Moonetix's user split
+          // (the credit itself still uses the gross payout in
+          // "amount"); "custom" signs the admin-typed template;
+          // every other HMAC partner signs the sorted
+          // name=value&name=value pairs. Values are used exactly
+          // as received.
+          let expected: string;
+          if (config.sigFormat === "colon") {
+            expected = await partnerHmacHexRaw(
+              config.secret,
+              `${userId}:${txId}:${payoutRaw}`,
+              hash,
+            );
+          } else if (config.sigFormat === "moonetix") {
+            expected = await partnerHmacHexRaw(
+              config.secret,
+              `${txId}:${userId}:${rewardRaw}:${statusRaw}`,
+              hash,
+            );
+          } else if (config.sigFormat === "custom") {
+            const canonical = resolveSigTemplate(
+              config.sigTemplate ?? "",
+              { user: userId, tx: txId, amount: payoutRaw, status: statusRaw },
+              params,
+            );
+            if (canonical === null)
+              throw new Error(
+                "This partner's signature template cannot be resolved — check Admin → Partner Callbacks.",
+              );
+            expected = await partnerHmacHexRaw(config.secret, canonical, hash);
+          } else {
+            expected = await partnerHmacHex(
+              config.secret,
+              params,
+              config.secretParam,
+              hash,
+            );
+          }
           if (!secretsEqual(given.toLowerCase(), expected))
             throw new Error("Invalid callback signature.");
         }
       }
 
-      const payoutNumber = Number.parseFloat(payoutRaw); if (config.sigFormat === "moonetix" && status !== "1") { return { status: "rejected", creditedCents: 0 }; }
+      // Generic status gate — the Moonetix status 1/2 rule, for any
+      // partner whose admin named a status parameter: only the
+      // configured credit value credits. Any other value the partner
+      // actually sent is rejected with no credit and no debit, before
+      // the duplicate check, so a reversal of an already-credited
+      // transaction is not mistaken for a duplicate credit. The
+      // Moonetix guard below still covers Moonetix rows whose admin
+      // never set a status parameter; when one is set, both guards
+      // agree. A partner that sends no status at all is not rejected
+      // here — its signature (or lack of one) decides.
+      if (config.statusParam) {
+        const statusValue = (params[config.statusParam] ?? "").trim();
+        if (statusValue !== "" && statusValue !== config.statusCreditValue) {
+          return { status: "rejected" as const, creditedCents: 0 };
+        }
+      }
+
+      const payoutNumber = Number.parseFloat(payoutRaw); if (config.sigFormat === "moonetix" && status !== "1") { return { status: "rejected" as const, creditedCents: 0 }; }
       if (!Number.isFinite(payoutNumber))
         throw new Error("Invalid payout amount.");
       let payout =
@@ -3745,6 +4149,7 @@ export const Actions = {
         affiliateSpendingPct: z.number(),
         postbackSecretSet: z.boolean(),
         theoremReachSecretSet: z.boolean(),
+        offerwallggApiKeySet: z.boolean(),
         checkinBonusCents: z.number(),
         levelRewardCents: z.number(),
         checkinGoalCents: z.number(),
@@ -3814,6 +4219,7 @@ export const Actions = {
           affiliateSpendingPct: settingInt(settings, "affiliate_spending_pct"),
           postbackSecretSet: (settings["postback_secret"] ?? "") !== "",
           theoremReachSecretSet: (settings["theoremreach_secret"] ?? "") !== "",
+          offerwallggApiKeySet: (settings["offerwallgg_api_key"] ?? "") !== "",
           checkinBonusCents: settingInt(settings, "checkin_bonus_cents"),
           levelRewardCents: settingInt(settings, "level_reward_cents"),
           checkinGoalCents: checkinGoalFrom(settings),
@@ -4470,6 +4876,13 @@ export const Actions = {
       rewardCents: z.number().int().nonnegative().max(100_000_000).nullable().default(null),
       url: z.string().trim().max(1000).default(""),
       feedUrl: z.string().trim().max(2000).nullable().default(null),
+      // Generic feed controls: Bearer auth for the feed (the secret
+      // is server-only; blank while editing keeps the stored one)
+      // and the category filter for this row's items.
+      feedAuthKind: z.enum(["none", "bearer"]).default("none"),
+      feedSecret: z.string().trim().max(300).optional(),
+      feedCategory: z.string().trim().max(60).default(""),
+      feedCategoryMode: z.enum(["include", "exclude"]).default("include"),
       imageUrl: z.string().trim().max(1000).nullable().default(null),
       badge: z.string().trim().max(24).nullable().default(null),
       platform: z.enum(["android", "ios", "both"]).default("android"),
@@ -4491,6 +4904,17 @@ export const Actions = {
     async handler(ctx, args) {
       await requireAdmin(ctx, args.adminToken);
       const db = ctx.db<typeof schema>();
+      // Blank feed secret while editing keeps the stored one (same
+      // rule as partner-callback secrets); a new row starts empty.
+      let storedFeedSecret = "";
+      if (args.id) {
+        const existing = await db
+          .select()
+          .from(schema.contentItems)
+          .where(eq(schema.contentItems.id, args.id))
+          .limit(1);
+        storedFeedSecret = existing[0]?.feedSecret ?? "";
+      }
       const values = {
         kind: args.kind,
         title: args.title,
@@ -4499,6 +4923,13 @@ export const Actions = {
         rewardCents: args.rewardCents,
         url: args.url,
         feedUrl: args.feedUrl,
+        feedAuthKind: args.feedAuthKind,
+        feedSecret:
+          args.feedSecret !== undefined && args.feedSecret !== ""
+            ? args.feedSecret
+            : storedFeedSecret,
+        feedCategory: args.feedCategory,
+        feedCategoryMode: args.feedCategoryMode,
         imageUrl: args.imageUrl,
         badge: args.badge,
         platform: args.platform,
@@ -4792,7 +5223,14 @@ export const Actions = {
       // Which string an HMAC partner signs: the sorted name=value pairs
       // ("params") or "{user}:{txn}:{payout}" ("colon", Offerwall.GG), or "{txn}:{user}:{reward}:{status}" ("moonetix", Moonetix).
       // Only used for HMAC auth methods.
-      sigFormat: z.enum(["params", "colon", "moonetix"]).default("params"),
+      sigFormat: z.enum(["params", "colon", "moonetix", "custom"]).default("params"),
+      // Admin-typed template for sigFormat "custom" (see
+      // resolveSigTemplate); ignored for every other format.
+      sigTemplate: z.string().trim().max(200).default(""),
+      // Status handling: the parameter carrying the conversion
+      // status, and the one value that credits.
+      statusParam: z.string().trim().max(60).default(""),
+      statusCreditValue: z.string().trim().max(60).default("1"),
       authMethod: z
         .enum(["none", "secret", "hmac_sha1", "hmac_sha256"])
         .default("none"),
@@ -4800,6 +5238,11 @@ export const Actions = {
       // Blank while editing = keep the stored secret; on a new partner
       // with an auth method chosen, a secret is required.
       secret: z.string().trim().max(300).optional(),
+      // Wall-link signing salt (blank while editing = keep the
+      // stored salt, like the secret) and the query parameter its
+      // signature is sent in.
+      linkHashSalt: z.string().trim().max(300).optional(),
+      linkHashParam: z.string().trim().max(60).default("hash"),
       active: z.boolean().default(true),
     }),
     response: z.object({ id: z.number() }),
@@ -4832,6 +5275,28 @@ export const Actions = {
             "The secret / signature parameter must be its own parameter name.",
           );
       }
+      // A "custom" format needs a usable template, and the status
+      // parameter — when one is named — must be its own parameter
+      // name, like the secret parameter above.
+      if (args.sigFormat === "custom") {
+        const templateError = sigTemplateError(args.sigTemplate, [
+          args.userParam,
+          args.txnParam,
+          args.payoutParam,
+          args.statusParam,
+        ]);
+        if (templateError) throw new Error(templateError);
+      }
+      if (
+        args.statusParam &&
+        (args.statusParam === args.userParam ||
+          args.statusParam === args.txnParam ||
+          args.statusParam === args.payoutParam ||
+          args.statusParam === args.secretParam)
+      )
+        throw new Error(
+          "The status parameter must be its own parameter name.",
+        );
       // The key is the partner's callback address — it must be unique.
       const sameKey = await db
         .select()
@@ -4851,6 +5316,10 @@ export const Actions = {
         payoutParam: args.payoutParam,
         payoutInCents: args.payoutInCents ? 1 : 0,
         sigFormat: args.sigFormat,
+        sigTemplate: args.sigTemplate,
+        statusParam: args.statusParam,
+        statusCreditValue: args.statusCreditValue || "1",
+        linkHashParam: args.linkHashParam || "hash",
         payoutDivisor: args.payoutDivisor,
         authMethod: args.authMethod,
         secretParam: args.authMethod === "none" ? "" : args.secretParam,
@@ -4869,13 +5338,21 @@ export const Actions = {
           args.secret !== undefined && args.secret !== ""
             ? args.secret
             : row.secret;
+        const linkHashSalt =
+          args.linkHashSalt !== undefined && args.linkHashSalt !== ""
+            ? args.linkHashSalt
+            : row.linkHashSalt;
         if (args.authMethod !== "none" && !secret)
           throw new Error(
             "Type the partner's secret — this authentication method needs one.",
           );
         await db
           .update(schema.partnerCallbacks)
-          .set({ ...base, secret: args.authMethod === "none" ? row.secret : secret })
+          .set({
+            ...base,
+            secret: args.authMethod === "none" ? row.secret : secret,
+            linkHashSalt,
+          })
           .where(eq(schema.partnerCallbacks.id, args.id));
         ctx.invalidateQueries();
         return { id: args.id };
@@ -4888,7 +5365,7 @@ export const Actions = {
         );
       const inserted = await db
         .insert(schema.partnerCallbacks)
-        .values({ ...base, secret })
+        .values({ ...base, secret, linkHashSalt: args.linkHashSalt ?? "" })
         .returning({ id: schema.partnerCallbacks.id });
       const row = inserted[0];
       if (!row) throw new Error("The partner could not be saved.");
@@ -5477,6 +5954,7 @@ export const Actions = {
       affiliateSpendingPct: z.number().int().min(0).max(100).optional(),
       postbackSecret: z.string().max(200).optional(),
       theoremReachSecret: z.string().max(200).optional(),
+      offerwallggApiKey: z.string().max(200).optional(),
       checkinBonusCents: z.number().int().min(0).max(100000).optional(),
       levelRewardCents: z.number().int().min(0).max(100000).optional(),
       checkinGoalCents: z.number().int().min(1).max(1_000_000).optional(),
@@ -5530,6 +6008,8 @@ export const Actions = {
         updates.push(["postback_secret", args.postbackSecret]);
       if (args.theoremReachSecret !== undefined)
         updates.push(["theoremreach_secret", args.theoremReachSecret]);
+      if (args.offerwallggApiKey !== undefined)
+        updates.push(["offerwallgg_api_key", args.offerwallggApiKey]);
       if (args.checkinBonusCents !== undefined)
         updates.push(["checkin_bonus_cents", String(args.checkinBonusCents)]);
       if (args.levelRewardCents !== undefined)

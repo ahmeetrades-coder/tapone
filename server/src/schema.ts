@@ -103,6 +103,18 @@ export const contentItems = sqliteTable("content_items", {
   // games in the Surveys / Games tabs. Server-only: never sent to
   // user clients (a feed URL can carry a partner API key).
   feedUrl: text("feed_url"),
+  // Generic feed controls (Admin -> Content, per survey/game row).
+  // feed_auth_kind: "none" or "bearer" — when "bearer" the server
+  // sends `Authorization: Bearer <feed_secret>` when fetching this
+  // row's feed. feed_secret is server-only, never sent to clients.
+  // feed_category: when set, only raw feed items in that category
+  // are listed (e.g. "game" or "survey"); feed_category_mode is
+  // "include" (keep only that category) or "exclude" (drop it).
+  // Empty feed_category = no category filtering (as before).
+  feedAuthKind: text("feed_auth_kind").notNull().default("none"),
+  feedSecret: text("feed_secret").notNull().default(""),
+  feedCategory: text("feed_category").notNull().default(""),
+  feedCategoryMode: text("feed_category_mode").notNull().default("include"),
   imageUrl: text("image_url"),
   // Optional small badge on the Offerwalls card (e.g. "+20%"), set by
   // the owner in Admin → Content. Null = no badge.
@@ -348,9 +360,23 @@ export const partnerCallbacks = sqliteTable("partner_callbacks", {
   //   colon  — hex HMAC of "{user}:{txn}:{payout}" — the user ID,
   //            transaction ID and payout values joined with colons, in
   //            that order (the scheme Offerwall.GG uses).   //   moonetix — HMAC-SHA256 of "{txn}:{user}:{payout}:{status}".
-  sigFormat: text("sig_format", { enum: ["params", "colon", "moonetix"] })
+  //   custom — hex HMAC of the admin-typed sig_template, with
+  //            {user} {tx} {amount} {status} (or any configured
+  //            parameter name in braces) replaced by the values
+  //            exactly as received. This is how a future partner
+  //            with a new hash order is added from Admin alone.
+  sigFormat: text("sig_format", { enum: ["params", "colon", "moonetix", "custom"] })
     .notNull()
     .default("params"),
+  // Admin-typed template for sigFormat "custom" (see above). Null
+  // for every other format.
+  sigTemplate: text("sig_template"),
+  // Name of the parameter carrying the conversion status ("" = the
+  // partner sends no status). When set, only statusCreditValue
+  // credits; any other value the partner actually sends is rejected
+  // with no credit and no debit.
+  statusParam: text("status_param").notNull().default(""),
+  statusCreditValue: text("status_credit_value").notNull().default("1"),
   // Units of the partner's payout that make $1 (1 = the payout already
   // arrives in dollars; e.g. 1000 for a partner whose wall prices in
   // 1000 units per $1). Applied after the cents conversion.
@@ -369,6 +395,13 @@ export const partnerCallbacks = sqliteTable("partner_callbacks", {
   // Name of the parameter that carries the secret / signature.
   secretParam: text("secret_param").notNull().default(""),
   secret: text("secret").notNull().default(""),
+  // Salt for signing this partner's wall link per user ("" = the
+  // wall link is sent unsigned, as today). Server-only: never sent
+  // to the client. When set, listContent appends
+  // &<linkHashParam>=HMAC-SHA256(salt, user Offer Token) to the
+  // personalised wall URL, so the partner's hash check can stay ON.
+  linkHashSalt: text("link_hash_salt").notNull().default(""),
+  linkHashParam: text("link_hash_param").notNull().default("hash"),
   active: integer("active").notNull().default(1),
   createdAt: integer("created_at", { mode: "timestamp_ms" })
     .notNull()
