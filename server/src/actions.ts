@@ -1656,6 +1656,19 @@ function mapOfferwallGgOffer(
     return null;
   const grossCents = Math.round((reward / perUsd) * 100);
   if (grossCents <= 0) return null;
+  // The user's true share, rounded ONCE from the raw reward — the
+  // same formula applyRewardCredit uses (round of gross dollars x
+  // share), so the card never promises more than the postback will
+  // credit. The old code rounded twice (gross to whole cents, then
+  // 70% of that) and floored at 1 cent: a 7-coin reward is $0.007
+  // gross, $0.0049 to the user, yet displayed $0.01 while crediting
+  // $0.00. Games whose true share is under a cent are dropped
+  // instead of listed. NOTE: this deliberately replaces the
+  // double-rounded payout, so a few displayed prices move by 1c
+  // (e.g. a 3577-coin game: $2.51 -> $2.50) — that is the exact
+  // amount the user will actually be credited.
+  const userCents = Math.round((reward / perUsd) * sharePct);
+  if (userCents <= 0) return null;
   const offerId =
     feedStr(rec, ["id", "externalId", "offer_id"]) ?? String(index);
   return {
@@ -1664,7 +1677,7 @@ function mapOfferwallGgOffer(
     providerImageUrl: partner.imageUrl,
     imageUrl: feedStr(rec, ["image", "image_url", "thumbnail_url", "thumbnail", "icon"]),
     title: feedStr(rec, ["name", "title"]),
-    payoutCents: Math.max(1, Math.round((grossCents * sharePct) / 100)),
+    payoutCents: userCents,
     minutes: null,
     url: clickUrl,
   };
