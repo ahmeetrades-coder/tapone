@@ -225,7 +225,7 @@ export const postbacks = sqliteTable("postbacks", {
   status: text("status", {
     enum: ["credited", "duplicate", "unknown_user"],
   }).notNull(),
-  rawJson: text("raw_json").notNull().default("{}"),
+  rawJson: text("raw_json").notNull().default("{}"), offerTitle: text("offer_title"), offerImageUrl: text("offer_image_url"), kind: text("kind"),
   createdAt: integer("created_at", { mode: "timestamp_ms" })
     .notNull()
     .$defaultFn(() => new Date()),
