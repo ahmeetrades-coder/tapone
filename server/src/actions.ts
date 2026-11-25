@@ -1779,7 +1779,7 @@ function publicPartnerCallback(
 }
 
 /**
- *  * The one reward-credit path, shared by the generic offerwall postback, */ function offerInfoFromRaw(rawJson: string): { title: string | null; imageUrl: string | null } { try { const v = JSON.parse(rawJson) as Record<string, unknown>; const str = (x: unknown): string | null => typeof x === "string" && x.trim() ? x.trim() : null; return { title: str(v.offer_name) ?? str(v.offer_title) ?? str(v.offername) ?? str(v.title) ?? str(v.name), imageUrl: str(v.offer_image) ?? str(v.offer_image_url) ?? str(v.image_url) ?? str(v.image) ?? str(v.icon) }; } catch { return { title: null, imageUrl: null }; } } function wallFor(network: string, walls: { provider: string; title: string; imageUrl: string | null }[]): { provider: string; title: string; imageUrl: string | null } | null { const n = network.trim().toLowerCase(); if (!n) return null; return (walls.find((w) => (w.provider || "").trim().toLowerCase() === n || (w.title || "").trim().toLowerCase() === n) ?? null); } /** * The one reward-credit path, shared by the generic offerwall postback,
+ *  * The one reward-credit path, shared by the generic offerwall postback, */ function offerInfoFromRaw(rawJson: string): { title: string | null; imageUrl: string | null } { try { const v = JSON.parse(rawJson) as Record<string, unknown>; const str = (x: unknown): string | null => typeof x === "string" && x.trim() ? x.trim() : null; return { title: str(v.offer_name) ?? str(v.offer_title) ?? str(v.offername) ?? str(v.title) ?? str(v.name), imageUrl: str(v.offer_image) ?? str(v.offer_image_url) ?? str(v.image_url) ?? str(v.image) ?? str(v.icon) }; } catch { return { title: null, imageUrl: null }; } } function wallFor(network: string, walls: { provider: string; title: string; imageUrl: string | null }[]): { provider: string; title: string; imageUrl: string | null } | null { const n = network.trim().toLowerCase(); if (!n) return null; return (walls.filter((w) => { const p = (w.provider || "").trim().toLowerCase().replace(/[^a-z0-9]/g, ""); const t = (w.title || "").trim().toLowerCase().replace(/[^a-z0-9]/g, ""); const m = n.replace(/[^a-z0-9]/g, ""); return m.length > 0 && ((p.length > 0 && (p === m || p.includes(m) || m.includes(p))) || (t.length > 0 && (t === m || t.includes(m) || m.includes(t)))); }).sort((a, b) => ((b.imageUrl || "").trim() !== "" ? 1 : 0) - ((a.imageUrl || "").trim() !== "" ? 1 : 0))[0] ?? null); } /** * The one reward-credit path, shared by the generic offerwall postback,
  * the TheoremReach callback and every owner-configured partner
  * callback: inserts the postback log row (its
  * unique txn_id is what makes a second call a duplicate — callers check
@@ -2210,7 +2210,7 @@ export const Actions = {
             // overwritten with the Google account name here — a name
             // the user picked in Profile (they get 3 lifetime changes)
             // must survive every later sign-in.
-            pictureUrl: pictureUrl ?? user.pictureUrl,
+            pictureUrl: user.pictureUrl ?? pictureUrl,
             // COUNTRY + IP LOCK (owner rule 2026-11-21): the country
             // and IP stored at ACCOUNT CREATION decide the user's
             // withdraw methods and content for the account's whole
