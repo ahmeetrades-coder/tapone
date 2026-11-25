@@ -1433,9 +1433,20 @@ function GamesSection({ token }: { token: string }) {
     queryKey: ["content", "game", token],
     queryFn: () => api.listContent({ token, kind: "game" }),
   });
+  // The toggle's platform is sent to the server so device-aware
+  // feeds (Offerwall.GG games) are asked for this device's games.
+  const [platform, setPlatform] = useState<"android" | "ios">(() =>
+    detectDevicePlatform(),
+  );
   const feedQuery = useQuery({
-    queryKey: ["game-feed", token],
-    queryFn: () => api.listGameFeed({ token }),
+    queryKey: ["game-feed", token, platform],
+    queryFn: () =>
+      api.listGameFeed({
+        token,
+        device: platform === "ios" ? "iphone" : "android",
+        userAgent:
+          typeof navigator !== "undefined" ? navigator.userAgent : undefined,
+      }),
     staleTime: 60_000,
   });
   const adminGames = query.data?.items ?? [];
@@ -1457,9 +1468,6 @@ function GamesSection({ token }: { token: string }) {
       }),
     ),
   ];
-  const [platform, setPlatform] = useState<"android" | "ios">(() =>
-    detectDevicePlatform(),
-  );
   const [partner, setPartner] = useState<string | null>(null);
   const [openId, setOpenId] = useState<number | null>(null);
 

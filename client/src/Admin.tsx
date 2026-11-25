@@ -1069,6 +1069,10 @@ interface ContentForm {
   rewardDollars: string;
   url: string;
   feedUrl: string;
+  feedAuthKind: "none" | "bearer";
+  feedSecret: string;
+  feedCategory: string;
+  feedCategoryMode: "include" | "exclude";
   imageUrl: string;
   badge: string;
   platform: "android" | "ios" | "both";
@@ -1087,6 +1091,10 @@ const EMPTY_FORM: ContentForm = {
   rewardDollars: "",
   url: "",
   feedUrl: "",
+  feedAuthKind: "none",
+  feedSecret: "",
+  feedCategory: "",
+  feedCategoryMode: "include",
   imageUrl: "",
   badge: "",
   platform: "android",
@@ -1698,6 +1706,10 @@ function ContentTab({ token }: { token: string }) {
         rewardCents,
         url: f.url.trim(),
         feedUrl: f.feedUrl.trim() === "" ? null : f.feedUrl.trim(),
+        feedAuthKind: f.feedAuthKind,
+        feedSecret: f.feedSecret.trim() === "" ? undefined : f.feedSecret.trim(),
+        feedCategory: f.feedCategory.trim(),
+        feedCategoryMode: f.feedCategoryMode,
         imageUrl: f.imageUrl.trim() === "" ? null : f.imageUrl.trim(),
         badge: f.badge.trim() === "" ? null : f.badge.trim(),
         platform: f.platform,
@@ -1735,6 +1747,10 @@ function ContentTab({ token }: { token: string }) {
     rewardDollars: item.rewardCents != null ? (item.rewardCents / 100).toFixed(2) : "",
     url: item.url,
     feedUrl: item.feedUrl ?? "",
+    feedAuthKind: item.feedAuthKind,
+    feedSecret: "",
+    feedCategory: item.feedCategory,
+    feedCategoryMode: item.feedCategoryMode,
     imageUrl: item.imageUrl ?? "",
     badge: item.badge ?? "",
     platform:
@@ -1855,7 +1871,49 @@ function ContentTab({ token }: { token: string }) {
                 <label htmlFor="ct-feed" className="text-sm font-semibold">Items feed URL <span className="font-normal text-[var(--dim)]">(optional — the partner's JSON feed of individual {form.kind === "game" ? "games" : "surveys"}; they list automatically in the {form.kind === "game" ? "Games" : "Surveys"} tab, matched to each user)</span></label>
                 <input id="ct-feed" {...FIELDS.adminUpsertContent.feedUrl} value={form.feedUrl} onChange={(e) => setForm({ ...form, feedUrl: e.target.value })} placeholder="https://…?user_id={user_id}&ip={ip}&country={country}" className={fieldCls} />
                 <p className="mt-1 text-xs leading-relaxed text-[var(--dim)]">
-                  Placeholders: {"{user_id}"} = the user's Offer Token, {"{ip}"} = their sign-in IP, {"{country}"} = their country code. Leave empty for partners TapOne already reads directly (TheoremReach, CPX Research).
+                  Placeholders: {"{user_id}"} = the user's Offer Token, {"{ip}"} = their sign-in IP, {"{country}"} = their country code. Leave empty for partners TapOne already reads directly (TheoremReach, CPX Research, Offerwall.GG games).
+                </p>
+                <div className="mt-3 grid grid-cols-2 gap-3">
+                  <div>
+                    <label htmlFor="ct-feed-auth" className="text-sm font-semibold">Feed auth</label>
+                    <select
+                      id="ct-feed-auth"
+                      value={form.feedAuthKind}
+                      onChange={(e) => setForm({ ...form, feedAuthKind: e.target.value as ContentForm["feedAuthKind"] })}
+                      className={fieldCls}
+                    >
+                      <option value="none">None — open feed URL</option>
+                      <option value="bearer">Bearer token — send the feed secret below</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label htmlFor="ct-feed-secret" className="text-sm font-semibold">
+                      Feed secret{" "}
+                      {form.id !== undefined && (
+                        <span className="font-normal text-[var(--dim)]">(leave blank to keep the saved one)</span>
+                      )}
+                    </label>
+                    <input id="ct-feed-secret" type="password" autoComplete="off" value={form.feedSecret} onChange={(e) => setForm({ ...form, feedSecret: e.target.value })} className={fieldCls} placeholder="Partner API key for this feed" />
+                  </div>
+                  <div>
+                    <label htmlFor="ct-feed-category" className="text-sm font-semibold">Category filter (optional)</label>
+                    <input id="ct-feed-category" value={form.feedCategory} onChange={(e) => setForm({ ...form, feedCategory: e.target.value })} className={fieldCls} placeholder="e.g. game or survey" />
+                  </div>
+                  <div>
+                    <label htmlFor="ct-feed-category-mode" className="text-sm font-semibold">Category mode</label>
+                    <select
+                      id="ct-feed-category-mode"
+                      value={form.feedCategoryMode}
+                      onChange={(e) => setForm({ ...form, feedCategoryMode: e.target.value as ContentForm["feedCategoryMode"] })}
+                      className={fieldCls}
+                    >
+                      <option value="include">Include — only this category lists</option>
+                      <option value="exclude">Exclude — drop this category</option>
+                    </select>
+                  </div>
+                </div>
+                <p className="mt-1 text-xs leading-relaxed text-[var(--dim)]">
+                  Feed auth and the category filter are how a future partner&apos;s games or surveys list from Admin alone: paste its API key as the feed secret, and set the category to &quot;game&quot; on a Games row or &quot;survey&quot; on a Surveys row. The secret is server-only and never shown to users.
                 </p>
               </div>
             )}
@@ -1953,6 +2011,7 @@ function ContentTab({ token }: { token: string }) {
                   {item.provider || "—"} · {item.rewardCents != null ? fmt(item.rewardCents) : "no set reward"} · {item.countries}
                   {item.kind === "game" ? ` · ${item.platform}${item.milestones.length > 0 ? ` · ${item.milestones.length} milestones` : ""}` : ""}
                   {item.badge ? ` · badge ${item.badge}` : ""}
+                  {item.feedUrl ? ` · feed: ${item.feedAuthKind === "bearer" ? "bearer" : "open"}${item.feedSecretSet ? " · feed key set" : ""}${item.feedCategory ? ` · category ${item.feedCategoryMode === "exclude" ? "excludes" : "only"} ${item.feedCategory}` : ""}` : ""}
                 </p>
               </div>
               <button type="button" onClick={() => setForm(editForm(item))} className="flex items-center gap-1.5 rounded-full bg-[var(--surface-2)] px-4 py-2 text-sm font-bold">
@@ -2837,6 +2896,7 @@ const AUTH_METHOD_LABELS: Record<PartnerCallbackRow["authMethod"], string> = {
 const SIG_FORMAT_LABELS: Record<PartnerCallbackRow["sigFormat"], string> = {
   params: "sorted name=value pairs",
   colon: "user:transaction:amount",   moonetix: "tx:user:reward:status",
+  custom: "custom template",
 };
 
 /**
@@ -2852,13 +2912,16 @@ function partnerCallbackUrl(origin: string, p: {
   payoutParam: string;
   authMethod: PartnerCallbackRow["authMethod"];   sigFormat: PartnerCallbackRow["sigFormat"];
   secretParam: string;
+  statusParam: string;
 }): string {
   let url = `${origin}/partner-callback/${p.key}?${p.userParam}={user_id}&${p.txnParam}={transaction_id}&${p.payoutParam}={payout}`;
   if (p.authMethod === "secret" && p.secretParam)
     url += `&${p.secretParam}={secret}`;
   else if (p.authMethod !== "none" && p.secretParam)
     url += `&${p.secretParam}={signature}`;
-  if (p.sigFormat === "moonetix") url += "&status={status}&reward={reward}"; return url;
+  if (p.sigFormat === "moonetix") url += "&status={status}&reward={reward}";
+  else if (p.statusParam) url += `&${p.statusParam}={status}`;
+  return url;
 }
 
 // -------------------------------------------------------------- postbacks
@@ -2919,6 +2982,11 @@ type PartnerCallbackForm = {
   payoutParam: string;
   payoutInCents: boolean;
   sigFormat: PartnerCallbackRow["sigFormat"];
+  sigTemplate: string;
+  statusParam: string;
+  statusCreditValue: string;
+  linkHashSalt: string;
+  linkHashParam: string;
   payoutDivisor: number;
   authMethod: PartnerCallbackRow["authMethod"];
   secretParam: string;
@@ -2935,6 +3003,11 @@ const EMPTY_PARTNER_FORM: PartnerCallbackForm = {
   payoutParam: "payout",
   payoutInCents: false,
   sigFormat: "params",
+  sigTemplate: "",
+  statusParam: "",
+  statusCreditValue: "1",
+  linkHashSalt: "",
+  linkHashParam: "hash",
   payoutDivisor: 1,
   authMethod: "none",
   secretParam: "",
@@ -2983,6 +3056,8 @@ function PartnerCallbacksTab({ token }: { token: string }) {
         if (f.id === null && !f.secret.trim())
           throw new Error("Type the partner's secret.");
       }
+      if (f.sigFormat === "custom" && !f.sigTemplate.trim())
+        throw new Error("Type the signature template — e.g. {tx}:{user}:{amount}:{status}.");
       return api.adminUpsertPartnerCallback({
         adminToken: token,
         id: f.id ?? undefined,
@@ -2993,6 +3068,11 @@ function PartnerCallbacksTab({ token }: { token: string }) {
         payoutParam: f.payoutParam.trim(),
         payoutInCents: f.payoutInCents,
         sigFormat: f.sigFormat,
+        sigTemplate: f.sigTemplate.trim(),
+        statusParam: f.statusParam.trim(),
+        statusCreditValue: f.statusCreditValue.trim() || "1",
+        linkHashSalt: f.linkHashSalt.trim() === "" ? undefined : f.linkHashSalt.trim(),
+        linkHashParam: f.linkHashParam.trim() || "hash",
         payoutDivisor: f.payoutDivisor,
         authMethod: f.authMethod,
         secretParam: f.secretParam.trim(),
@@ -3053,6 +3133,11 @@ function PartnerCallbacksTab({ token }: { token: string }) {
       payoutParam: p.payoutParam,
       payoutInCents: p.payoutInCents,
       sigFormat: p.sigFormat,
+      sigTemplate: p.sigTemplate ?? "",
+      statusParam: p.statusParam,
+      statusCreditValue: p.statusCreditValue,
+      linkHashSalt: "",
+      linkHashParam: p.linkHashParam,
       payoutDivisor: p.payoutDivisor,
       authMethod: p.authMethod,
       secretParam: p.secretParam,
@@ -3235,8 +3320,27 @@ function PartnerCallbacksTab({ token }: { token: string }) {
                     >
                       <option value="params">Parameters — HMAC of sorted name=value&amp;name=value pairs</option>
                       <option value="colon">User:transaction:amount — HMAC of &quot;{"{user}"}:{"{txn}"}:{"{payout}"}&quot; (Offerwall.GG)</option> <option value="moonetix">Transaction:user:reward:status — HMAC of &quot;{"{txn}"}:{"{user}"}:{"{reward}"}:{"{status}"}&quot; (Moonetix)</option>
+                      <option value="custom">Custom template — HMAC of a template you type below</option>
                     </select>
-                    <p className="mt-1 text-xs text-[var(--dim)]">Pick the one the partner&apos;s docs describe — Offerwall.GG signs the three values joined with colons. Moonetix signs transaction, user, reward and status joined with colons, and a status 2 reversal never credits.</p>
+                    <p className="mt-1 text-xs text-[var(--dim)]">Pick the one the partner&apos;s docs describe — Offerwall.GG signs the three values joined with colons. Moonetix signs transaction, user, reward and status joined with colons, and a status 2 reversal never credits. A new partner with a different order uses Custom template below — no code change needed.</p>
+                    {form.sigFormat === "custom" && (
+                      <div className="mt-3">
+                        <label htmlFor="pc-sig-template" className="text-sm font-semibold">Signature template</label>
+                        <input id="pc-sig-template" value={form.sigTemplate} onChange={(e) => setForm({ ...form, sigTemplate: e.target.value })} className={fieldCls} placeholder="{tx}:{user}:{amount}:{status}" />
+                        <p className="mt-1 text-xs text-[var(--dim)]">Use {"{user}"} {"{tx}"} {"{amount}"} {"{status}"} or any parameter name above in braces, joined exactly as the partner&apos;s docs show. Values are used exactly as received.</p>
+                      </div>
+                    )}
+                    <div className="mt-3 grid grid-cols-2 gap-3">
+                      <div>
+                        <label htmlFor="pc-status-param" className="text-sm font-semibold">Status parameter (optional)</label>
+                        <input id="pc-status-param" value={form.statusParam} onChange={(e) => setForm({ ...form, statusParam: e.target.value })} className={fieldCls} placeholder="e.g. status" />
+                      </div>
+                      <div>
+                        <label htmlFor="pc-status-credit" className="text-sm font-semibold">Status value that credits</label>
+                        <input id="pc-status-credit" value={form.statusCreditValue} onChange={(e) => setForm({ ...form, statusCreditValue: e.target.value })} className={fieldCls} placeholder="1" />
+                      </div>
+                    </div>
+                    <p className="mt-1 text-xs text-[var(--dim)]">When the partner sends a status, only this value credits — any other value is rejected with no credit and no debit (reversals). Leave the parameter blank if the partner sends no status.</p>
                   </div>
                 )}
                 <div>
@@ -3254,6 +3358,20 @@ function PartnerCallbacksTab({ token }: { token: string }) {
                 </div>
               </>
             )}
+            <div>
+              <label htmlFor="pc-link-salt" className="text-sm font-semibold">
+                Wall link salt{" "}
+                {form.id !== null && (
+                  <span className="font-normal text-[var(--dim)]">(leave blank to keep the saved one)</span>
+                )}
+              </label>
+              <input id="pc-link-salt" type="password" autoComplete="off" value={form.linkHashSalt} onChange={(e) => setForm({ ...form, linkHashSalt: e.target.value })} className={fieldCls} placeholder="Salt from the partner's dashboard, for signed wall links" />
+              <p className="mt-1 text-xs text-[var(--dim)]">Optional. When set, each user&apos;s wall link is signed HMAC-SHA256(salt, user Offer Token) and sent as the parameter below, so the partner&apos;s hash check can stay on. Leave blank for an unsigned link.</p>
+            </div>
+            <div>
+              <label htmlFor="pc-link-param" className="text-sm font-semibold">Wall link signature parameter</label>
+              <input id="pc-link-param" value={form.linkHashParam} onChange={(e) => setForm({ ...form, linkHashParam: e.target.value })} className={fieldCls} placeholder="hash" />
+            </div>
             <div className="flex items-end pb-1">
               <label className="flex cursor-pointer items-center gap-2 text-sm font-semibold">
                 <input type="checkbox" checked={form.active} onChange={(e) => setForm({ ...form, active: e.target.checked })} className="h-5 w-5 accent-[var(--brand)]" />
@@ -3315,6 +3433,13 @@ function PartnerCallbacksTab({ token }: { token: string }) {
                     {(p.authMethod === "hmac_sha1" || p.authMethod === "hmac_sha256") && (
                       <> ({SIG_FORMAT_LABELS[p.sigFormat]})</>
                     )}
+                    {p.sigFormat === "custom" && p.sigTemplate && (
+                      <> · template <code className="font-semibold text-[var(--text)]">{p.sigTemplate}</code></>
+                    )}
+                    {p.statusParam && (
+                      <> · status <code className="font-semibold text-[var(--text)]">{p.statusParam}</code>={p.statusCreditValue} credits</>
+                    )}
+                    {p.linkHashSaltSet && <> · wall link signed</>}
                     {p.authMethod !== "none" && (
                       <>
                         {" "}in <code className="font-semibold text-[var(--text)]">{p.secretParam}</code> ·{" "}
@@ -3382,6 +3507,7 @@ function SettingsTab({ token }: { token: string }) {
   const [affiliateSpendingPct, setAffiliateSpendingPct] = useState("");
   const [postbackSecret, setPostbackSecret] = useState("");
   const [theoremReachSecret, setTheoremReachSecret] = useState("");
+  const [offerwallggApiKey, setOfferwallggApiKey] = useState("");
   const [checkinGoal, setCheckinGoal] = useState("");
   const [checkinDays, setCheckinDays] = useState<string[]>(["", "", "", "", "", "", ""]);
   const [centsPerLevel, setCentsPerLevel] = useState("");
@@ -3476,6 +3602,7 @@ function SettingsTab({ token }: { token: string }) {
         affiliateSpendingPct: pct(affiliateSpendingPct, "Affiliate spending commission"),
         postbackSecret: postbackSecret.trim() === "" ? undefined : postbackSecret.trim(),
         theoremReachSecret: theoremReachSecret.trim() === "" ? undefined : theoremReachSecret.trim(),
+        offerwallggApiKey: offerwallggApiKey.trim() === "" ? undefined : offerwallggApiKey.trim(),
         checkinGoalCents,
         checkinRewardsCents: checkinRewardsCents as number[],
         levelCentsPerLevel,
@@ -3495,6 +3622,7 @@ function SettingsTab({ token }: { token: string }) {
       setOkMsg("Settings saved — they apply across the whole site right away.");
       setPostbackSecret("");
       setTheoremReachSecret("");
+      setOfferwallggApiKey("");
       setAdminPassword("");
       void queryClient.invalidateQueries({ queryKey: ["admin-overview", token] });
       void queryClient.invalidateQueries({ queryKey: ["public-home"] });
@@ -3821,6 +3949,19 @@ function SettingsTab({ token }: { token: string }) {
               every TheoremReach reward callback — a callback with a wrong
               signature never credits anyone. Set the callback URL in the
               same app (see Overview → TheoremReach callback).
+            </p>
+          </div>
+          <div className="mt-5">
+            <label htmlFor="set-owgg-key" className="text-sm font-semibold">
+              Offerwall.GG API key {s?.offerwallggApiKeySet ? <span className="text-[var(--brand-deep)] dark:text-[var(--brand)]">(currently set — Offerwall.GG games can list in the Games tab)</span> : <span className="text-[var(--dim)]">(not set — no Offerwall.GG games will list)</span>}
+            </label>
+            <input id="set-owgg-key" value={offerwallggApiKey} onChange={(e) => setOfferwallggApiKey(e.target.value)} placeholder="Paste the secret key from your Offerwall.GG dashboard (API page)" className={fieldCls} />
+            <p className="mt-1.5 text-xs leading-relaxed text-[var(--dim)]">
+              Server-only — it is sent only as the X-Api-Key header when
+              TapOne fetches Offerwall.GG games for a user, and is never
+              shown to users. Find it in the Offerwall.GG publisher
+              dashboard. The Games tab also needs a Games Content row for
+              Offerwall.GG (Items feed URL: https://offerwall.gg/api/v1/offers).
             </p>
           </div>
         </section>
