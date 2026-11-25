@@ -1365,6 +1365,11 @@ function personalizeContentUrl(url: string, user: UserRow): string {
 
 const surveyFeedItemShape = z.object({
   key: z.string(),
+  // The NUMERIC Offerwall.GG offer id (the `id` in the /offers list
+  // response) — only Offerwall.GG feed games carry one. The Games-tab
+  // popup calls GET /api/v1/offers/{offerId} with it to fetch that
+  // game's goal ladder. Null for every other partner's feed items.
+  offerId: z.string().nullable(),
   provider: z.string(),
   providerImageUrl: z.string().nullable(),
   imageUrl: z.string().nullable(),
@@ -1485,6 +1490,10 @@ function mapFeedSurvey(
     String(index);
   return {
     key: `${partner.name}:${offerId}:${index}`,
+    // No Offerwall.GG numeric offer id: the generic survey mapper
+    // covers every other partner, and only Offerwall.GG games get
+    // a detail popup (see mapOfferwallGgOffer).
+    offerId: null,
     provider: partner.name,
     providerImageUrl: partner.imageUrl,
     imageUrl: feedStr(rec, [
@@ -1672,8 +1681,16 @@ function mapOfferwallGgOffer(
   if (userCents < 100) return null;
   const offerId =
     feedStr(rec, ["id", "externalId", "offer_id"]) ?? String(index);
+  // The detail endpoint takes ONLY the numeric `id` — the network's
+  // own externalId (e.g. "32-21022-...") 404s there — so record it
+  // separately. feedNum guards against a non-numeric id.
+  const numericId = feedNum(rec, ["id"]);
   return {
     key: `Offerwall.GG:${offerId}:${index}`,
+    offerId:
+      numericId != null && Number.isInteger(numericId)
+        ? String(numericId)
+        : null,
     provider: partner.name,
     providerImageUrl: partner.imageUrl,
     imageUrl: feedStr(rec, ["image", "image_url", "thumbnail_url", "thumbnail", "icon"]),
@@ -2884,6 +2901,199 @@ export const Actions = {
       for (const s of perPartner.flat())
         if (!byUrl.has(s.url)) byUrl.set(s.url, s);
       return { games: [...byUrl.values()].slice(0, 100) };
+    },
+  }),
+
+  // One Offerwall.GG game's payout ladder, for the Games-tab popup:
+  // GET /api/v1/offers/{offer} returns the same object /offers
+  // returns, PLUS `goals` — the steps of a multi-step offer and what
+  // each one pays (Offerwall.GG OpenAPI 3.1: Goal = { goalId,
+  // description ("What the user has to do"), reward ("In your
+  // currency"), optional (a bonus step) }). A single-step offer has
+  // an empty goal list, so the popup falls back to the total only —
+  // no levels are ever invented. Per-goal dollars use the SAME
+  // one-step formula as the card (mapOfferwallGgOffer): round(reward
+  // / perUsd * sharePct) — the exact amount applyRewardCredit will
+  // credit for that goal. A goal that pays 0 after the share is
+  // dropped, never shown as a $0.00 row. The secret key stays
+  // server-only (X-Api-Key header); the client only ever sees the
+  // game's own clickUrl, as before.
+  //
+  // COMPLETED-GOAL TICKS: the Offerwall.GG postback carries goalId
+  // (which step completed) and offerId (the network's externalId).
+  // partnerCallback stores every callback's params verbatim in
+  // postbacks.rawJson, so this handler reads the user's credited
+  // postbacks for THIS offer and returns their goalIds as
+  // completedGoalIds — the popup ticks those rows. This only works
+  // for postbacks recorded AFTER the Offerwall.GG dashboard
+  // callback URL carries &offerId={offerId}&goalId={goalId}; the
+  // signature covers only user:tx:amount, so adding those macros
+  // never breaks verification. Older postbacks have no goalId and
+  // their goals simply stay unticked — never faked.
+  getOfferwallGgGameDetail: defineAction({
+    description:
+      "One Offerwall.GG game's goal ladder for the Games-tab popup: each step's description and the dollars the user earns for it (70% share, once), plus the game's description, requirements and play link, and the goalIds this user already completed (ticked in the popup). Single-step games return an empty goals list.",
+    request: z.object({
+      token: z.string().min(1).max(200),
+      offerId: z.string().regex(/^\d{1,10}$/),
+    }),
+    response: z.object({
+      found: z.boolean(),
+      name: z.string().nullable(),
+      description: z.string().nullable(),
+      requirements: z.string().nullable(),
+      imageUrl: z.string().nullable(),
+      url: z.string().nullable(),
+      totalCents: z.number(),
+      goals: z.array(
+        z.object({
+          goalId: z.string(),
+          event: z.string(),
+          amountCents: z.number(),
+          optional: z.boolean(),
+        }),
+      ),
+      completedGoalIds: z.array(z.string()),
+    }),
+    async handler(ctx, args) {
+      const empty = {
+        found: false,
+        name: null,
+        description: null,
+        requirements: null,
+        imageUrl: null,
+        url: null,
+        totalCents: 0,
+        goals: [] as {
+          goalId: string;
+          event: string;
+          amountCents: number;
+          optional: boolean;
+        }[],
+        completedGoalIds: [] as string[],
+      };
+      const db = ctx.db<typeof schema>();
+      const user = await requireUser(ctx, args.token);
+      const settings = await getSettings(db);
+      const sharePct = settingInt(settings, "user_share_pct") || 70;
+      const apiKey = settings["offerwallgg_api_key"] ?? "";
+      const wallRows = await db
+        .select()
+        .from(schema.contentItems)
+        .where(
+          and(
+            eq(schema.contentItems.kind, "offerwall"),
+            eq(schema.contentItems.active, 1),
+          ),
+        );
+      const offerwallGgWall = wallRows.find((r) =>
+        partnerKeyOf(r.provider, r.title).includes("offerwall.gg"),
+      );
+      const appId =
+        offerwallGgWall?.url.match(/\/wall\/([A-Za-z0-9]{32})/)?.[1] ?? "";
+      if (!apiKey || !appId) return empty;
+      const params = new URLSearchParams({
+        appId,
+        userId: user.offerToken ?? user.userCode,
+      });
+      const json = await fetchFeedJson(
+        `https://offerwall.gg/api/v1/offers/${args.offerId}?${params.toString()}`,
+        { "X-Api-Key": apiKey },
+      );
+      const offer = feedRecord(feedRecord(json)?.["data"])?.["offer"];
+      const offerRec = feedRecord(offer);
+      if (!offerRec) return empty;
+      const dataRec = feedRecord(feedRecord(json)?.["data"]);
+      const perUsd = dataRec
+        ? feedNum(feedRecord(dataRec["currency"]) ?? {}, ["perUsd"])
+        : null;
+      if (perUsd == null || perUsd <= 0) return empty;
+      const reward = feedNum(offerRec, ["reward"]);
+      const totalCents =
+        reward == null || reward <= 0
+          ? 0
+          : Math.round((reward / perUsd) * sharePct);
+      const goals: {
+        goalId: string;
+        event: string;
+        amountCents: number;
+        optional: boolean;
+      }[] = [];
+      const rawGoals = offerRec["goals"];
+      if (Array.isArray(rawGoals)) {
+        for (const raw of rawGoals) {
+          const g = feedRecord(raw);
+          if (!g) continue;
+          const goalReward = feedNum(g, ["reward"]);
+          if (goalReward == null || goalReward <= 0) continue;
+          const amountCents = Math.round(
+            (goalReward / perUsd) * sharePct,
+          );
+          if (amountCents <= 0) continue;
+          goals.push({
+            goalId: feedStr(g, ["goalId"]) ?? "",
+            event:
+              feedStr(g, ["description"]) ?? "Complete this step",
+            amountCents,
+            optional: g["optional"] === true,
+          });
+        }
+      }
+      // Completed goals for THIS user and THIS offer: the postback's
+      // offerId is the network's externalId (Offer schema: externalId
+      // "Appears on the postback as offerId"), and its goalId names
+      // the step that paid. Both live in postbacks.rawJson verbatim
+      // (partnerCallback stores { partner, params }); a credited row
+      // whose params match this offer contributes its goalId.
+      const completedGoalIds: string[] = [];
+      const externalId = feedStr(offerRec, ["externalId"]);
+      if (externalId) {
+        const credited = await db
+          .select()
+          .from(schema.postbacks)
+          .where(
+            and(
+              eq(schema.postbacks.userId, user.id),
+              eq(schema.postbacks.status, "credited"),
+              gt(schema.postbacks.creditedCents, 0),
+            ),
+          )
+          .orderBy(desc(schema.postbacks.id))
+          .limit(200);
+        const done = new Set<string>();
+        for (const row of credited) {
+          try {
+            const parsed = JSON.parse(row.rawJson) as {
+              params?: Record<string, unknown>;
+            };
+            const cbParams = parsed?.params;
+            if (!cbParams || typeof cbParams !== "object") continue;
+            if (cbParams["offerId"] !== externalId) continue;
+            const gid = cbParams["goalId"];
+            if (typeof gid === "string" && gid.trim()) done.add(gid.trim());
+          } catch {
+            // A malformed stored row must never break the popup.
+          }
+        }
+        completedGoalIds.push(...done);
+      }
+      return {
+        found: true,
+        name: feedStr(offerRec, ["name", "title"]),
+        description: feedStr(offerRec, ["description"]),
+        requirements: feedStr(offerRec, ["requirements"]),
+        imageUrl: feedStr(offerRec, [
+          "image",
+          "image_url",
+          "thumbnail_url",
+          "thumbnail",
+          "icon",
+        ]),
+        url: feedStr(offerRec, ["clickUrl", "click_url"]),
+        totalCents,
+        goals,
+        completedGoalIds,
+      };
     },
   }),
 
