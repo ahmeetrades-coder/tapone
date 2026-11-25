@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { actionFields } from "@hatch/space-sdk/fields" with { type: "macro" };
 import { api, type ApiResponse } from "./api";
 import type { Actions } from "../../server/src/actions";
-import { Icons, MethodLogo, applyThemeMode, fmt, fmtDate, fmtDateTime, getThemeMode, isAuthError } from "./lib"; import { LiveCashoutTab, LiveCompletionsFeed, TopEarnersList } from "./LiveFeed";
+import { Icons, MethodLogo, applyThemeMode, fmt, fmtDate, fmtDateTime, getThemeMode, isAuthError } from "./lib"; import { LiveCashoutTab } from "./LiveFeed";
 import { fileToBase64 } from "@hatch/space-sdk/client";
 import { FooterThemePill, Wordmark } from "./App";
 
@@ -20,8 +20,7 @@ export type DashboardTab =
   | "cashout"
   | "withdraw"
   | "invite"
-  | "referrals"
-  | "history"
+    | "history"
   | "profile"
   | "help"
   | "contact";
@@ -37,7 +36,6 @@ const TABS: { id: DashboardTab; label: string; icon: (c?: string) => ReactNode }
   { id: "cashout", label: "Live Cashout", icon: Icons.wallet },
   { id: "withdraw", label: "Withdraw", icon: Icons.wallet },
   { id: "invite", label: "Invite Friends", icon: Icons.users },
-  { id: "referrals", label: "Referrals", icon: Icons.users },
   { id: "history", label: "History", icon: Icons.history },
   { id: "profile", label: "Profile", icon: Icons.user },
   { id: "help", label: "Help", icon: Icons.mail },
@@ -342,7 +340,6 @@ export function Dashboard({
               {tab === "history" && <HistoryTab token={token} />}
               {tab === "level" && <LevelTab token={token} go={pick} />}
               {tab === "invite" && <AffiliateTab token={token} />}
-              {tab === "referrals" && <AffiliateTab token={token} />}
               {tab === "profile" && <ProfileTab token={token} user={user} go={pick} onSignOut={onSignOut} />}
               {tab === "help" && <HelpTab token={token} />}
               {tab === "contact" && <ContactTab />}
@@ -563,39 +560,6 @@ function DashboardHome({
         ))}
       </section>
 
-      {/* recent activity */}
-      <section className="mt-6" aria-label="Recent activity">
-        <h2 className="font-display text-lg font-bold">Recent activity</h2>
-        {dash.isPending ? (
-          <p className="mt-3 text-sm text-[var(--dim)]">Loading…</p>
-        ) : dash.data && dash.data.recent.length > 0 ? (
-          <ul className="mt-3 divide-y divide-[var(--border)] rounded-2xl bg-[var(--surface)] px-4 ring-1 ring-[var(--border)]">
-            {dash.data.recent.map((t) => (
-              <li key={t.id} className="flex items-center justify-between gap-3 py-3">
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-semibold">{t.note || KIND_LABELS[t.kind] || t.kind}</p>
-                  <p className="text-xs text-[var(--dim)]">{fmtDateTime(t.createdAt)}</p>
-                </div>
-                <span
-                  className={`font-display text-sm font-bold ${
-                    t.amountCents >= 0 ? "text-[var(--brand-deep)] dark:text-[var(--brand)]" : "text-[var(--dim)]"
-                  }`}
-                >
-                  {t.amountCents >= 0 ? "+" : ""}
-                  {fmt(t.amountCents)}
-                </span>
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <div className="mt-3 rounded-2xl border-2 border-dashed border-[var(--border)] bg-[var(--surface)] px-5 py-8 text-center">
-            <p className="text-sm leading-relaxed text-[var(--dim)]">
-              Nothing here yet. Complete your first offer, survey or game and
-              your earnings will show up here.
-            </p>
-          </div>
-        )}
-      </section> <LiveCompletionsFeed /> <TopEarnersList />
     </div>
   );
 }
