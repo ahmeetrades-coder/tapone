@@ -148,6 +148,8 @@
       "when": 1795338600000,
       "tag": "0021_help_images_and_announcements", "breakpoints": true }, { "idx": 21, "version": "6", "when": 1795547316000, "tag": "0022_completed_offer_pictures_and_live_feed",
       "breakpoints": true
+    }, { "idx": 22, "version": "6", "when": 1795593365173, "tag": "0023_withdraw_notifications",
+      "breakpoints": true
     }
   ]
 }

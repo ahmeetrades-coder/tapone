@@ -9,7 +9,7 @@ z,
 type ActionsModule,
 type Ctx,
 } from "@hatch/space-sdk";
-import { and, desc, eq, gt, gte, inArray } from "drizzle-orm";
+import { and, desc, eq, gt, gte, inArray, isNull, or } from "drizzle-orm";
 import type { BatchItem } from "drizzle-orm/batch";
 import * as schema from "./schema";
 
@@ -4028,6 +4028,19 @@ export const Actions = {
       if (!w) throw new Error("Withdrawal not found.");
       if (w.status !== "pending")
         throw new Error("This withdrawal was already decided.");
+      // Method label for the notification (built-in or owner-added method).
+      const customLabels = await customMethodLabels(db);
+      const methodLabel =
+        METHODS[w.method]?.label ?? customLabels.get(w.method) ?? w.method;
+      const amount = `$${(w.amountCents / 100).toFixed(2)}`;
+      // Per-user bell notification, created in the SAME batch as the
+      // decision — so the user is told about every approve/reject, with
+      // no extra step for the admin. Only this user ever sees it (the
+      // announcements bell filters by userId; see getAnnouncements).
+      // The admin's optional note is appended when one was typed.
+      const noteSuffix = args.note
+        ? ` Note from admin: ${args.note}`
+        : "";
       const statements: BatchItem<"sqlite">[] = [
         db
           .update(schema.withdrawals)
@@ -4037,6 +4050,18 @@ export const Actions = {
             decidedAt: new Date(),
           })
           .where(eq(schema.withdrawals.id, w.id)),
+        db.insert(schema.announcements).values({
+          kind: "withdrawal",
+          userId: w.userId,
+          title:
+            args.decision === "approved"
+              ? "Withdrawal approved"
+              : "Withdrawal rejected",
+          body:
+            args.decision === "approved"
+              ? `Your withdrawal of ${amount} via ${methodLabel} was approved.${noteSuffix}`
+              : `Your withdrawal of ${amount} via ${methodLabel} was rejected. The amount has been returned to your balance.${noteSuffix}`,
+        }),
       ];
       if (args.decision === "rejected") {
         const userRows = await db
@@ -5200,7 +5225,7 @@ export const Actions = {
       announcements: z.array(
         z.object({
           id: z.number(),
-          kind: z.enum(["announcement", "event"]),
+          kind: z.enum(["announcement", "event", "withdrawal"]),
           title: z.string(),
           body: z.string(),
           createdAt: z.string(),
@@ -5212,9 +5237,17 @@ export const Actions = {
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
       const user = await requireUser(ctx, args.token);
+      // Broadcasts (userId null) plus this user's own notifications.
+      // Another user's withdraw notice never reaches this user.
       const rows = await db
         .select()
         .from(schema.announcements)
+        .where(
+          or(
+            isNull(schema.announcements.userId),
+            eq(schema.announcements.userId, user.id),
+          ),
+        )
         .orderBy(desc(schema.announcements.id))
         .limit(100);
       const reads = await db
@@ -5253,6 +5286,12 @@ export const Actions = {
             await db
               .select({ id: schema.announcements.id })
               .from(schema.announcements)
+              .where(
+                or(
+                  isNull(schema.announcements.userId),
+                  eq(schema.announcements.userId, user.id),
+                ),
+              )
           ).map((a) => a.id);
       for (const id of targets) {
         await db
@@ -5272,7 +5311,7 @@ export const Actions = {
       announcements: z.array(
         z.object({
           id: z.number(),
-          kind: z.enum(["announcement", "event"]),
+          kind: z.enum(["announcement", "event", "withdrawal"]),
           title: z.string(),
           body: z.string(),
           createdAt: z.string(),
@@ -5283,9 +5322,12 @@ export const Actions = {
     async handler(ctx, args) {
       await requireAdmin(ctx, args.adminToken);
       const db = ctx.db<typeof schema>();
+      // Broadcasts only — per-user withdraw notices are not admin
+      // content and must never be listed, edited or deleted here.
       const rows = await db
         .select()
         .from(schema.announcements)
+        .where(isNull(schema.announcements.userId))
         .orderBy(desc(schema.announcements.id))
         .limit(200);
       return {
@@ -5344,7 +5386,14 @@ export const Actions = {
           body: args.body,
           updatedAt: new Date(),
         })
-        .where(eq(schema.announcements.id, args.id));
+        // Broadcasts only — a per-user withdraw notice can never be
+        // edited from the admin panel.
+        .where(
+          and(
+            eq(schema.announcements.id, args.id),
+            isNull(schema.announcements.userId),
+          ),
+        );
       ctx.invalidateQueries();
       return { ok: true };
     },
@@ -5365,7 +5414,14 @@ export const Actions = {
         .where(eq(schema.announcementReads.announcementId, args.id));
       await db
         .delete(schema.announcements)
-        .where(eq(schema.announcements.id, args.id));
+        // Broadcasts only — a per-user withdraw notice can never be
+        // deleted from the admin panel.
+        .where(
+          and(
+            eq(schema.announcements.id, args.id),
+            isNull(schema.announcements.userId),
+          ),
+        );
       ctx.invalidateQueries();
       return { ok: true };
     },

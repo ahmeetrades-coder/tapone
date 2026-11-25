@@ -2642,10 +2642,16 @@ function NotificationBell({ token }: { token: string }) {
                         className={`rounded-full px-2 py-0.5 text-[11px] font-bold uppercase tracking-wide ${
                           a.kind === "event"
                             ? "bg-[var(--gold)] text-[var(--ink)]"
-                            : "bg-[var(--surface-2)] text-[var(--dim)]"
+                            : a.kind === "withdrawal"
+                              ? "bg-[var(--brand)]/15 text-[var(--brand-deep)] dark:text-[var(--brand)]"
+                              : "bg-[var(--surface-2)] text-[var(--dim)]"
                         }`}
                       >
-                        {a.kind === "event" ? "Event" : "Announcement"}
+                        {a.kind === "event"
+                          ? "Event"
+                          : a.kind === "withdrawal"
+                            ? "Withdrawal"
+                            : "Announcement"}
                       </span>
                       {!a.read && (
                         <span className="rounded-full bg-red-600 px-2 py-0.5 text-[11px] font-bold text-white">

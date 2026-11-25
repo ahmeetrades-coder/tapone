@@ -184,16 +184,23 @@ export const messages = sqliteTable("messages", {
     .$defaultFn(() => new Date()),
 });
 
-// announcements — owner broadcasts: every row is shown to ALL users in
-// the notification bell. kind is "announcement" (news, e.g. "withdraw
-// will be late") or "event" (an upcoming event). The admin creates,
-// edits and deletes them from Admin → Announcements; posting one needs
-// no code change or redeploy — it reaches every user immediately.
+// announcements — the notification bell. Most rows are owner broadcasts
+// (userId null): every row is shown to ALL users. kind is "announcement"
+// (news, e.g. "withdraw will be late") or "event" (an upcoming event).
+// The admin creates, edits and deletes them from Admin → Announcements;
+// posting one needs no code change or redeploy — it reaches every user
+// immediately. Rows with a userId set are PER-USER notifications, not
+// broadcasts: only that one user sees them in their bell. They are
+// created server-side only (e.g. a withdraw approve/reject notice from
+// adminDecideWithdrawal) and are never listed, edited or deleted from
+// the admin Announcements panel.
 export const announcements = sqliteTable("announcements", {
   id: integer("id").primaryKey({ autoIncrement: true }),
-  kind: text("kind", { enum: ["announcement", "event"] })
+  kind: text("kind", { enum: ["announcement", "event", "withdrawal"] })
     .notNull()
     .default("announcement"),
+  // NULL = broadcast to every user; set = only this user sees it.
+  userId: integer("user_id"),
   title: text("title").notNull(),
   body: text("body").notNull(),
   createdAt: integer("created_at", { mode: "timestamp_ms" })
