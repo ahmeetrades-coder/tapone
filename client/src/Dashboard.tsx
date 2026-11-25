@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { actionFields } from "@hatch/space-sdk/fields" with { type: "macro" };
 import { api, type ApiResponse } from "./api";
 import type { Actions } from "../../server/src/actions";
-import { Icons, MethodLogo, applyThemeMode, fmt, fmtDate, fmtDateTime, getThemeMode, isAuthError } from "./lib";
+import { Icons, MethodLogo, applyThemeMode, fmt, fmtDate, fmtDateTime, getThemeMode, isAuthError } from "./lib"; import { LiveCashoutTab, LiveCompletionsFeed, TopEarnersList } from "./LiveFeed";
 import { fileToBase64 } from "@hatch/space-sdk/client";
 import { FooterThemePill, Wordmark } from "./App";
 
@@ -337,7 +337,7 @@ export function Dashboard({
               {tab === "playtime" && <GamesSection token={token} />}
               {tab === "apps" && <ContentSection token={token} kind="offerwall" heading="Apps" />}
               {tab === "partners" && <ContentSection token={token} kind="survey" heading="Surveys partners" />}
-              {tab === "cashout" && <WithdrawTab token={token} />}
+              {tab === "cashout" && <LiveCashoutTab onWithdraw={() => pick("withdraw")} />}
               {tab === "withdraw" && <WithdrawTab token={token} />}
               {tab === "history" && <HistoryTab token={token} />}
               {tab === "level" && <LevelTab token={token} go={pick} />}
@@ -595,7 +595,7 @@ function DashboardHome({
             </p>
           </div>
         )}
-      </section>
+      </section> <LiveCompletionsFeed /> <TopEarnersList />
     </div>
   );
 }
@@ -2147,7 +2147,7 @@ function AffiliateTab({ token }: { token: string }) {
 
 // ------------------------------------------------------------- my offers
 
-function MyOffersPanel({ token }: { token: string }) {
+function OfferThumb({ imageUrl, name }: { imageUrl: string | null | undefined; name: string }) { const [imgOk, setImgOk] = useState(true); if (imageUrl && imgOk) { return (<img src={imageUrl} alt={name} className="h-10 w-10 shrink-0 rounded-xl object-contain bg-[var(--surface-2)] ring-1 ring-[var(--border)]" loading="lazy" onError={() => setImgOk(false)} />); } return (<span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[var(--surface-2)] font-display text-base font-extrabold text-[var(--brand)] ring-1 ring-[var(--border)]" aria-hidden="true">{(name || "?").slice(0, 1).toUpperCase()}</span>); } function MyOffersPanel({ token }: { token: string }) {
   const [sub, setSub] = useState<"completed" | "offers" | "surveys" | "chargebacks" | "started">("completed");
   const stats = useQuery({ queryKey: ["my-stats", token], queryFn: () => api.getMyStats({ token }) });
   const mine = useQuery({ queryKey: ["my-offers", token], queryFn: () => api.getMyOffers({ token }) });
@@ -2210,15 +2210,15 @@ function MyOffersPanel({ token }: { token: string }) {
         <p className="mt-4 text-sm text-[var(--dim)]">Loading…</p>
       ) : items.length > 0 ? (
         <ul className="mt-4 divide-y divide-[var(--border)] rounded-2xl bg-[var(--surface)] px-4 ring-1 ring-[var(--border)]">
-          {items.map((i) => (
+          {items.filter((i) => i.creditedCents > 0).map((i) => (
             <li key={i.id} className="flex items-center justify-between gap-3 py-3">
               <span>
-                <span className="block text-sm font-semibold">{i.network}</span>
+                <OfferThumb imageUrl={i.imageUrl} name={i.title} /> <span className="text-sm font-semibold">{i.title}</span>
                 <span className="block text-xs text-[var(--dim)]">
-                  {i.kind === "survey" ? "Survey" : "Offer"} · {fmtDateTime(i.createdAt)}
+                  {i.network} · {i.kind === "survey" ? "Survey" : "Offer"} · {fmtDateTime(i.createdAt)}
                 </span>
               </span>
-              <span className="font-display text-base font-bold text-[var(--brand)]">+{fmt(i.creditedCents)}</span>
+              <span className="shrink-0 font-display text-base font-bold text-[var(--brand)]">+{fmt(i.creditedCents)}</span>
             </li>
           ))}
         </ul>
