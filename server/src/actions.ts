@@ -3145,13 +3145,23 @@ export const Actions = {
         .limit(200); const walls = await db.select().from(schema.contentItems);
       return {
         chargebackRatePct: await chargebackRatePct(db, user.id),
-        items: rows.map((r) => { const stored = offerInfoFromRaw(r.rawJson); const wall = wallFor(r.network, walls); return ({
-          id: r.id,
-          network: r.network, title: r.offerTitle ?? stored.title ?? wall?.title ?? wall?.provider ?? r.network, imageUrl: r.offerImageUrl ?? stored.imageUrl ?? wall?.imageUrl ?? null,
-          kind: isSurveyNetwork(r.network) ? ("survey" as const) : ("offer" as const),
-          creditedCents: r.creditedCents,
-          createdAt: r.createdAt.toISOString(),
-        })),
+        items: rows.map((r) => {
+          const stored = offerInfoFromRaw(r.rawJson);
+          const wall = wallFor(r.network, walls);
+          return {
+            id: r.id,
+            network: r.network,
+            title:
+              r.offerTitle ?? stored.title ?? wall?.title ?? wall?.provider ?? r.network,
+            imageUrl:
+              r.offerImageUrl ?? stored.imageUrl ?? wall?.imageUrl ?? null,
+            kind: isSurveyNetwork(r.network)
+            ? ("survey" as const)
+              : ("offer" as const),
+            creditedCents: r.creditedCents,
+            createdAt: r.createdAt.toISOString(),
+          };
+        }),
       };
     },
   }),
