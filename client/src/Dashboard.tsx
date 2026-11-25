@@ -1468,22 +1468,15 @@ function GamesSection({ token }: { token: string }) {
       }),
     ),
   ];
-  const [partner, setPartner] = useState<string | null>(null);
   const [openId, setOpenId] = useState<number | null>(null);
 
-  const partnerNames: string[] = [];
-  const partnerCounts = new Map<string, number>();
-  for (const e of entries) {
-    if (!partnerCounts.has(e.name)) partnerNames.push(e.name);
-    partnerCounts.set(e.name, (partnerCounts.get(e.name) ?? 0) + 1);
-  }
-
+  // No partner filter: the Games tab shows individual games only
+  // (owner order 2026-11-25) — there is no "Gaming Partners"
+  // section and no per-partner filtering any more.
   const forPlatform = entries.filter(
     (e) => e.platform === platform || e.platform === "both",
   );
-  const visible = partner
-    ? forPlatform.filter((e) => e.name === partner)
-    : forPlatform;
+  const visible = forPlatform;
   const rowA = visible.filter((_, i) => i % 2 === 0);
   const rowB = visible.filter((_, i) => i % 2 === 1);
   const openItem = adminGames.find((g) => g.id === openId) ?? null;
@@ -1545,21 +1538,6 @@ function GamesSection({ token }: { token: string }) {
         </div>
       ) : (
         <>
-          {partner && (
-            <div className="mt-5 flex flex-wrap items-center gap-3">
-              <p className="text-sm font-semibold text-[var(--dim)]">
-                Showing games from{" "}
-                <span className="font-bold text-[var(--text)]">{partner}</span>
-              </p>
-              <button
-                type="button"
-                onClick={() => setPartner(null)}
-                className="rounded-full bg-[var(--surface)] px-4 py-2 text-sm font-bold ring-1 ring-[var(--border)] transition hover:ring-[var(--brand)]"
-              >
-                Show all games
-              </button>
-            </div>
-          )}
           {visible.length > 0 ? (
             <div className="mt-5 space-y-5">
               <LoopRow items={rowA} renderCard={renderCard} label="Games row 1" keyOf={(e) => (e.source === "admin" ? `a${e.item.id}` : e.item.key)} />
@@ -1571,51 +1549,11 @@ function GamesSection({ token }: { token: string }) {
             <div className="mt-6 rounded-3xl border-2 border-dashed border-[var(--border)] bg-[var(--surface)] px-6 py-10 text-center">
               <p className="mx-auto max-w-md text-sm leading-relaxed text-[var(--dim)]">
                 No {platform === "ios" ? "iOS" : "Android"} games
-                {partner ? ` from ${partner}` : ""} right now — try the
-                other platform{partner ? " or show all games" : ""}.
+                right now — try the other platform.
               </p>
             </div>
           )}
 
-          {partnerNames.length > 0 && (
-            <section aria-label="Gaming Partners" className="mt-10">
-              <h2 className="font-display text-xl font-extrabold">
-                Gaming Partners
-              </h2>
-              <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3 sm:gap-4 xl:grid-cols-4">
-                {partnerNames.map((name) => {
-                  const count = partnerCounts.get(name) ?? 0;
-                  const active = partner === name;
-                  return (
-                    <button
-                      key={name}
-                      type="button"
-                      aria-pressed={active}
-                      onClick={() => setPartner(active ? null : name)}
-                      className={`rounded-2xl bg-[var(--surface)] px-4 py-5 text-left ring-1 transition ${
-                        active
-                          ? "ring-2 ring-[var(--brand)]"
-                          : "ring-[var(--border)] hover:ring-[var(--brand)]"
-                      }`}
-                    >
-                      <span
-                        className="flex h-11 w-11 items-center justify-center rounded-2xl bg-[var(--surface-2)] font-display text-lg font-extrabold text-[var(--brand)]"
-                        aria-hidden="true"
-                      >
-                        {name.slice(0, 1).toUpperCase()}
-                      </span>
-                      <span className="mt-3 block truncate font-display text-sm font-bold text-[var(--text)] sm:text-base">
-                        {name}
-                      </span>
-                      <span className="mt-0.5 block text-xs font-semibold text-[var(--dim)]">
-                        {count} {count === 1 ? "game" : "games"}
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-            </section>
-          )}
         </>
       )}
       {openItem && (
