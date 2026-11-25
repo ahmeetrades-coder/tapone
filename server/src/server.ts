@@ -323,7 +323,7 @@ async function serveStatic(pathname: string): Promise<Response> {
       });
     }
   }
-  /* SEO files: serve the real sitemap.xml / robots.txt / favicon.png, never the SPA fallback. */ if (rel === "sitemap.xml" || rel === "robots.txt" || rel === "favicon.png") { const sourcePath = join(process.cwd(), "client", rel); if (existsSync(sourcePath)) { const ext = sourcePath.slice(sourcePath.lastIndexOf(".")); return new Response(Bun.file(sourcePath), { headers: { "content-type": MIME[ext] ?? "application/octet-stream" } }); } return new Response("Not found", { status: 404, headers: { "content-type": "text/plain; charset=utf-8" } }); } // SPA fallback: every unknown path returns the app shell (hash routing).
+  /* SEO files: serve the real sitemap.xml / robots.txt / favicon.png / favicon.ico, never the SPA fallback. */ if (rel === "sitemap.xml" || rel === "robots.txt" || rel === "favicon.png" || rel === "favicon.ico") { const sourcePath = join(process.cwd(), "client", rel); if (existsSync(sourcePath)) { const ext = sourcePath.slice(sourcePath.lastIndexOf(".")); return new Response(Bun.file(sourcePath), { headers: { "content-type": MIME[ext] ?? "application/octet-stream" } }); } return new Response("Not found", { status: 404, headers: { "content-type": "text/plain; charset=utf-8" } }); } // SPA fallback: every unknown path returns the app shell (hash routing).
   const indexPath = join(CLIENT_DIR, "index.html");
   if (existsSync(indexPath)) {
     return new Response(Bun.file(indexPath), {
