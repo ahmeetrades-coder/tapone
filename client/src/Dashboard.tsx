@@ -1123,9 +1123,11 @@ function PlatformIcon({
 }
 
 /**
- * One carousel row: scrolls left/right with arrow buttons, and when
- * there are enough games the row's content is duplicated so scrolling
- * wraps around seamlessly (the TimeBucks loop).
+ * One carousel row: scrolls left/right with arrow buttons. Each game
+ * is rendered exactly once — an earlier version duplicated the row's
+ * content so scrolling wrapped around seamlessly (the TimeBucks
+ * loop), which made every game appear twice; removed 2026-11-25
+ * (owner order: no duplicates).
  */
 function LoopRow<T,>({
   items,
@@ -1139,13 +1141,6 @@ function LoopRow<T,>({
   keyOf: (item: T) => string;
 }) {
   const ref = useRef<HTMLDivElement>(null);
-  const loop = items.length > 3;
-  const onScroll = () => {
-    const el = ref.current;
-    if (!el || !loop) return;
-    const half = el.scrollWidth / 2;
-    if (half > 0 && el.scrollLeft >= half) el.scrollLeft -= half;
-  };
   const nudge = (dir: 1 | -1) =>
     ref.current?.scrollBy({ left: dir * 340, behavior: "smooth" });
   return (
@@ -1170,13 +1165,11 @@ function LoopRow<T,>({
       </div>
       <div
         ref={ref}
-        onScroll={onScroll}
         className="flex gap-3 overflow-x-auto pb-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
         role="list"
         aria-label={label}
       >
         {items.map((item) => renderCard(item, `a-${keyOf(item)}`))}
-        {loop && items.map((item) => renderCard(item, `b-${keyOf(item)}`))}
       </div>
     </div>
   );
