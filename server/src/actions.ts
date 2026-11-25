@@ -9,7 +9,7 @@ z,
 type ActionsModule,
 type Ctx,
 } from "@hatch/space-sdk";
-import { and, desc, eq, gt, gte, inArray, isNull, or } from "drizzle-orm";
+import { and, desc, eq, gt, gte, inArray, isNull, ne, or } from "drizzle-orm";
 import type { BatchItem } from "drizzle-orm/batch";
 import * as schema from "./schema";
 
@@ -1149,6 +1149,32 @@ function isSurveyNetwork(network: string): boolean {
   return SURVEY_NETWORK_HINTS.some((h) => n.includes(h));
 }
 
+/**
+ * Live-wall check — the source of truth is the admin's Content card:
+ * a completion only shows in the public / personal feeds when a card
+ * for that network exists AND is Active. A wall whose approval never
+ * came (no card, or its card switched off) has its old completions
+ * hidden everywhere the feed is used — no rows are deleted, and the
+ * wall reappears automatically if the admin adds / reactivates its
+ * card. Uses the same fuzzy provider/title match as wallFor, so
+ * "TheoremReach" matches a card titled/provider "TheoremReach" and
+ * "offerwallgg" matches "Offerwall.GG".
+ */
+function isLiveNetwork(
+  network: string,
+  walls: {
+    provider: string;
+    title: string;
+    imageUrl: string | null;
+    active: number;
+  }[],
+): boolean {
+  return wallFor(
+    network,
+    walls.filter((w) => w.active === 1),
+  ) != null;
+}
+
 // ------------------------------------------------------------- zod shapes
 
 const userShape = z.object({
@@ -2045,7 +2071,7 @@ export const Actions = {
     },
   }),
 
-    getLiveCompletions: defineAction({ description: "Public latest-completed feed (Live Cashout): the newest credited offer/survey/game completions from every user, newest first. No login needed. Only first names and profile pictures are returned — never email, IP, country or account IDs.", request: z.object({}), response: z.object({ items: z.array(z.object({ id: z.number(), userName: z.string(), userPictureUrl: z.string().nullable(), network: z.string(), title: z.string(), imageUrl: z.string().nullable(), kind: z.enum(["offer", "survey"]), creditedCents: z.number(), createdAt: z.string() })) }), async handler(ctx) { const db = ctx.db<typeof schema>(); const rows = await db.select().from(schema.postbacks).where(and(eq(schema.postbacks.status, "credited"), gt(schema.postbacks.creditedCents, 0))).orderBy(desc(schema.postbacks.id)).limit(20); const userIds = [...new Set(rows.map((r) => r.userId).filter((id): id is number => id != null))]; const users = userIds.length ? await db.select().from(schema.users).where(inArray(schema.users.id, userIds)) : []; const byId = new Map(users.map((u) => [u.id, u])); const walls = await db.select().from(schema.contentItems); return { items: rows.map((r) => { const u = r.userId != null ? byId.get(r.userId) : undefined; const stored = offerInfoFromRaw(r.rawJson); const wall = wallFor(r.network, walls); return { id: r.id, userName: (u?.name ?? "TapOne user").split(" ")[0] ?? "TapOne user", userPictureUrl: u?.pictureUrl ?? null, network: r.network, title: r.offerTitle ?? stored.title ?? wall?.title ?? wall?.provider ?? r.network, imageUrl: r.offerImageUrl ?? stored.imageUrl ?? wall?.imageUrl ?? null, kind: isSurveyNetwork(r.network) ? ("survey" as const) : ("offer" as const), creditedCents: r.creditedCents, createdAt: r.createdAt.toISOString() }; }) }; }, }),  getTopEarners: defineAction({ description: "Public Top 100 earners: the 100 users with the highest lifetime earnings, ranked by total earned, each with picture, first name, total earning and total cashout (approved withdrawals only). No contests, no prizes. No login needed; no email, IP, country or account IDs are ever returned.", request: z.object({}), response: z.object({ items: z.array(z.object({ rank: z.number(), name: z.string(), pictureUrl: z.string().nullable(), totalEarnedCents: z.number(), totalCashoutCents: z.number() })) }), async handler(ctx) { const db = ctx.db<typeof schema>(); const top = await db.select().from(schema.users).where(gt(schema.users.totalEarnedCents, 0)).orderBy(desc(schema.users.totalEarnedCents)).limit(100); const ids = top.map((u) => u.id); const paid = ids.length ? await db.select().from(schema.withdrawals).where(and(inArray(schema.withdrawals.userId, ids), eq(schema.withdrawals.status, "approved"))) : []; const cashout = new Map<number, number>(); for (const w of paid) cashout.set(w.userId, (cashout.get(w.userId) ?? 0) + w.amountCents); return { items: top.map((u, i) => ({ rank: i + 1, name: u.name.split(" ")[0] ?? u.name, pictureUrl: u.pictureUrl ?? null, totalEarnedCents: u.totalEarnedCents, totalCashoutCents: cashout.get(u.id) ?? 0 })) }; }, }),  detectNetwork: defineAction({
+    getLiveCompletions: defineAction({ description: "Public latest-completed feed (Live Cashout): the newest credited offer/survey/game completions from every user, newest first. No login needed. Only first names and profile pictures are returned — never email, IP, country or account IDs.", request: z.object({}), response: z.object({ items: z.array(z.object({ id: z.number(), userName: z.string(), userPictureUrl: z.string().nullable(), network: z.string(), title: z.string(), imageUrl: z.string().nullable(), kind: z.enum(["offer", "survey"]), creditedCents: z.number(), createdAt: z.string() })) }), async handler(ctx) { const db = ctx.db<typeof schema>(); const rows = await db.select().from(schema.postbacks).where(and(eq(schema.postbacks.status, "credited"), gt(schema.postbacks.creditedCents, 0))).orderBy(desc(schema.postbacks.id)).limit(100); const userIds = [...new Set(rows.map((r) => r.userId).filter((id): id is number => id != null))]; const users = userIds.length ? await db.select().from(schema.users).where(inArray(schema.users.id, userIds)) : []; const byId = new Map(users.map((u) => [u.id, u])); const walls = await db.select().from(schema.contentItems); return { items: rows.filter((r) => isLiveNetwork(r.network, walls)).map((r) => { const u = r.userId != null ? byId.get(r.userId) : undefined; const stored = offerInfoFromRaw(r.rawJson); const wall = wallFor(r.network, walls); return { id: r.id, userName: (u?.name ?? "TapOne user").split(" ")[0] ?? "TapOne user", userPictureUrl: u?.pictureUrl ?? null, network: r.network, title: r.offerTitle ?? stored.title ?? wall?.title ?? wall?.provider ?? r.network, imageUrl: r.offerImageUrl ?? stored.imageUrl ?? wall?.imageUrl ?? null, kind: isSurveyNetwork(r.network) ? ("survey" as const) : ("offer" as const), creditedCents: r.creditedCents, createdAt: r.createdAt.toISOString() }; }).slice(0, 20) }; }, }),  getTopEarners: defineAction({ description: "Public Top 100 earners: the 100 users with the highest lifetime earnings, ranked by total earned, each with picture, first name, total earning and total cashout (approved withdrawals only). No contests, no prizes. No login needed; no email, IP, country or account IDs are ever returned.", request: z.object({}), response: z.object({ items: z.array(z.object({ rank: z.number(), name: z.string(), pictureUrl: z.string().nullable(), totalEarnedCents: z.number(), totalCashoutCents: z.number() })) }), async handler(ctx) { const db = ctx.db<typeof schema>(); const top = await db.select().from(schema.users).where(gt(schema.users.totalEarnedCents, 0)).orderBy(desc(schema.users.totalEarnedCents)).limit(100); const ids = top.map((u) => u.id); const paid = ids.length ? await db.select().from(schema.withdrawals).where(and(inArray(schema.withdrawals.userId, ids), eq(schema.withdrawals.status, "approved"))) : []; const cashout = new Map<number, number>(); for (const w of paid) cashout.set(w.userId, (cashout.get(w.userId) ?? 0) + w.amountCents); return { items: top.map((u, i) => ({ rank: i + 1, name: u.name.split(" ")[0] ?? u.name, pictureUrl: u.pictureUrl ?? null, totalEarnedCents: u.totalEarnedCents, totalCashoutCents: cashout.get(u.id) ?? 0 })) }; }, }),  detectNetwork: defineAction({
     description:
       "Detects the caller's IP, country, flag, VPN suspicion and whether new signups from that country are banned (no account needed).",
     request: z.object({ ip: z.string().max(64).optional() }),
@@ -2484,7 +2510,12 @@ export const Actions = {
       const txns = await db
         .select()
         .from(schema.transactions)
-        .where(eq(schema.transactions.userId, user.id))
+        .where(
+          and(
+            eq(schema.transactions.userId, user.id),
+            ne(schema.transactions.amountCents, 0),
+          ),
+        )
         .orderBy(desc(schema.transactions.id))
         .limit(8);
       const affiliateEarned = txns
@@ -2641,7 +2672,12 @@ export const Actions = {
       const rows = await db
         .select()
         .from(schema.transactions)
-        .where(eq(schema.transactions.userId, user.id))
+        .where(
+          and(
+            eq(schema.transactions.userId, user.id),
+            ne(schema.transactions.amountCents, 0),
+          ),
+        )
         .orderBy(desc(schema.transactions.id))
         .limit(args.limit);
       return {
@@ -3145,7 +3181,7 @@ export const Actions = {
         .limit(200); const walls = await db.select().from(schema.contentItems);
       return {
         chargebackRatePct: await chargebackRatePct(db, user.id),
-        items: rows.map((r) => {
+        items: rows.filter((r) => isLiveNetwork(r.network, walls)).map((r) => {
           const stored = offerInfoFromRaw(r.rawJson);
           const wall = wallFor(r.network, walls);
           return {
@@ -3922,6 +3958,8 @@ export const Actions = {
     response: z.object({ ok: z.literal(true) }),
     async handler(ctx, args): Promise<{ ok: true }> {
       await requireAdmin(ctx, args.adminToken);
+      if (args.amountCents === 0)
+        throw new Error("Amount must not be $0.00.");
       const db = ctx.db<typeof schema>();
       const rows = await db
         .select()
