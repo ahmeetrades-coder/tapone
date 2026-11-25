@@ -1507,14 +1507,36 @@ async function fetchFeedJson(
 ): Promise<unknown | null> {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), 8000);
+  // Log failures minimally so a dead feed is diagnosable in the
+  // server logs instead of silently returning []. Log ONLY the
+  // host, the HTTP status and the API's own error text — never the
+  // URL (it can carry user tokens) and never any header/key.
+  let host = "feed";
+  try {
+    host = new URL(url).host;
+  } catch {
+    // keep the fallback
+  }
   try {
     const res = await fetch(url, {
       headers: { accept: "application/json", ...(extraHeaders ?? {}) },
       signal: ctl.signal,
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      let detail = "";
+      try {
+        detail = (await res.text()).slice(0, 200);
+      } catch {
+        // ignore — the status alone is still useful
+      }
+      console.warn(`[feed] ${host} HTTP ${res.status}${detail ? `: ${detail}` : ""}`);
+      return null;
+    }
     return (await res.json()) as unknown;
-  } catch {
+  } catch (err) {
+    console.warn(
+      `[feed] ${host} request failed: ${err instanceof Error ? err.message : "unknown error"}`,
+    );
     return null;
   } finally {
     clearTimeout(timer);
@@ -1587,15 +1609,19 @@ const offerwallGgGamesCache = new Map<
  *   GET https://offerwall.gg/api/v1/offers?appId=<public key>
  *       &userId=<Offer Token>&country=<locked country>
  *       &device=android|iphone&ip=<sign-in IP>&userAgent=…
- *       &category=games&limit=50&sort=recommended
+ *       &category=game&limit=50&sort=recommended
  *   Header: X-Api-Key: <secret key from Admin → Settings>
  *
  * Offerwall.GG targets the offers itself from the country, device,
  * IP and user agent we send, so each user sees the games matched to
- * THEIR country/IP — the same rule as the wall. `category=games`
- * keeps only games (no surveys: Offerwall.GG separate surveys were
- * expressly forbidden by the owner, 2026-11-23, and this adapter
- * never asks for them). The per-offer `clickUrl` is only returned
+ * THEIR country/IP — the same rule as the wall. `category=game`
+ * (SINGULAR) keeps only games — the API returns 0 offers for
+ * `category=games` (plural) for every country/device, and 37
+ * offers for PK/Android with `category=game` (API test, live,
+ * 2026-11-25; the key itself was fine, no 401/403). No surveys:
+ * Offerwall.GG separate surveys were expressly forbidden by the
+ * owner, 2026-11-23, and this adapter never asks for them. The
+ * per-offer `clickUrl` is only returned
  * when userId is passed, so tapping a card opens that one game
  * through Offerwall.GG's click tracker and the completion credits
  * through the existing Offerwall.GG partner callback.
@@ -1656,7 +1682,7 @@ async function offerwallGgGames(
   const params = new URLSearchParams({
     appId: ctx.offerwallggAppId,
     userId: user.offerToken ?? user.userCode,
-    category: "games",
+    category: "game",
     limit: "50",
     sort: "recommended",
     device: ctx.device,
@@ -2625,8 +2651,22 @@ export const Actions = {
           ),
         )
         .orderBy(schema.contentItems.sortOrder, desc(schema.contentItems.id));
-      const visible = rows.filter((r) =>
-        visibleInCountry(r.countries, countryCode),
+      const visible = rows.filter(
+        (r) =>
+          visibleInCountry(r.countries, countryCode) &&
+          // Feed-marker game rows are NOT games: a kind:"game" row
+          // with an Items feed URL exists only so listGameFeed
+          // knows which partner feed to pull — its own items arrive
+          // through the feed. Showing the row itself renders a
+          // phantom "$0.00 / This game is not open for play yet"
+          // card (no Offer URL, no milestones, no reward), so drop
+          // it here, server-side, where its feedUrl is visible.
+          // publicContent does not expose feedUrl, so the client
+          // cannot tell a marker row from a real game — that is why
+          // this is done here and not in GamesSection. Admin-added
+          // games (no feed URL) are unaffected, and listGameFeed
+          // still reads the marker rows directly from the DB.
+          !(args.kind === "game" && (r.feedUrl ?? "").trim()),
       );
       // Wall-link signing salts, keyed by partner name: when the
       // admin saved a salt for a partner (Admin → Partner
