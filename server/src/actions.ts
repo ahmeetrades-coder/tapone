@@ -9,7 +9,7 @@ z,
 type ActionsModule,
 type Ctx,
 } from "@hatch/space-sdk";
-import { and, desc, eq, gte } from "drizzle-orm";
+import { and, desc, eq, gt, gte, inArray } from "drizzle-orm";
 import type { BatchItem } from "drizzle-orm/batch";
 import * as schema from "./schema";
 
@@ -1779,7 +1779,7 @@ function publicPartnerCallback(
 }
 
 /**
- * The one reward-credit path, shared by the generic offerwall postback,
+ *  * The one reward-credit path, shared by the generic offerwall postback, */ function offerInfoFromRaw(rawJson: string): { title: string | null; imageUrl: string | null } { try { const v = JSON.parse(rawJson) as Record<string, unknown>; const str = (x: unknown): string | null => typeof x === "string" && x.trim() ? x.trim() : null; return { title: str(v.offer_name) ?? str(v.offer_title) ?? str(v.offername) ?? str(v.title) ?? str(v.name), imageUrl: str(v.offer_image) ?? str(v.offer_image_url) ?? str(v.image_url) ?? str(v.image) ?? str(v.icon) }; } catch { return { title: null, imageUrl: null }; } } function wallFor(network: string, walls: { provider: string; title: string; imageUrl: string | null }[]): { provider: string; title: string; imageUrl: string | null } | null { const n = network.trim().toLowerCase(); if (!n) return null; return (walls.find((w) => (w.provider || "").trim().toLowerCase() === n || (w.title || "").trim().toLowerCase() === n) ?? null); } /** * The one reward-credit path, shared by the generic offerwall postback,
  * the TheoremReach callback and every owner-configured partner
  * callback: inserts the postback log row (its
  * unique txn_id is what makes a second call a duplicate — callers check
@@ -1801,7 +1801,7 @@ async function applyRewardCredit(
   },
 ): Promise<number> {
   const sharePct = settingInt(settings, "user_share_pct") || 70;
-  const creditedCents = Math.round(opts.payout * 100 * (sharePct / 100));
+  const creditedCents = Math.round(opts.payout * 100 * (sharePct / 100)); if (creditedCents <= 0) return 0; const offerInfo = offerInfoFromRaw(opts.rawJson);
   const statements: BatchItem<"sqlite">[] = [
     db.insert(schema.postbacks).values({
       txnId: opts.txnId,
@@ -1810,7 +1810,7 @@ async function applyRewardCredit(
       payout: opts.payout,
       creditedCents,
       status: "credited",
-      rawJson: opts.rawJson,
+      rawJson: opts.rawJson, offerTitle: offerInfo.title, offerImageUrl: offerInfo.imageUrl, kind: isSurveyNetwork(opts.network) ? "survey" : "offer",
     }),
     db
       .update(schema.users)
@@ -2045,7 +2045,7 @@ export const Actions = {
     },
   }),
 
-  detectNetwork: defineAction({
+    getLiveCompletions: defineAction({ description: "Public latest-completed feed (Live Cashout): the newest credited offer/survey/game completions from every user, newest first. No login needed. Only first names and profile pictures are returned — never email, IP, country or account IDs.", request: z.object({}), response: z.object({ items: z.array(z.object({ id: z.number(), userName: z.string(), userPictureUrl: z.string().nullable(), network: z.string(), title: z.string(), imageUrl: z.string().nullable(), kind: z.enum(["offer", "survey"]), creditedCents: z.number(), createdAt: z.string() })) }), async handler(ctx) { const db = ctx.db<typeof schema>(); const rows = await db.select().from(schema.postbacks).where(and(eq(schema.postbacks.status, "credited"), gt(schema.postbacks.creditedCents, 0))).orderBy(desc(schema.postbacks.id)).limit(20); const userIds = [...new Set(rows.map((r) => r.userId).filter((id): id is number => id != null))]; const users = userIds.length ? await db.select().from(schema.users).where(inArray(schema.users.id, userIds)) : []; const byId = new Map(users.map((u) => [u.id, u])); const walls = await db.select().from(schema.contentItems); return { items: rows.map((r) => { const u = r.userId != null ? byId.get(r.userId) : undefined; const stored = offerInfoFromRaw(r.rawJson); const wall = wallFor(r.network, walls); return { id: r.id, userName: (u?.name ?? "TapOne user").split(" ")[0] ?? "TapOne user", userPictureUrl: u?.pictureUrl ?? null, network: r.network, title: r.offerTitle ?? stored.title ?? wall?.title ?? wall?.provider ?? r.network, imageUrl: r.offerImageUrl ?? stored.imageUrl ?? wall?.imageUrl ?? null, kind: isSurveyNetwork(r.network) ? ("survey" as const) : ("offer" as const), creditedCents: r.creditedCents, createdAt: r.createdAt.toISOString() }; }) }; }, }),  getTopEarners: defineAction({ description: "Public Top 100 earners: the 100 users with the highest lifetime earnings, ranked by total earned, each with picture, first name, total earning and total cashout (approved withdrawals only). No contests, no prizes. No login needed; no email, IP, country or account IDs are ever returned.", request: z.object({}), response: z.object({ items: z.array(z.object({ rank: z.number(), name: z.string(), pictureUrl: z.string().nullable(), totalEarnedCents: z.number(), totalCashoutCents: z.number() })) }), async handler(ctx) { const db = ctx.db<typeof schema>(); const top = await db.select().from(schema.users).where(gt(schema.users.totalEarnedCents, 0)).orderBy(desc(schema.users.totalEarnedCents)).limit(100); const ids = top.map((u) => u.id); const paid = ids.length ? await db.select().from(schema.withdrawals).where(and(inArray(schema.withdrawals.userId, ids), eq(schema.withdrawals.status, "approved"))) : []; const cashout = new Map<number, number>(); for (const w of paid) cashout.set(w.userId, (cashout.get(w.userId) ?? 0) + w.amountCents); return { items: top.map((u, i) => ({ rank: i + 1, name: u.name.split(" ")[0] ?? u.name, pictureUrl: u.pictureUrl ?? null, totalEarnedCents: u.totalEarnedCents, totalCashoutCents: cashout.get(u.id) ?? 0 })) }; }, }),  detectNetwork: defineAction({
     description:
       "Detects the caller's IP, country, flag, VPN suspicion and whether new signups from that country are banned (no account needed).",
     request: z.object({ ip: z.string().max(64).optional() }),
@@ -2953,7 +2953,7 @@ export const Actions = {
       let offerEarningsCents = 0;
       let surveysCompleted = 0;
       let surveyEarningsCents = 0;
-      for (const pb of credited) {
+      for (const pb of credited) { if (pb.creditedCents <= 0) continue;
         if (isSurveyNetwork(pb.network)) {
           surveysCompleted += 1;
           surveyEarningsCents += pb.creditedCents;
@@ -3122,7 +3122,7 @@ export const Actions = {
       items: z.array(
         z.object({
           id: z.number(),
-          network: z.string(),
+          network: z.string(), title: z.string(), imageUrl: z.string().nullable(),
           kind: z.enum(["offer", "survey"]),
           creditedCents: z.number(),
           createdAt: z.string(),
@@ -3137,17 +3137,17 @@ export const Actions = {
         .from(schema.postbacks)
         .where(
           and(
-            eq(schema.postbacks.userId, user.id),
+            eq(schema.postbacks.userId, user.id), gt(schema.postbacks.creditedCents, 0),
             eq(schema.postbacks.status, "credited"),
           ),
         )
         .orderBy(desc(schema.postbacks.id))
-        .limit(200);
+        .limit(200); const walls = await db.select().from(schema.contentItems);
       return {
         chargebackRatePct: await chargebackRatePct(db, user.id),
-        items: rows.map((r) => ({
+        items: rows.map((r) => { const stored = offerInfoFromRaw(r.rawJson); const wall = wallFor(r.network, walls); return ({
           id: r.id,
-          network: r.network,
+          network: r.network, title: r.offerTitle ?? stored.title ?? wall?.title ?? wall?.provider ?? r.network, imageUrl: r.offerImageUrl ?? stored.imageUrl ?? wall?.imageUrl ?? null,
           kind: isSurveyNetwork(r.network) ? ("survey" as const) : ("offer" as const),
           creditedCents: r.creditedCents,
           createdAt: r.createdAt.toISOString(),
@@ -3263,7 +3263,7 @@ export const Actions = {
       secret: z.string().max(200).optional(),
     }),
     response: z.object({
-      status: z.enum(["credited", "duplicate", "unknown_user"]),
+      status: z.enum(["credited", "duplicate", "unknown_user", "rejected"]),
       creditedCents: z.number(),
     }),
     async handler(ctx, args) {
@@ -3271,7 +3271,7 @@ export const Actions = {
       const settings = await getSettings(db);
       const secret = settings["postback_secret"] ?? "";
       if (secret && args.secret !== secret)
-        throw new Error("Invalid postback secret.");
+        throw new Error("Invalid postback secret."); if (args.payout <= 0) { return { status: "rejected" as const, creditedCents: 0 }; }
 
       const existing = await db
         .select()
@@ -3325,7 +3325,7 @@ export const Actions = {
         rawJson: JSON.stringify(args),
       });
       ctx.invalidateQueries();
-      return { status: "credited" as const, creditedCents };
+      if (creditedCents <= 0) { return { status: "rejected" as const, creditedCents: 0 }; } return { status: "credited" as const, creditedCents };
     },
   }),
 
