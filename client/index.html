@@ -8,8 +8,12 @@
     <meta name="google-site-verification" content="WjgEVl5k8LPKPQjxvpPb0rTT9C6d5b95hBtjNikDv9Q" />
     <meta name="description" content="TapOne (tapone.store) — Tap One earning money by surveys, offers and games. Tap One survey earning money, Tap One game survey, Tap One earn dollars and withdraw. Join TapOne free." />
     <meta name="keywords" content="tap one, tapone.store, tap one store, tap one earning money, tap one earn money, tap one earn, tap one game survey, tap one survey earning money, tap one survey" />
-    <!-- Favicon: /favicon.ico is the file Google Search looks for first. -->
-    <link rel="icon" type="image/x-icon" href="/favicon.ico" />
+    <!-- Favicon: /favicon.ico is the file Google Search looks for first.
+         Bun's HTML bundler resolves icon hrefs relative to this file, so
+         the href must be ./favicon.ico (an absolute /favicon.ico makes the
+         build fail with 'Could not resolve: "/favicon.ico"'). The file is
+         still served at /favicon.ico by server.ts (SEO-files branch). -->
+    <link rel="icon" type="image/x-icon" href="./favicon.ico" />
     <link rel="icon" type="image/png" href="./favicon.png" />
     <link rel="apple-touch-icon" href="./favicon.png" />
     <meta property="og:image" content="https://www.tapone.store/favicon.png" />
