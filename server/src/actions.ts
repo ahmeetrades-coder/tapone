@@ -1612,6 +1612,47 @@ const offerwallGgGamesCache = new Map<
   { at: number; items: SurveyFeedItem[] }
 >();
 
+// Placement-level exchange rate (units per $1) for Offerwall.GG.
+// ROOT CAUSE of the popup never loading (2026-11-25): the DETAIL
+// endpoint GET /api/v1/offers/{offer} returns ONLY
+// { success, data: { offer } } — there is NO data.currency in that
+// response (Offerwall.GG OpenAPI 3.1: the detail 200 schema requires
+// only data.offer; Currency is echoed ONLY by the LIST endpoint
+// /offers, as data.currency). The popup handler read perUsd from
+// data.currency, got null, and silently returned found:false for
+// EVERY game — which is exactly the live symptom (error line on
+// every popup, no steps, no description, no Total row), with no
+// server-log error because the fetch itself succeeded (200).
+// The rate is a property of the placement, not of one offer, so it
+// is read once from the list endpoint (limit=1) and cached 10 min.
+let offerwallGgPerUsdCache: { at: number; perUsd: number } | null = null;
+async function getOfferwallGgPerUsd(
+  apiKey: string,
+  appId: string,
+): Promise<number | null> {
+  if (
+    offerwallGgPerUsdCache &&
+    Date.now() - offerwallGgPerUsdCache.at < 600_000
+  )
+    return offerwallGgPerUsdCache.perUsd;
+  const json = await fetchFeedJson(
+    `https://offerwall.gg/api/v1/offers?${new URLSearchParams({
+      appId,
+      limit: "1",
+    }).toString()}`,
+    { "X-Api-Key": apiKey },
+  );
+  const perUsd = feedNum(
+    feedRecord(feedRecord(feedRecord(json)?.["data"])?.["currency"]) ?? {},
+    ["perUsd"],
+  );
+  if (perUsd != null && perUsd > 0) {
+    offerwallGgPerUsdCache = { at: Date.now(), perUsd };
+    return perUsd;
+  }
+  return offerwallGgPerUsdCache?.perUsd ?? null;
+}
+
 /**
  * Offerwall.GG games feed (offerwall.gg/developers, OpenAPI 3.1).
  *
@@ -2936,6 +2977,10 @@ export const Actions = {
     request: z.object({
       token: z.string().min(1).max(200),
       offerId: z.string().regex(/^\d{1,10}$/),
+      // The card's own total, passed by the popup: last-resort way
+      // to recover the placement rate (see perUsd resolution below).
+      // Optional so older clients keep working.
+      totalCents: z.number().int().min(0).optional(),
     }),
     response: z.object({
       found: z.boolean(),
@@ -3003,12 +3048,39 @@ export const Actions = {
       const offer = feedRecord(feedRecord(json)?.["data"])?.["offer"];
       const offerRec = feedRecord(offer);
       if (!offerRec) return empty;
+      const reward = feedNum(offerRec, ["reward"]);
+      // perUsd resolution, in order. (1) The detail response itself
+      // carries no data.currency (see the note on
+      // getOfferwallGgPerUsd) — read it if a future API version ever
+      // adds it. (2) The placement rate, cached from the list
+      // endpoint — the authoritative source (live: 1000). (3) Derive
+      // it from the card's own total, which the list adapter computed
+      // as round(reward / perUsd * sharePct): perUsd is then
+      // reward * sharePct / totalCents. Exact up to the card's
+      // 1-cent rounding, and only used when the list call also
+      // failed. If all three fail, log it (previously this failed
+      // silently) and return empty so the popup shows its honest
+      // error line instead of invented steps.
       const dataRec = feedRecord(feedRecord(json)?.["data"]);
-      const perUsd = dataRec
+      let perUsd = dataRec
         ? feedNum(feedRecord(dataRec["currency"]) ?? {}, ["perUsd"])
         : null;
-      if (perUsd == null || perUsd <= 0) return empty;
-      const reward = feedNum(offerRec, ["reward"]);
+      if (perUsd == null || perUsd <= 0)
+        perUsd = await getOfferwallGgPerUsd(apiKey, appId);
+      if (
+        (perUsd == null || perUsd <= 0) &&
+        args.totalCents != null &&
+        args.totalCents > 0 &&
+        reward != null &&
+        reward > 0
+      )
+        perUsd = (reward * sharePct) / args.totalCents;
+      if (perUsd == null || perUsd <= 0) {
+        console.warn(
+          `[feed] offerwall.gg detail: no perUsd for offer ${args.offerId}`,
+        );
+        return empty;
+      }
       const totalCents =
         reward == null || reward <= 0
           ? 0
