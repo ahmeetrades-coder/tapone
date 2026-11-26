@@ -3508,6 +3508,7 @@ function SettingsTab({ token }: { token: string }) {
   const [postbackSecret, setPostbackSecret] = useState("");
   const [theoremReachSecret, setTheoremReachSecret] = useState("");
   const [offerwallggApiKey, setOfferwallggApiKey] = useState("");
+  const [pubscaleSecretKey, setPubscaleSecretKey] = useState("");
   const [checkinGoal, setCheckinGoal] = useState("");
   const [checkinDays, setCheckinDays] = useState<string[]>(["", "", "", "", "", "", ""]);
   const [centsPerLevel, setCentsPerLevel] = useState("");
@@ -3603,6 +3604,7 @@ function SettingsTab({ token }: { token: string }) {
         postbackSecret: postbackSecret.trim() === "" ? undefined : postbackSecret.trim(),
         theoremReachSecret: theoremReachSecret.trim() === "" ? undefined : theoremReachSecret.trim(),
         offerwallggApiKey: offerwallggApiKey.trim() === "" ? undefined : offerwallggApiKey.trim(),
+        pubscaleSecretKey: pubscaleSecretKey.trim() === "" ? undefined : pubscaleSecretKey.trim(),
         checkinGoalCents,
         checkinRewardsCents: checkinRewardsCents as number[],
         levelCentsPerLevel,
@@ -3962,6 +3964,21 @@ function SettingsTab({ token }: { token: string }) {
               shown to users. Find it in the Offerwall.GG publisher
               dashboard. The Games tab also needs a Games Content row for
               Offerwall.GG (Items feed URL: https://offerwall.gg/api/v1/offers).
+            </p>
+          </div>
+          <div className="mt-5">
+            <label htmlFor="set-ps-secret" className="text-sm font-semibold">
+              PubScale S2S secret key {s?.pubscaleSecretSet ? <span className="text-[var(--brand-deep)] dark:text-[var(--brand)]">(currently set — PubScale callbacks are signature-checked)</span> : <span className="text-[var(--dim)]">(not set — PubScale callbacks are refused, nothing credits)</span>}
+            </label>
+            <input id="set-ps-secret" value={pubscaleSecretKey} onChange={(e) => setPubscaleSecretKey(e.target.value)} placeholder="Paste the S2S secret key from your PubScale dashboard (Settings → API Key)" className={fieldCls} />
+            <p className="mt-1.5 text-xs leading-relaxed text-[var(--dim)]">
+              Server-only — TapOne uses it to verify the MD5 signature on
+              every PubScale reward callback, and it is never shown to
+              users. Find it in the PubScale dashboard, provided along
+              with the App API key. The PubScale wall card also needs the
+              S2S Callback URL set in the PubScale dashboard to
+              https://www.tapone.store/pubscale-callback — without it,
+              wall completions never reach TapOne.
             </p>
           </div>
         </section>
