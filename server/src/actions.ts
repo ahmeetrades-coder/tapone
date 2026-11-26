@@ -12,6 +12,7 @@ type Ctx,
 import { and, desc, eq, gt, gte, inArray, isNull, ne, or } from "drizzle-orm";
 import type { BatchItem } from "drizzle-orm/batch";
 import * as schema from "./schema";
+import { createHash } from "node:crypto";
 
 type DB = ReturnType<Ctx["db"]>;
 
@@ -36,6 +37,11 @@ const DEFAULT_SETTINGS: Record<string, string> = {
   // X-Api-Key header when fetching the Offerwall.GG games feed.
   // Empty = the Games tab shows no Offerwall.GG games (and no error).
   offerwallgg_api_key: "",
+  // PubScale S2S secret key (PubScale dashboard → Settings → API Key,
+  // provided along with the App API key). Used ONLY to verify the MD5
+  // signature on PubScale reward callbacks; empty = PubScale callbacks
+  // are refused (never credited unverified).
+  pubscale_secret_key: "",
   checkin_bonus_cents: "5",
   level_reward_cents: "50",
   // Weekly check-in (owner-editable in Admin → Settings → Money): the
@@ -4413,6 +4419,117 @@ export const Actions = {
     },
   }),
 
+  pubscaleCallback: defineAction({
+    description:
+      "PubScale server-to-server reward callback: verifies the MD5 signature with the S2S secret key (Admin → Settings), then credits the user — found by the Offer Token PubScale sends back as user_id — 70% of the reward. Idempotent per PubScale token; zero/negative rewards never credit. The generic partner callback cannot verify PubScale: its signature is MD5, while the generic handler only does HMAC-SHA1/SHA-256 — hence this dedicated action, mirroring theoremReachCallback.",
+    request: z.object({
+      // All values are strings on purpose: they arrive as URL query
+      // parameters and the exact text is part of the signed string.
+      user_id: z.string().trim().min(1).max(64),
+      value: z.string().trim().max(32),
+      token: z.string().trim().min(1).max(120),
+      signature: z.string().trim().max(120).optional(),
+    }),
+    response: z.object({
+      status: z.enum(["credited", "duplicate", "unknown_user", "rejected"]),
+      creditedCents: z.number(),
+    }),
+    async handler(ctx, args) {
+      const db = ctx.db<typeof schema>();
+      const settings = await getSettings(db);
+
+      // Signature verification (PubScale S2S docs 1.0.6):
+      //   signature = hex(MD5("<secret>.<user_id>.<int(value)>.<token>"))
+      // The secret key is provided along with the App API key. The
+      // value is converted from decimal to integer before signing.
+      // Enforced whenever a secret is set in Admin → Settings; with
+      // no secret stored, callbacks are refused, never waved through.
+      const secret = settings["pubscale_secret_key"] ?? "";
+      const payoutNumber = Number.parseFloat(args.value);
+      if (!Number.isFinite(payoutNumber))
+        throw new Error("Invalid reward amount.");
+      if (!secret) throw new Error("PubScale callback secret is not set in Admin → Settings.");
+      if (!args.signature) throw new Error("Missing callback signature.");
+      const expected = createHash("md5")
+        .update(
+          `${secret}.${args.user_id}.${Math.trunc(payoutNumber)}.${args.token}`,
+        )
+        .digest("hex");
+      if (!secretsEqual(args.signature.toLowerCase(), expected))
+        throw new Error("Invalid callback signature.");
+
+      // The reward value is in Coin — the PubScale dashboard's
+      // currency for this offerwall is Coin, $1 = 1,000 Coin — so
+      // dollars = value / 1000. UNCONFIRMED until a sandbox callback
+      // test proves the unit: if PubScale ever sent dollars, this
+      // divisor would under-credit 1000x. Do not call PubScale
+      // earnings live until that test passes.
+      const payout = payoutNumber / 1000;
+      if (payout <= 0) {
+        return { status: "rejected" as const, creditedCents: 0 };
+      }
+
+      // Idempotent per PubScale transaction token (namespaced so it
+      // can never collide with another network's transaction IDs).
+      const txnKey = `pubscale:${args.token}`;
+      const existing = await db
+        .select()
+        .from(schema.postbacks)
+        .where(eq(schema.postbacks.txnId, txnKey))
+        .limit(1);
+      if (existing[0]) {
+        return {
+          status: "duplicate" as const,
+          creditedCents: existing[0].creditedCents,
+        };
+      }
+
+      // user_id is the publisher user ID from the entry link = the
+      // user's Offer Token (OT-…); fall back to the user code.
+      let userRows = await db
+        .select()
+        .from(schema.users)
+        .where(eq(schema.users.offerToken, args.user_id))
+        .limit(1);
+      if (!userRows[0]) {
+        userRows = await db
+          .select()
+          .from(schema.users)
+          .where(eq(schema.users.userCode, args.user_id))
+          .limit(1);
+      }
+      const user = userRows[0];
+      const rawJson = JSON.stringify({
+        network: "PubScale",
+        user_id: args.user_id,
+        value: args.value,
+        token: args.token,
+      });
+      if (!user) {
+        await db.insert(schema.postbacks).values({
+          txnId: txnKey,
+          network: "PubScale",
+          userId: null,
+          payout,
+          creditedCents: 0,
+          status: "unknown_user",
+          rawJson,
+        });
+        return { status: "unknown_user" as const, creditedCents: 0 };
+      }
+
+      const creditedCents = await applyRewardCredit(db, settings, user, {
+        network: "PubScale",
+        txnId: txnKey,
+        payout,
+        note: "PubScale offer completed",
+        rawJson,
+      });
+      ctx.invalidateQueries();
+      return { status: "credited" as const, creditedCents };
+    },
+  }),
+
   partnerCallback: defineAction({
     description:
       "Reward callback for an owner-configured partner (Admin → Partner Callbacks): reads the user ID, transaction ID and payout from the parameter names the owner set for that partner, checks the secret/signature the owner configured (none / secret parameter / HMAC-SHA1 / HMAC-SHA256), then credits the user 70% through the same path as the built-in postbacks — referrer commission, level-ups and weekly check-in included. Idempotent per partner + transaction ID.",
@@ -4684,6 +4801,7 @@ export const Actions = {
         postbackSecretSet: z.boolean(),
         theoremReachSecretSet: z.boolean(),
         offerwallggApiKeySet: z.boolean(),
+        pubscaleSecretSet: z.boolean(),
         checkinBonusCents: z.number(),
         levelRewardCents: z.number(),
         checkinGoalCents: z.number(),
@@ -4754,6 +4872,7 @@ export const Actions = {
           postbackSecretSet: (settings["postback_secret"] ?? "") !== "",
           theoremReachSecretSet: (settings["theoremreach_secret"] ?? "") !== "",
           offerwallggApiKeySet: (settings["offerwallgg_api_key"] ?? "") !== "",
+          pubscaleSecretSet: (settings["pubscale_secret_key"] ?? "") !== "",
           checkinBonusCents: settingInt(settings, "checkin_bonus_cents"),
           levelRewardCents: settingInt(settings, "level_reward_cents"),
           checkinGoalCents: checkinGoalFrom(settings),
@@ -6489,6 +6608,7 @@ export const Actions = {
       postbackSecret: z.string().max(200).optional(),
       theoremReachSecret: z.string().max(200).optional(),
       offerwallggApiKey: z.string().max(200).optional(),
+      pubscaleSecretKey: z.string().max(200).optional(),
       checkinBonusCents: z.number().int().min(0).max(100000).optional(),
       levelRewardCents: z.number().int().min(0).max(100000).optional(),
       checkinGoalCents: z.number().int().min(1).max(1_000_000).optional(),
@@ -6544,6 +6664,8 @@ export const Actions = {
         updates.push(["theoremreach_secret", args.theoremReachSecret]);
       if (args.offerwallggApiKey !== undefined)
         updates.push(["offerwallgg_api_key", args.offerwallggApiKey]);
+      if (args.pubscaleSecretKey !== undefined)
+        updates.push(["pubscale_secret_key", args.pubscaleSecretKey]);
       if (args.checkinBonusCents !== undefined)
         updates.push(["checkin_bonus_cents", String(args.checkinBonusCents)]);
       if (args.levelRewardCents !== undefined)
