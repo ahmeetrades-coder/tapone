@@ -576,7 +576,7 @@ function CheckinBonus({ token }: { token: string }) {
     ? Math.min(100, Math.round((d.todayEarnedCents / d.goalCents) * 100))
     : 0;
   return (
-    <section className="mb-6 rounded-3xl bg-[var(--surface)] p-5 ring-1 ring-[var(--border)] sm:p-6" aria-label="Weekly check-in">
+    <section className="mb-6 rounded-3xl bg-[var(--surface)] p-4 ring-1 ring-[var(--border)] sm:p-6" aria-label="Weekly check-in">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h2 className="font-display text-xl font-extrabold">
@@ -598,11 +598,18 @@ function CheckinBonus({ token }: { token: string }) {
         </span>
       </div>
 
-      <div className="mt-4 flex gap-2" aria-label="This week, Monday to Sunday">
+      {/* Mobile fix (2026-11-26): the 7 day boxes overflowed the card on
+          phones. Each box's min content width ("$0.65" at 13px + padding)
+          was ~44px, so 7 boxes + gaps needed ~356px but a 360px phone
+          only gives the row ~296px. min-w-0 lets every box shrink below
+          its content width, and the smaller mobile sizes keep "$0.65" /
+          "Missed" inside the box down to a 320px screen. Laptop
+          (sm: and up) is unchanged. */}
+      <div className="mt-4 flex gap-1 sm:gap-2" aria-label="This week, Monday to Sunday">
         {(d?.days ?? []).map((day) => (
           <span
             key={day.dayKey}
-            className={`flex h-16 flex-1 flex-col items-center justify-center gap-0.5 rounded-xl px-1 text-center ${
+            className={`flex h-16 min-w-0 flex-1 flex-col items-center justify-center gap-0.5 overflow-hidden rounded-xl px-0.5 text-center sm:px-1 ${
               day.completed
                 ? "bg-[var(--brand)] text-white"
                 : day.isToday
@@ -612,11 +619,11 @@ function CheckinBonus({ token }: { token: string }) {
                     : "bg-[var(--surface-2)] text-[var(--dim)]"
             }`}
           >
-            <span className="text-xs font-extrabold tracking-wide">{day.label}</span>
-            <span className="font-display text-[13px] font-extrabold leading-none">
+            <span className="max-w-full truncate text-xs font-extrabold tracking-wide">{day.label}</span>
+            <span className="max-w-full truncate font-display text-[11px] font-extrabold leading-none sm:text-[13px]">
               {fmt(day.rewardCents)}
             </span>
-            <span className="text-[10px] font-bold leading-none" aria-hidden="true">
+            <span className="max-w-full truncate text-[9px] font-bold leading-none sm:text-[10px]" aria-hidden="true">
               {day.completed ? "✓ Done" : day.missed ? "Missed" : day.isToday ? "Today" : ""}
             </span>
           </span>
