@@ -415,6 +415,31 @@ const server = Bun.serve({
         return errorResponse(err);
       }
     }
+    if (url.pathname === "/pubscale-callback") {
+      // PubScale server-to-server reward callback (GET, query params
+      // user_id/value/token/signature). PubScale signs with MD5, which
+      // the generic /partner-callback/ handler cannot verify (HMAC
+      // only) — hence this dedicated route + action, mirroring
+      // /theoremreach-callback.
+      if (req.method !== "GET") {
+        return Response.json(
+          { error: { message: "Callback is called with GET." } },
+          { status: 405 },
+        );
+      }
+      const q = url.searchParams;
+      try {
+        const data = await dispatch("pubscaleCallback", {
+          user_id: q.get("user_id") ?? "",
+          value: q.get("value") ?? "",
+          token: q.get("token") ?? "",
+          signature: q.get("signature") ?? undefined,
+        });
+        return Response.json(data ?? { status: "ok" });
+      } catch (err) {
+        return errorResponse(err);
+      }
+    }
     if (url.pathname.startsWith("/partner-callback/")) {
       // Owner-configured partner reward callback (Admin → Partner
       // Callbacks). The key is the last path segment; every query
