@@ -261,8 +261,8 @@ function Overview({
         <>
           <div className="mt-5 grid grid-cols-2 gap-3 lg:grid-cols-4">
             {cards.map(([label, value]) => (
-              <div key={label} className="rounded-2xl bg-[var(--surface)] p-4 ring-1 ring-[var(--border)]">
-                <p className="font-display text-xl font-extrabold">{value}</p>
+              <div key={label} className="min-w-0 rounded-2xl bg-[var(--surface)] p-4 ring-1 ring-[var(--border)]">
+                <p className="font-display text-xl font-extrabold break-words">{value}</p>
                 <p className="mt-0.5 text-xs font-semibold text-[var(--dim)]">{label}</p>
               </div>
             ))}
@@ -293,7 +293,7 @@ function Overview({
                 </div>
               ))}
             </dl>
-            <p className="mt-4 rounded-xl bg-[var(--ink)] px-4 py-3 font-mono text-xs leading-relaxed text-[#7ee2b8]">
+            <p className="mt-4 overflow-x-auto rounded-xl bg-[var(--ink)] px-4 py-3 font-mono text-xs leading-relaxed whitespace-nowrap text-[#7ee2b8]">
               postback?network=MMWall&amp;user_code={"{user_id}"}&amp;payout={"{payout}"}&amp;txn_id={"{transaction_id}"}
             </p>
 
@@ -302,7 +302,7 @@ function Overview({
               In the TheoremReach publisher dashboard, open the TapOne app and
               set its server-side reward callback to your site address plus
               this path (for example{" "}
-              <code className="font-semibold text-[var(--text)]">https://www.tapone.store/theoremreach-callback?...</code>).
+              <code className="font-semibold break-all text-[var(--text)]">https://www.tapone.store/theoremreach-callback?...</code>).
               When a user finishes a survey, TheoremReach calls it, TapOne
               checks the signature with the Secret Key from Settings →
               Postback security, and credits the user{" "}
@@ -313,7 +313,7 @@ function Overview({
               <code className="font-semibold text-[var(--text)]">{"{tx_id}"}</code> credits
               only once.
             </p>
-            <p className="mt-4 rounded-xl bg-[var(--ink)] px-4 py-3 font-mono text-xs leading-relaxed text-[#7ee2b8]">
+            <p className="mt-4 overflow-x-auto rounded-xl bg-[var(--ink)] px-4 py-3 font-mono text-xs leading-relaxed whitespace-nowrap text-[#7ee2b8]">
               theoremreach-callback?user_id={"{user_id}"}&amp;tx_id={"{tx_id}"}&amp;reward={"{reward}"}&amp;reward_amount_in_dollars={"{reward_amount_in_dollars}"}&amp;external_transaction_id={"{external_transaction_id}"}
             </p>
 
