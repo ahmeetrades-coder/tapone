@@ -22,6 +22,11 @@
 //   GET  /theoremreach-callback?…   — TheoremReach's server-to-server
 //     reward callback; dispatched to the theoremReachCallback action
 //     with the raw signed URL so the action can verify the signature.
+//   GET  /pubscale-callback?…      — PubScale's server-to-server reward
+//     callback; dispatched to the pubscaleCallback action.
+//   GET  /pubscale-chargeback?…    — PubScale's chargeback/reversal
+//     callback; dispatched to the pubscaleChargeback action, which
+//     deducts only what the matching reward callback credited.
 //   GET|POST /partner-callback/<key>?… — reward callback for any
 //     partner the owner configured in Admin → Partner Callbacks;
 //     dispatched to the partnerCallback action with every query
@@ -430,6 +435,32 @@ const server = Bun.serve({
       const q = url.searchParams;
       try {
         const data = await dispatch("pubscaleCallback", {
+          user_id: q.get("user_id") ?? "",
+          value: q.get("value") ?? "",
+          token: q.get("token") ?? "",
+          signature: q.get("signature") ?? undefined,
+        });
+        return Response.json(data ?? { status: "ok" });
+      } catch (err) {
+        return errorResponse(err);
+      }
+    }
+    if (url.pathname === "/pubscale-chargeback") {
+      // PubScale chargeback/reversal callback (GET, query params
+      // user_id/value/token/signature) — the SAME four parameters and
+      // the SAME MD5 signature as the reward callback (PubScale docs:
+      // chargeback-configuration). It NEVER credits and it NEVER
+      // points at /pubscale-callback: it deducts only what the
+      // matching reward callback previously credited for that token.
+      if (req.method !== "GET") {
+        return Response.json(
+          { error: { message: "Callback is called with GET." } },
+          { status: 405 },
+        );
+      }
+      const q = url.searchParams;
+      try {
+        const data = await dispatch("pubscaleChargeback", {
           user_id: q.get("user_id") ?? "",
           value: q.get("value") ?? "",
           token: q.get("token") ?? "",

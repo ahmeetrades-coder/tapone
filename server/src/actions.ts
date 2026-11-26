@@ -4530,6 +4530,165 @@ export const Actions = {
     },
   }),
 
+  pubscaleChargeback: defineAction({
+    description:
+      "PubScale chargeback/reversal callback: verifies the same MD5 signature as the reward callback with the S2S secret key (Admin → Settings), then deducts ONLY what the matching reward callback previously credited for that PubScale token — the 70% credited cents, never the full payout, never more than the user's current balance, never below $0.00. Idempotent per token; unknown tokens, unknown users and bad signatures deduct nothing. The reversal is a negative admin_adjust transaction whose note contains 'chargeback', so it shows in the user's History and counts in the existing chargeback rate. This is the ONLY place a PubScale callback ever deducts — /pubscale-callback credits and never debits.",
+    request: z.object({
+      // Same four parameters as the reward callback, same signed
+      // string: the chargeback doc sends user_id/value/token/
+      // signature with the identical MD5 template.
+      user_id: z.string().trim().min(1).max(64),
+      value: z.string().trim().max(32),
+      token: z.string().trim().min(1).max(120),
+      signature: z.string().trim().max(120).optional(),
+    }),
+    response: z.object({
+      status: z.enum([
+        "reversed",
+        "duplicate",
+        "unknown_user",
+        "mismatched_user",
+        "no_original_credit",
+        "rejected",
+      ]),
+      deductedCents: z.number(),
+    }),
+    async handler(ctx, args) {
+      const db = ctx.db<typeof schema>();
+      const settings = await getSettings(db);
+
+      // Same signature as the reward callback (PubScale chargeback
+      // docs 1.0.10): signature =
+      // hex(MD5("<secret>.<user_id>.<int(value)>.<token>")). Refuse
+      // whenever the secret is unset or the signature is wrong or
+      // missing — a chargeback that cannot be verified deducts
+      // nothing, exactly like an unverified reward never credits.
+      const secret = settings["pubscale_secret_key"] ?? "";
+      const payoutNumber = Number.parseFloat(args.value);
+      if (!Number.isFinite(payoutNumber))
+        throw new Error("Invalid chargeback amount.");
+      if (!secret) throw new Error("PubScale callback secret is not set in Admin → Settings.");
+      if (!args.signature) throw new Error("Missing callback signature.");
+      const expected = createHash("md5")
+        .update(
+          `${secret}.${args.user_id}.${Math.trunc(payoutNumber)}.${args.token}`,
+        )
+        .digest("hex");
+      if (!secretsEqual(args.signature.toLowerCase(), expected))
+        throw new Error("Invalid callback signature.");
+
+      // The chargeback value is the reward value in Coin, same as the
+      // earning callback (dollars = value / 1000). The amount deducted
+      // does NOT come from this value: it comes from the original
+      // credit stored for this token, so a chargeback can never take
+      // more than the user was actually credited.
+      const payout = payoutNumber / 1000;
+      if (payout <= 0) {
+        return { status: "rejected" as const, deductedCents: 0 };
+      }
+
+      // The original credit, by the same token the reward callback
+      // stored it under (pubscale:<token>).
+      const txnKey = `pubscale:${args.token}`;
+      const original = await db
+        .select()
+        .from(schema.postbacks)
+        .where(eq(schema.postbacks.txnId, txnKey))
+        .limit(1);
+      const originalRow = original[0];
+      if (
+        !originalRow ||
+        originalRow.status !== "credited" ||
+        originalRow.creditedCents <= 0
+      ) {
+        return { status: "no_original_credit" as const, deductedCents: 0 };
+      }
+
+      // user_id is the Offer Token PubScale sends back; fall back to
+      // the user code — same lookup as pubscaleCallback.
+      let userRows = await db
+        .select()
+        .from(schema.users)
+        .where(eq(schema.users.offerToken, args.user_id))
+        .limit(1);
+      if (!userRows[0]) {
+        userRows = await db
+          .select()
+          .from(schema.users)
+          .where(eq(schema.users.userCode, args.user_id))
+          .limit(1);
+      }
+      const user = userRows[0];
+      if (!user) {
+        return { status: "unknown_user" as const, deductedCents: 0 };
+      }
+      if (originalRow.userId !== user.id) {
+        return { status: "mismatched_user" as const, deductedCents: 0 };
+      }
+
+      // Idempotent per token: the reversal is recorded as one negative
+      // admin_adjust transaction whose note carries the token, so a
+      // retried chargeback (PubScale retries 6 times) finds its own
+      // row and deducts nothing a second time. The note contains
+      // "chargeback", which is exactly what chargebackRatePct counts.
+      const note = `PubScale chargeback (token ${args.token})`;
+      const prior = await db
+        .select()
+        .from(schema.transactions)
+        .where(
+          and(
+            eq(schema.transactions.userId, user.id),
+            eq(schema.transactions.kind, "admin_adjust"),
+            eq(schema.transactions.note, note),
+          ),
+        )
+        .limit(1);
+      if (prior[0]) {
+        return {
+          status: "duplicate" as const,
+          deductedCents: -prior[0].amountCents,
+        };
+      }
+
+      // Deduct only what was credited, capped at what the user still
+      // holds: if they already withdrew or spent the credit, the
+      // balance is never driven below $0.00 and the shortfall is not
+      // chased. Lifetime earnings fall by the same amount (the level
+      // derives from them — checkLevelUps below lowers the level if
+      // needed, but a title reward already paid is never taken back).
+      const deductCents = Math.min(
+        originalRow.creditedCents,
+        user.balanceCents,
+      );
+      if (deductCents <= 0) {
+        return { status: "reversed" as const, deductedCents: 0 };
+      }
+      const statements: BatchItem<"sqlite">[] = [
+        db
+          .update(schema.users)
+          .set({
+            balanceCents: user.balanceCents - deductCents,
+            totalEarnedCents: Math.max(
+              0,
+              user.totalEarnedCents - deductCents,
+            ),
+          })
+          .where(eq(schema.users.id, user.id)),
+        db.insert(schema.transactions).values({
+          userId: user.id,
+          kind: "admin_adjust",
+          amountCents: -deductCents,
+          note,
+        }),
+      ];
+      const [first, ...rest] = statements;
+      if (first) await db.batch([first, ...rest]);
+      await checkLevelUps(db, user.id);
+      ctx.invalidateQueries();
+      return { status: "reversed" as const, deductedCents: deductCents };
+    },
+  }),
+
   partnerCallback: defineAction({
     description:
       "Reward callback for an owner-configured partner (Admin → Partner Callbacks): reads the user ID, transaction ID and payout from the parameter names the owner set for that partner, checks the secret/signature the owner configured (none / secret parameter / HMAC-SHA1 / HMAC-SHA256), then credits the user 70% through the same path as the built-in postbacks — referrer commission, level-ups and weekly check-in included. Idempotent per partner + transaction ID.",
