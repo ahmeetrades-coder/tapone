@@ -156,6 +156,8 @@
       "breakpoints": true
     }, { "idx": 25, "version": "6", "when": 1795758106385, "tag": "0026_live_chat",
       "breakpoints": true
+    }, { "idx": 26, "version": "6", "when": 1795838000000, "tag": "0028_login_options",
+      "breakpoints": true
     }
   ]
 }
