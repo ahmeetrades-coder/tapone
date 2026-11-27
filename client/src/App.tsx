@@ -397,8 +397,9 @@ export function SignInCard({
             Start earning in seconds
           </p>
           <p className="mt-1 text-sm text-[var(--dim)]">
-            Sign up or log in with your email and a password. Email
-            sign-up needs a 6-digit code we send you.
+            {showEmail
+              ? "Sign up or log in with your email and a password. Email sign-up needs a 6-digit code we send you."
+              : "Sign up or log in with Google, or with your email and a password. Email sign-up needs a 6-digit code we send you."}
           </p>
         </>
       )}
@@ -699,8 +700,9 @@ export function SignInCard({
         </div>
       )}
       <p className="mt-3 text-center text-xs leading-relaxed text-[var(--dim)]">
-        You can sign in with Google or with email + password. New email
-        accounts are verified with a code sent to your email.
+        {showEmail
+          ? "You can sign in with your email and password. New email accounts are verified with a code sent to your email."
+          : "You can sign in with Google or with email + password. New email accounts are verified with a code sent to your email."}
       </p>
     </div>
   );
