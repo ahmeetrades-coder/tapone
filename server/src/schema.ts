@@ -13,6 +13,15 @@
 // postbacks    — offerwall conversion log; txn_id unique = idempotent credit
 // settings     — key/value site settings (Google client id, admin login,
 //                contest pools, minimum withdrawal)
+// redeemCodes  — owner-created redeem codes for the Redeem Code section:
+//                code text (unique), dollar amount, max uses, used count,
+//                active flag. A code stops working when its max uses are
+//                reached or the owner deactivates it.
+// redeemRedemptions — one row per successful code redemption: who, which
+//                code, how much, when. UNIQUE (code_id, user_id) = one
+//                user can redeem the same code only once, ever. The code
+//                text is stored on the row too, so the history survives
+//                even if the owner later deletes the code itself.
 // bannedCountries — countries the owner has banned; no new account may be
 //                created from a banned country (checked server-side at sign-up)
 // withdrawMethods — EXTRA withdraw payment methods the owner adds per
@@ -159,6 +168,7 @@ export const transactions = sqliteTable("transactions", {
       "checkin_bonus",
       "contest_prize",
       "level_reward",
+      "redeem_code",
     ],
   }).notNull(),
   amountCents: integer("amount_cents").notNull(),
@@ -283,6 +293,40 @@ export const postbacks = sqliteTable("postbacks", {
     enum: ["credited", "duplicate", "unknown_user"],
   }).notNull(),
   rawJson: text("raw_json").notNull().default("{}"), offerTitle: text("offer_title"), offerImageUrl: text("offer_image_url"), kind: text("kind"),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+// redeem_codes — owner-created codes for the Redeem Code section
+// (replaces Contact Us, owner order 2026-11-27). code is the text the
+// user types (stored uppercase, unique); amountCents is the full
+// amount credited to the user's balance on redeem — no 70/30 split,
+// no affiliate commission, the owner pays it in full. maxUses is how
+// many different users may redeem it; usedCount tracks redemptions
+// so far. active = 0 deactivates it without deleting its history.
+export const redeemCodes = sqliteTable("redeem_codes", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  code: text("code").notNull().unique(),
+  amountCents: integer("amount_cents").notNull(),
+  maxUses: integer("max_uses").notNull(),
+  usedCount: integer("used_count").notNull().default(0),
+  active: integer("active").notNull().default(1),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+// redeem_redemptions — audit trail of every successful redemption.
+// UNIQUE (codeId, userId) enforces "one user, one redeem per code" at
+// the database level. code is denormalised here so the row still reads
+// correctly if the owner deletes the code itself later.
+export const redeemRedemptions = sqliteTable("redeem_redemptions", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  codeId: integer("code_id").notNull(),
+  code: text("code").notNull(),
+  userId: integer("user_id").notNull(),
+  amountCents: integer("amount_cents").notNull(),
   createdAt: integer("created_at", { mode: "timestamp_ms" })
     .notNull()
     .$defaultFn(() => new Date()),
