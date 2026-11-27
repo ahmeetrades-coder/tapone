@@ -648,7 +648,7 @@ type StaticPageContent = { title: string; body: string[]; sections?: { heading: 
   forum: {
     title: "Forum",
     body: [
-      "Our community forum is not open yet. Until it launches, the fastest way to reach the TapOne team and other members is the Help & Mailbox inside your account — sign in, open Help, and send your message.",
+      "Our community forum is not open yet. Until it launches, the fastest way to reach the TapOne team is the Help option inside your account — sign in, open Help, and send your message. To chat with other members, open Live Chat at the top of Help.",
     ],
   },
   testimonials: {
@@ -666,8 +666,8 @@ type StaticPageContent = { title: string; body: string[]; sections?: { heading: 
   contact: {
     title: "Contact Us",
     body: [
-      "The fastest way to reach us is the Help option inside your account — messages go straight to the TapOne team and replies land in your Mailbox.",
-      "Sign in with Google, open Help & Mailbox from the menu, and send your message. We usually reply within a couple of days.",
+      "The fastest way to reach us is the Help option inside your account — messages go straight to the TapOne team and your reply will be sent to your email by TapOne.",
+      "Sign in with Google, open Help from the menu, and send your message. We usually reply within a couple of days.",
     ],
   },
 };

@@ -7,6 +7,9 @@
 // transactions — the earnings ledger (offer credits, affiliate commissions)
 // withdrawals  — user requests the admin approves or rejects
 // messages     — help requests and admin mailbox replies (one thread table)
+// chatMessages — the public Live Chat inside Help (one shared room)
+// chatBlocks   — Live Chat send blocks (permanent or timed); a blocked
+//                user can still read the chat, just not send
 // postbacks    — offerwall conversion log; txn_id unique = idempotent credit
 // settings     — key/value site settings (Google client id, admin login,
 //                contest pools, minimum withdrawal)
@@ -72,6 +75,11 @@ export const users = sqliteTable("users", {
   offerToken: text("offer_token").unique(),
   referredById: integer("referred_by_id"),
   blocked: integer("blocked").notNull().default(0),
+  // Live Chat manager: the owner can make a user a chat manager from the
+  // Admin panel. A manager's chat messages carry a Manager tick, and a
+  // manager can also block / unblock chat users. Only the owner can
+  // appoint or remove a manager.
+  isChatManager: integer("is_chat_manager").notNull().default(0),
   lastSeenAt: integer("last_seen_at", { mode: "timestamp_ms" })
     .notNull()
     .$defaultFn(() => new Date()),
@@ -191,6 +199,36 @@ export const messages = sqliteTable("messages", {
   status: text("status").notNull().default("pending"),
   readByAdmin: integer("read_by_admin").notNull().default(0),
   readByUser: integer("read_by_user").notNull().default(0),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+// chat_messages — the public Live Chat inside Help: one shared room for
+// all signed-in users. role is "user", "manager" (a user the owner made
+// a chat manager) or "owner" (the owner replying from the Admin panel,
+// stored with user_id -1). Bodies are plain text, max 1000 chars.
+export const chatMessages = sqliteTable("chat_messages", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id").notNull(),
+  role: text("role", { enum: ["user", "manager", "owner"] })
+    .notNull()
+    .default("user"),
+  body: text("body").notNull(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+// chat_blocks — Live Chat send blocks: one active row per user.
+// expires_at null = blocked permanently; set = blocked until that time.
+// A blocked user can still READ the chat, just not send. Unblocking
+// deletes the row. blocked_by is the admin (-1 = owner) or the manager's
+// user id.
+export const chatBlocks = sqliteTable("chat_blocks", {
+  userId: integer("user_id").primaryKey(),
+  blockedBy: integer("blocked_by").notNull(),
+  expiresAt: integer("expires_at", { mode: "timestamp_ms" }),
   createdAt: integer("created_at", { mode: "timestamp_ms" })
     .notNull()
     .$defaultFn(() => new Date()),

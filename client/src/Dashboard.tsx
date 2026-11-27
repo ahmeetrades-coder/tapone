@@ -159,11 +159,6 @@ export function Dashboard({
     >
       {t.icon("h-5 w-5")}
       {t.label}
-      {(t.id === "help" || t.id === "contact") && me.data && me.data.unreadMessages > 0 && (
-        <span className="ml-auto rounded-full bg-[var(--gold)] px-2 py-0.5 text-xs font-bold text-[var(--ink)]">
-          {me.data.unreadMessages}
-        </span>
-      )}
     </button>
   );
 
@@ -447,11 +442,6 @@ export function Dashboard({
                   >
                     {t.icon("h-5 w-5")}
                     {t.label}
-                    {t.id === "help" && me.data && me.data.unreadMessages > 0 && (
-                      <span className="ml-auto rounded-full bg-[var(--gold)] px-2 py-0.5 text-xs font-bold text-[var(--ink)]">
-                        {me.data.unreadMessages}
-                      </span>
-                    )}
                   </button>
                 ))}
               </div>
@@ -2794,7 +2784,7 @@ function ContactTab() {
       <p className="mt-1 max-w-xl text-sm leading-relaxed text-[var(--dim)]">
         Reach the TapOne team on our social channels — tap one to open it
         directly and contact us there. For account questions, you can also
-        use Help &amp; Mailbox.
+        use Help.
       </p>
       <section className="mt-5 grid gap-3 sm:grid-cols-2" aria-label="Contact us on social media">
         {CONTACT_PLATFORMS.map((p) => {
@@ -2962,10 +2952,6 @@ function NotificationBell({ token }: { token: string }) {
 
 function HelpTab({ token }: { token: string }) {
   const queryClient = useQueryClient();
-  const mailbox = useQuery({
-    queryKey: ["mailbox", token],
-    queryFn: () => api.getMailbox({ token }),
-  });
   const [subject, setSubject] = useState("");
   const [body, setBody] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
@@ -3014,7 +3000,6 @@ function HelpTab({ token }: { token: string }) {
       setImagePreview(null);
       setImageData(null);
       setSent(true);
-      void queryClient.invalidateQueries({ queryKey: ["mailbox", token] });
       void queryClient.invalidateQueries({ queryKey: ["me", token] });
     },
     onError: (error) => setFormError(error.message),
@@ -3022,59 +3007,12 @@ function HelpTab({ token }: { token: string }) {
 
   return (
     <div>
-      <h1 className="font-display text-2xl font-extrabold sm:text-3xl">Help &amp; Mailbox</h1>
+      <h1 className="font-display text-2xl font-extrabold sm:text-3xl">Help</h1>
       <p className="mt-1 text-sm text-[var(--dim)]">
-        Messages go straight to the TapOne team. Replies appear right here in your mailbox.
+        Messages go straight to the TapOne team. Your reply will be sent to your email by TapOne.
       </p>
 
-      <h2 className="mt-6 font-display text-lg font-bold">📬 Mailbox</h2>
-      <section className="mt-3 space-y-3" aria-label="Mailbox">
-        {mailbox.isPending ? (
-          <p className="text-sm text-[var(--dim)]">Loading…</p>
-        ) : mailbox.data && mailbox.data.messages.length > 0 ? (
-          mailbox.data.messages.map((m) => (
-            <div key={m.id} className={`flex ${m.sender === "user" ? "justify-end" : "justify-start"}`}>
-              <div
-                className={`max-w-[85%] rounded-2xl px-4 py-3 sm:max-w-[70%] ${
-                  m.sender === "user"
-                    ? "bg-[var(--brand)] text-white"
-                    : "bg-[var(--surface)] ring-1 ring-[var(--border)]"
-                }`}
-              >
-                {m.subject && <p className="text-sm font-bold">{m.subject}</p>}
-                <p className="whitespace-pre-wrap text-sm leading-relaxed">{m.body}</p>
-                {m.imageUrl && (
-                  <a href={m.imageUrl} target="_blank" rel="noreferrer" className="mt-2 block">
-                    <img
-                      src={m.imageUrl}
-                      alt="Photo attached to this message"
-                      className="max-h-40 rounded-xl object-cover ring-1 ring-white/40"
-                    />
-                  </a>
-                )}
-                {m.sender === "user" && (
-                  <p className="mt-2">
-                    <span
-                      className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${
-                        m.status === "approved" ? "bg-green-600 text-white" : "bg-amber-500 text-white"
-                      }`}
-                    >
-                      {m.status === "approved" ? "Approved" : "Pending"}
-                    </span>
-                  </p>
-                )}
-                <p className={`mt-1.5 text-[11px] ${m.sender === "user" ? "text-white/70" : "text-[var(--dim)]"}`}>
-                  {m.sender === "user" ? "You" : "TapOne team"} · {fmtDateTime(m.createdAt)}
-                </p>
-              </div>
-            </div>
-          ))
-        ) : (
-          <p className="rounded-2xl border-2 border-dashed border-[var(--border)] bg-[var(--surface)] px-5 py-8 text-center text-sm text-[var(--dim)]">
-            No messages yet. Ask us anything below.
-          </p>
-        )}
-      </section>
+      <LiveChatPanel token={token} />
 
       <form
         className="mt-6 rounded-3xl bg-[var(--surface)] p-5 ring-1 ring-[var(--border)] sm:p-6"
@@ -3162,7 +3100,7 @@ function HelpTab({ token }: { token: string }) {
         )}
         {sent && (
           <p role="status" className="mt-3 text-sm font-medium text-[var(--brand-deep)] dark:text-[var(--brand)]">
-            Message sent. We will reply here in your mailbox.
+            Message sent. Your reply will be sent to your email by TapOne.
           </p>
         )}
         <button
@@ -3174,5 +3112,291 @@ function HelpTab({ token }: { token: string }) {
         </button>
       </form>
     </div>
+  );
+}
+
+// ----------------------------------------------------------------- live chat
+//
+// Public Live Chat inside Help: one shared room for all signed-in
+// users. It only loads when the user taps it open (lazy) and refreshes
+// every 5 seconds while open. The owner replies as "Official TapOne"
+// (gold verified tick); a chat manager's messages carry a "Manager"
+// tick and a manager can block / unblock users from here.
+
+type ChatMsg = ApiResponse<typeof api, "getLiveChat">["messages"][number];
+
+function ChatRoleBadge({ role }: { role: ChatMsg["role"] }) {
+  if (role === "owner")
+    return (
+      <span className="rounded-full bg-[var(--gold)] px-2 py-0.5 text-[11px] font-bold text-[var(--ink)]">
+        ✓ Official TapOne
+      </span>
+    );
+  if (role === "manager")
+    return (
+      <span className="rounded-full bg-blue-600 px-2 py-0.5 text-[11px] font-bold text-white">
+        ✓ Manager
+      </span>
+    );
+  return null;
+}
+
+function LiveChatPanel({ token }: { token: string }) {
+  const queryClient = useQueryClient();
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [sendError, setSendError] = useState<string | null>(null);
+  const [blockDays, setBlockDays] = useState<Record<number, string>>({});
+  const [blockBusy, setBlockBusy] = useState<number | null>(null);
+  const [blockError, setBlockError] = useState<string | null>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+
+  const chat = useQuery({
+    queryKey: ["live-chat", token],
+    queryFn: () => api.getLiveChat({ token }),
+    enabled: open,
+    refetchInterval: open ? 5000 : false,
+  });
+
+  const messages = chat.data?.messages ?? [];
+  const blockedByUser = new Map(
+    (chat.data?.blocked ?? []).map((b) => [b.userId, b.expiresAt]),
+  );
+
+  useEffect(() => {
+    const el = listRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [messages.length, open]);
+
+  const send = useMutation({
+    mutationFn: async () => api.sendChatMessage({ token, body: draft.trim() }),
+    onSuccess: () => {
+      setDraft("");
+      setSendError(null);
+      void queryClient.invalidateQueries({ queryKey: ["live-chat", token] });
+    },
+    onError: (e) => setSendError(e.message),
+  });
+
+  const blockUser = useMutation({
+    mutationFn: async (args: { userId: number; days?: number }) =>
+      api.managerBlockChatUser({
+        token,
+        userId: args.userId,
+        ...(args.days ? { days: args.days } : {}),
+      }),
+    onSuccess: () => {
+      setBlockBusy(null);
+      setBlockError(null);
+      void queryClient.invalidateQueries({ queryKey: ["live-chat", token] });
+    },
+    onError: (e) => {
+      setBlockBusy(null);
+      setBlockError(e.message);
+    },
+  });
+
+  const unblockUser = useMutation({
+    mutationFn: async (userId: number) =>
+      api.managerUnblockChatUser({ token, userId }),
+    onSuccess: () => {
+      setBlockBusy(null);
+      setBlockError(null);
+      void queryClient.invalidateQueries({ queryKey: ["live-chat", token] });
+    },
+    onError: (e) => {
+      setBlockBusy(null);
+      setBlockError(e.message);
+    },
+  });
+
+  return (
+    <section
+      className="mt-6 rounded-3xl bg-[var(--surface)] p-5 ring-1 ring-[var(--border)] sm:p-6"
+      aria-label="Live Chat"
+    >
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className="flex w-full items-center gap-3 text-left"
+      >
+        <span
+          className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[var(--brand)] text-xl"
+          aria-hidden="true"
+        >
+          💬
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="block font-display text-base font-bold">Live Chat</span>
+          <span className="block text-sm text-[var(--dim)]">
+            Chat with other TapOne users — tap to open.
+          </span>
+        </span>
+        <span className="shrink-0 text-sm font-bold text-[var(--brand)]">
+          {open ? "Close ▲" : "Open ▼"}
+        </span>
+      </button>
+
+      {open && (
+        <div className="mt-4">
+          {chat.isPending ? (
+            <p className="text-sm text-[var(--dim)]">Loading…</p>
+          ) : chat.isError ? (
+            <p role="alert" className="text-sm font-medium text-red-600 dark:text-red-400">
+              {chat.error.message}
+            </p>
+          ) : (
+            <>
+              <div
+                ref={listRef}
+                className="max-h-96 space-y-3 overflow-y-auto rounded-2xl bg-[var(--surface-2)] p-3"
+              >
+                {messages.length === 0 ? (
+                  <p className="py-6 text-center text-sm text-[var(--dim)]">
+                    No messages yet — say hello!
+                  </p>
+                ) : (
+                  messages.map((m) => {
+                    const isBlocked = blockedByUser.has(m.userId);
+                    const isMe = m.userId === chat.data?.myUserId;
+                    const canModerate =
+                      chat.data?.myRole === "manager" && !isMe && m.role !== "owner";
+                    return (
+                      <div key={m.id} className="flex items-start gap-2.5">
+                        {m.pictureUrl ? (
+                          <img
+                            src={m.pictureUrl}
+                            alt={m.name}
+                            className="h-9 w-9 shrink-0 rounded-full object-cover ring-1 ring-[var(--border)]"
+                          />
+                        ) : (
+                          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[var(--surface)] font-display font-extrabold text-[var(--brand)] ring-1 ring-[var(--border)]">
+                            {(m.name || "?").slice(0, 1).toUpperCase()}
+                          </span>
+                        )}
+                        <div className="min-w-0 flex-1">
+                          <p className="flex flex-wrap items-center gap-1.5 text-sm">
+                            <span className="font-bold">
+                              {m.role === "owner" ? "TapOne" : m.name}
+                            </span>
+                            <ChatRoleBadge role={m.role} />
+                            <span className="text-xs text-[var(--dim)]">
+                              {fmtDateTime(m.createdAt)}
+                            </span>
+                          </p>
+                          <p className="whitespace-pre-wrap text-sm leading-relaxed">
+                            {m.body}
+                          </p>
+                          {canModerate && (
+                            <span className="mt-1 flex flex-wrap items-center gap-2">
+                              {isBlocked ? (
+                                <button
+                                  type="button"
+                                  disabled={blockBusy === m.userId}
+                                  onClick={() => {
+                                    setBlockBusy(m.userId);
+                                    unblockUser.mutate(m.userId);
+                                  }}
+                                  className="rounded-full bg-green-600 px-3 py-1 text-[11px] font-bold text-white disabled:opacity-60"
+                                >
+                                  Unblock user
+                                </button>
+                              ) : (
+                                <>
+                                  <select
+                                    value={blockDays[m.userId] ?? "permanent"}
+                                    onChange={(e) =>
+                                      setBlockDays((prev) => ({
+                                        ...prev,
+                                        [m.userId]: e.target.value,
+                                      }))
+                                    }
+                                    aria-label="Block length"
+                                    className="rounded-full border border-[var(--border)] bg-[var(--surface)] px-2 py-1 text-[11px] font-bold outline-none"
+                                  >
+                                    <option value="permanent">Permanent</option>
+                                    <option value="1">1 day</option>
+                                    <option value="7">7 days</option>
+                                    <option value="30">30 days</option>
+                                  </select>
+                                  <button
+                                    type="button"
+                                    disabled={blockBusy === m.userId}
+                                    onClick={() => {
+                                      setBlockBusy(m.userId);
+                                      const v = blockDays[m.userId] ?? "permanent";
+                                      blockUser.mutate({
+                                        userId: m.userId,
+                                        ...(v === "permanent" ? {} : { days: Number(v) }),
+                                      });
+                                    }}
+                                    className="rounded-full bg-red-600 px-3 py-1 text-[11px] font-bold text-white disabled:opacity-60"
+                                  >
+                                    Block user
+                                  </button>
+                                </>
+                              )}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+              {blockError && (
+                <p role="alert" className="mt-2 text-sm font-medium text-red-600 dark:text-red-400">
+                  {blockError}
+                </p>
+              )}
+              {chat.data && !chat.data.canSend ? (
+                <p
+                  role="status"
+                  className="mt-3 rounded-xl bg-amber-500/10 px-3 py-2 text-sm font-medium text-amber-700 dark:text-amber-300"
+                >
+                  You are blocked from sending messages in Live Chat
+                  {chat.data.blockedUntil
+                    ? ` until ${fmtDate(chat.data.blockedUntil)}`
+                    : " permanently"}
+                  . You can still read the chat.
+                </p>
+              ) : (
+                <form
+                  className="mt-3 flex gap-2"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    setSendError(null);
+                    if (!draft.trim()) return;
+                    send.mutate();
+                  }}
+                >
+                  <input
+                    value={draft}
+                    onChange={(e) => setDraft(e.target.value)}
+                    placeholder="Write a message…"
+                    maxLength={1000}
+                    aria-label="Live Chat message"
+                    className="min-w-0 flex-1 rounded-full border border-[var(--border)] bg-[var(--surface)] px-4 py-2.5 text-sm outline-none focus:border-[var(--brand)]"
+                  />
+                  <button
+                    type="submit"
+                    disabled={send.isPending || !draft.trim()}
+                    className="flex shrink-0 items-center gap-2 rounded-full bg-[var(--brand)] px-5 py-2.5 font-display text-sm font-bold text-white disabled:opacity-60"
+                  >
+                    {Icons.send("h-4 w-4")} Send
+                  </button>
+                </form>
+              )}
+              {sendError && (
+                <p role="alert" className="mt-2 text-sm font-medium text-red-600 dark:text-red-400">
+                  {sendError}
+                </p>
+              )}
+            </>
+          )}
+        </div>
+      )}
+    </section>
   );
 }
