@@ -1,6 +1,10 @@
 // TapOne data model. All money is integer cents; the UI shows dollars only.
 //
-// users        — one row per Google account; country/IP locked at sign-in
+// users        — one row per account (Google or email +
+//                password sign-up); country/IP locked at sign-in
+//                (VPN connections are allowed since 2026-11-27 —
+//                owner order: a VPN sign-up must create the account;
+//                the offerwalls reject such users' offers themselves).
 // sessions     — opaque session tokens issued at sign-in
 // contentItems — offerwalls / surveys / games the admin manages; every
 //                client reads these rows, so admin edits reach everyone
@@ -51,7 +55,20 @@ export const users = sqliteTable("users", {
   // overwrites a name the user chose.
   nameChanges: integer("name_changes").notNull().default(0),
   email: text("email").notNull().unique(),
+  // Email + password accounts only: scrypt hash of the password
+  // ("scrypt$v1$<salt hex>$<hash hex>"), null for Google accounts,
+  // which never have a password. Never a plain password.
+  passwordHash: text("password_hash"),
+  // Email + password accounts only: 0 until the owner of the address
+  // proves it with the 6-digit code sent to that email. Google
+  // accounts are 1 — the provider already verified the
+  // address. Default 1 so the existing Google rows stay verified.
+  emailVerified: integer("email_verified").notNull().default(1),
   pictureUrl: text("picture_url"),
+  // "google" | "email" — how the account was created.
+  // Shown in Admin → Users. A later sign-in with another method for
+  // the same verified email signs into the SAME account and does not
+  // change this label.
   loginMethod: text("login_method").notNull().default("google"),
   ip: text("ip"),
   countryCode: text("country_code"),
@@ -100,6 +117,26 @@ export const users = sqliteTable("users", {
 export const sessions = sqliteTable("sessions", {
   token: text("token").primaryKey(),
   userId: integer("user_id").notNull(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+// email_verifications — one row per 6-digit code sent to an email
+// address (email sign-up verification and password reset). The code
+// itself is never stored — only its SHA-256 hash — and a row is good
+// for 15 minutes and 5 wrong attempts; issuing a new code deletes
+// every older row for that email + purpose, so only one code is ever
+// live. purpose is "signup" or "reset".
+export const emailVerifications = sqliteTable("email_verifications", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  email: text("email").notNull(),
+  codeHash: text("code_hash").notNull(),
+  purpose: text("purpose", { enum: ["signup", "reset", "change"] })
+    .notNull()
+    .default("signup"),
+  attempts: integer("attempts").notNull().default(0),
+  expiresAt: integer("expires_at", { mode: "timestamp_ms" }).notNull(),
   createdAt: integer("created_at", { mode: "timestamp_ms" })
     .notNull()
     .$defaultFn(() => new Date()),

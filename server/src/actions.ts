@@ -1,4 +1,7 @@
-// TapOne actions: Google sign-in with IP/country lock + VPN block, content
+// TapOne actions: Google / email sign-in with IP/country lock
+// (VPN connections are allowed since 2026-11-27 — owner order:
+// a VPN sign-up must create the account; the offerwalls reject such
+// users' offers themselves), content (offerwalls / surveys / games)
 // (offerwalls / surveys / games) managed by the admin and read by everyone,
 // dollar withdrawals by country, admin approve/reject, help + live chat,
 // affiliate commissions, and the offerwall postback endpoint.
@@ -12,7 +15,10 @@ type Ctx,
 import { and, desc, eq, gt, gte, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
 import type { BatchItem } from "drizzle-orm/batch";
 import * as schema from "./schema";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes, randomInt, scrypt, timingSafeEqual } from "node:crypto";
+import { promisify } from "node:util";
+
+const scryptAsync = promisify(scrypt);
 
 type DB = ReturnType<Ctx["db"]>;
 
@@ -485,6 +491,287 @@ async function notifyHelpReplyByEmail(args: {
         String(e),
     );
   }
+}
+
+// ------------------------------------------------- email + password login
+//
+// Email sign-up / login (owner order 2026-11-27) sits next to Google
+// on the login page. Passwords are stored ONLY as a
+// scrypt hash (salt + hash, never the password itself). A new email
+// account activates ONLY after the owner of the address types the
+// 6-digit code sent to that address; the code itself is never stored
+// — only its SHA-256 hash — and it lives 15 minutes with 5 wrong
+// attempts. Codes are sent with the same Resend setup as the Help
+// mail, from the same business address (info@tapone.store).
+
+const EMAIL_CODE_TTL_MS = 15 * 60 * 1000;
+const EMAIL_CODE_MAX_ATTEMPTS = 5;
+const EMAIL_CODE_RESEND_MS = 60 * 1000;
+
+function normalizeEmail(raw: string): string | null {
+  const email = raw.trim().toLowerCase();
+  if (email.length > 254) return null;
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return null;
+  return email;
+}
+
+async function hashPassword(password: string): Promise<string> {
+  const salt = randomBytes(16);
+  const hash = (await scryptAsync(password, salt, 64)) as Buffer;
+  return `scrypt$v1$${salt.toString("hex")}$${hash.toString("hex")}`;
+}
+
+async function verifyPassword(
+  password: string,
+  stored: string | null,
+): Promise<boolean> {
+  if (!stored) return false;
+  const parts = stored.split("$");
+  if (parts.length !== 4 || parts[0] !== "scrypt" || parts[1] !== "v1")
+    return false;
+  try {
+    const salt = Buffer.from(parts[2] ?? "", "hex");
+    const expected = Buffer.from(parts[3] ?? "", "hex");
+    if (salt.length === 0 || expected.length === 0) return false;
+    const hash = (await scryptAsync(password, salt, expected.length)) as Buffer;
+    if (hash.length !== expected.length) return false;
+    return timingSafeEqual(hash, expected);
+  } catch {
+    return false;
+  }
+}
+
+/** Plain Resend send, shared by the code mails below. Best effort:
+ *  returns false (and logs) when the key is missing or the send
+ *  fails — the caller turns that into a user-facing message. */
+async function sendResendEmail(args: {
+  to: string;
+  subject: string;
+  text: string;
+  html: string;
+}): Promise<boolean> {
+  const apiKey = process.env.RESEND_API_KEY?.trim();
+  if (!apiKey) {
+    console.warn(
+      "[tapone] RESEND_API_KEY is not set — email to " +
+        args.to +
+        " was NOT sent. Set RESEND_API_KEY in the server environment to enable it.",
+    );
+    return false;
+  }
+  try {
+    const res = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer " + apiKey,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        from: "TapOne <info@tapone.store>",
+        to: [args.to],
+        subject: args.subject,
+        text: args.text,
+        html: args.html,
+      }),
+    });
+    if (!res.ok) {
+      console.warn(
+        "[tapone] Email to " +
+          args.to +
+          " failed (" +
+          res.status +
+          "): " +
+          (await res.text()).slice(0, 300),
+      );
+      return false;
+    }
+    return true;
+  } catch (e) {
+    console.warn("[tapone] Email to " + args.to + " failed: " + String(e));
+    return false;
+  }
+}
+
+/** What a 6-digit code is for. "change" is the Profile change-password
+ *  code (owner order 2026-11-27): the code is emailed to the account's
+ *  own address and must match server-side before the password moves.
+ *  One live code per (email, purpose), so the three flows never
+ *  overwrite each other's codes. */
+type EmailCodePurpose = "signup" | "reset" | "change";
+
+function sendVerificationCodeEmail(
+  email: string,
+  code: string,
+  purpose: EmailCodePurpose,
+): Promise<boolean> {
+  const subject =
+    purpose === "reset"
+      ? "Your TapOne password reset code"
+      : purpose === "change"
+        ? "Your TapOne password change code"
+        : "Your TapOne verification code";
+  const line =
+    purpose === "reset"
+      ? "You asked to reset your TapOne password. Use this code to set a new password:"
+      : purpose === "change"
+        ? "You asked to change your TapOne password. Use this code to confirm the change:"
+        : "Use this code to verify your email and activate your TapOne account:";
+  return sendResendEmail({
+    to: email,
+    subject,
+    text:
+      "Hi,\n\n" +
+      line +
+      "\n\n" +
+      code +
+      "\n\nThis code expires in 15 minutes. If you did not ask for this, ignore this email.\n\n— The TapOne team",
+    html:
+      "<p>Hi,</p><p>" +
+      line +
+      "</p><p style=\"font-size:24px;font-weight:bold;letter-spacing:4px;\">" +
+      code +
+      "</p><p>This code expires in 15 minutes. If you did not ask for this, ignore this email.</p><p>— The TapOne team</p>",
+  });
+}
+
+/**
+ * Issues a fresh 6-digit code for (email, purpose): deletes every
+ * older row for that pair, stores only the SHA-256 hash, and emails
+ * the code. Returns "sent" when the mail went out, "unavailable"
+ * when Resend is not set up or the send failed, and "too_soon" when
+ * a code was sent less than a minute ago (the caller tells the user
+ * to wait — no second mail is sent).
+ */
+async function issueEmailCode(
+  db: DB,
+  email: string,
+  purpose: EmailCodePurpose,
+): Promise<"sent" | "unavailable" | "too_soon"> {
+  const now = new Date();
+  const prior = await db
+    .select()
+    .from(schema.emailVerifications)
+    .where(
+      and(
+        eq(schema.emailVerifications.email, email),
+        eq(schema.emailVerifications.purpose, purpose),
+      ),
+    )
+    .orderBy(desc(schema.emailVerifications.id))
+    .limit(1);
+  if (
+    prior[0] &&
+    now.getTime() - prior[0].createdAt.getTime() < EMAIL_CODE_RESEND_MS
+  ) {
+    return "too_soon";
+  }
+  const code = String(randomInt(100000, 1000000));
+  await db
+    .delete(schema.emailVerifications)
+    .where(
+      and(
+        eq(schema.emailVerifications.email, email),
+        eq(schema.emailVerifications.purpose, purpose),
+      ),
+    );
+  await db.insert(schema.emailVerifications).values({
+    email,
+    codeHash: createHash("sha256").update(code).digest("hex"),
+    purpose,
+    attempts: 0,
+    expiresAt: new Date(now.getTime() + EMAIL_CODE_TTL_MS),
+  });
+  const sent = await sendVerificationCodeEmail(email, code, purpose);
+  return sent ? "sent" : "unavailable";
+}
+
+type CodeCheck = "ok" | "not_found" | "expired" | "wrong" | "too_many";
+
+/** Deletes every code row for (email, purpose). Used whenever a code
+ *  reaches a terminal outcome (used, expired, or guessed too many
+ *  times) so no older code for the same address stays live behind
+ *  it — a code is a single-factor credential, and only the newest
+ *  one may ever work. */
+async function deleteCodes(
+  db: DB,
+  email: string,
+  purpose: EmailCodePurpose,
+): Promise<void> {
+  await db
+    .delete(schema.emailVerifications)
+    .where(
+      and(
+        eq(schema.emailVerifications.email, email),
+        eq(schema.emailVerifications.purpose, purpose),
+      ),
+    );
+}
+
+/**
+ * Checks a 6-digit code against the live row for (email, purpose).
+ * Wrong attempts are counted on the row; at 5 the code is dead.
+ * An expired row is dead too. "ok" deletes every row for the pair —
+ * a code works exactly once.
+ */
+async function checkEmailCode(
+  db: DB,
+  email: string,
+  purpose: EmailCodePurpose,
+  code: string,
+): Promise<CodeCheck> {
+  const rows = await db
+    .select()
+    .from(schema.emailVerifications)
+    .where(
+      and(
+        eq(schema.emailVerifications.email, email),
+        eq(schema.emailVerifications.purpose, purpose),
+      ),
+    )
+    .orderBy(desc(schema.emailVerifications.id))
+    .limit(1);
+  const row = rows[0];
+  if (!row) return "not_found";
+  if (row.expiresAt.getTime() < Date.now()) {
+    await deleteCodes(db, email, purpose);
+    return "expired";
+  }
+  if (row.attempts >= EMAIL_CODE_MAX_ATTEMPTS) {
+    await deleteCodes(db, email, purpose);
+    return "too_many";
+  }
+  const hash = createHash("sha256").update(code.trim()).digest("hex");
+  if (hash !== row.codeHash) {
+    const attempts = row.attempts + 1;
+    if (attempts >= EMAIL_CODE_MAX_ATTEMPTS) {
+      await deleteCodes(db, email, purpose);
+      return "too_many";
+    }
+    await db
+      .update(schema.emailVerifications)
+      .set({ attempts })
+      .where(eq(schema.emailVerifications.id, row.id));
+    return "wrong";
+  }
+  await deleteCodes(db, email, purpose);
+  return "ok";
+}
+
+/** Creates a signed-in session for an already-loaded user row. */
+async function issueSession(
+  db: DB,
+  ctx: Ctx,
+  user: UserRow,
+  settings: Record<string, string>,
+): Promise<SignInResult> {
+  const token = newToken("sess");
+  await db.insert(schema.sessions).values({ token, userId: user.id });
+  ctx.invalidateQueries();
+  return {
+    status: "ok",
+    token,
+    user: publicUser(user, levelConfigFrom(settings).titles),
+  };
 }
 
 // ------------------------------------------------------- network detection
@@ -2953,7 +3240,9 @@ function publicWithdrawal(
 }
 
 const signInResponse = z.object({
-  status: z.enum(["ok", "vpn_blocked", "blocked", "country_banned"]),
+  // "vpn_blocked" was removed 2026-11-27 (owner order): VPN sign-ups
+  // and logins now work, so no sign-in ever returns it.
+  status: z.enum(["ok", "blocked", "country_banned"]),
   token: z.string().nullable(),
   user: userShape.nullable(),
   // No banned-country name/code/flag fields: no country is ever sent
@@ -3216,7 +3505,7 @@ export const Actions = {
 
   signInWithGoogle: defineAction({
     description:
-      "Signs a user in or up with Google ONLY (verified ID token from the real Google button — no email or password form exists), locks country from the login IP, blocks VPN, blocked accounts and new signups from banned countries, captures referral codes, and notifies the admin on every new registration.",
+      "Signs a user in or up with Google (verified ID token from the real Google button), locks country from the login IP, blocks blocked accounts and new signups from banned countries, captures referral codes, and notifies the admin on every new registration. VPN connections are allowed (owner order 2026-11-27): a VPN sign-up creates the account.",
     request: z.object({
       idToken: z.string().min(1).max(4096),
       ip: z.string().max(64).optional(),
@@ -3260,12 +3549,9 @@ export const Actions = {
       if (!name) name = email.split("@")[0] ?? "TapOne User";
 
       const geo = await lookupGeo(args.ip?.trim() ? args.ip.trim() : null);
-      // VPN = direct ban at login: checked BEFORE any account lookup,
-      // creation or session issuance, so a VPN user — new or existing —
-      // gets no login at all. The client shows the "You use VPN" block.
-      if (geo.vpnSuspected) {
-        return { status: "vpn_blocked", token: null, user: null };
-      }
+      // VPN is NOT blocked (owner order 2026-11-27): a VPN sign-up
+      // must create the account, and a VPN login signs in normally.
+      // The offerwalls reject such users' offers themselves.
 
       const existing = await db
         .select()
@@ -3362,7 +3648,7 @@ export const Actions = {
             // (a Pakistan account lost Easypaisa/JazzCash that way).
             // Only the owner can correct a locked country, from
             // Admin → Users (adminSetUserCountry). The fresh geo is
-            // still used above for the VPN/ban checks on THIS login.
+            // still used above for the ban check on THIS login.
             lastSeenAt: new Date(),
           })
           .where(eq(schema.users.id, user.id));
@@ -3382,6 +3668,449 @@ export const Actions = {
         token,
         user: publicUser(user, levelConfigFrom(settings).titles),
       };
+    },
+  }),
+
+  signUpWithEmail: defineAction({
+    description:
+      "Starts an email + password sign-up: creates the account UNVERIFIED and emails a 6-digit code to that address. The account activates only when verifyEmailCode succeeds — no session is issued here, and the admin registration alert is sent at activation, not at this step. One account per email (owner order 2026-11-27): an address that already has an activated account — email or Google — returns email_in_use and creates nothing. Signing up again with an unverified address just sends a fresh code (and updates the password). VPN connections are allowed (owner order 2026-11-27).",
+    request: z.object({
+      email: z.string().trim().min(3).max(254),
+      // No zod minimum here on purpose: the handler below throws the
+      // clear "Password must be at least 8 characters." error (owner
+      // rule 2026-11-27) instead of a generic validation message.
+      password: z.string().max(128),
+      name: z.string().trim().max(80).optional(),
+      ip: z.string().max(64).optional(),
+      referralCode: z.string().trim().max(32).optional(),
+    }),
+    response: z.object({
+      status: z.enum([
+        "code_sent",
+        "email_in_use",
+        "email_unavailable",
+        "country_banned",
+      ]),
+    }),
+    async handler(
+      ctx,
+      args,
+    ): Promise<{
+      status: "code_sent" | "email_in_use" | "email_unavailable" | "country_banned";
+    }> {
+      const email = normalizeEmail(args.email);
+      if (!email) throw new Error("Enter a valid email address.");
+      if (args.password.length < 8)
+        throw new Error("Password must be at least 8 characters.");
+      const db = ctx.db<typeof schema>();
+
+      const existing = await db
+        .select()
+        .from(schema.users)
+        .where(eq(schema.users.email, email))
+        .limit(1);
+      const user = existing[0];
+      if (user) {
+        if (user.loginMethod === "email" && user.emailVerified === 0) {
+          // Still unverified: a fresh code, and the password they just
+          // typed becomes the account password.
+          await db
+            .update(schema.users)
+            .set({
+              passwordHash: await hashPassword(args.password),
+              name: args.name?.trim() || user.name,
+            })
+            .where(eq(schema.users.id, user.id));
+          const issued = await issueEmailCode(db, email, "signup");
+          if (issued === "too_soon")
+            throw new Error(
+              "A code was just sent — please wait a minute before asking again.",
+            );
+          if (issued === "unavailable") return { status: "email_unavailable" };
+          return { status: "code_sent" };
+        }
+        return { status: "email_in_use" }; // Activated account of
+        // either kind — one account per email (owner order
+        // 2026-11-27); no duplicate is created.
+      }
+
+      const geo = await lookupGeo(args.ip?.trim() ? args.ip.trim() : null);
+      // VPN is allowed (owner order 2026-11-27) — no check here.
+      const banned = await findBannedCountry(db, geo.countryCode);
+      if (banned) {
+        return { status: "country_banned" };
+      }
+      let referredById: number | null = null;
+      if (args.referralCode) {
+        const referrers = await db
+          .select()
+          .from(schema.users)
+          .where(
+            eq(
+              schema.users.referralCode,
+              args.referralCode.trim().toUpperCase(),
+            ),
+          )
+          .limit(1);
+        if (referrers[0]) referredById = referrers[0].id;
+      }
+      let userCode = `TO-${randomCode(6)}`;
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const clash = await db
+          .select()
+          .from(schema.users)
+          .where(eq(schema.users.userCode, userCode))
+          .limit(1);
+        if (!clash[0]) break;
+        userCode = `TO-${randomCode(6)}`;
+      }
+      const inserted = await db
+        .insert(schema.users)
+        .values({
+          userCode,
+          name: args.name?.trim() || email.split("@")[0] || "TapOne User",
+          email,
+          passwordHash: await hashPassword(args.password),
+          emailVerified: 0,
+          pictureUrl: null,
+          loginMethod: "email",
+          ip: geo.ip,
+          countryCode: geo.countryCode,
+          countryName: geo.countryName,
+          flagEmoji: geo.flagEmoji,
+          isp: geo.isp,
+          referralCode: randomCode(8),
+          offerToken: await uniqueOfferToken(db),
+          referredById,
+        })
+        .returning();
+      const created = inserted[0];
+      if (!created) throw new Error("Could not create your account.");
+      const issued = await issueEmailCode(db, email, "signup");
+      if (issued === "unavailable") return { status: "email_unavailable" };
+      return { status: "code_sent" };
+    },
+  }),
+
+  verifyEmailCode: defineAction({
+    description:
+      "Verifies the 6-digit sign-up code sent to an email address and signs the user in: the email account activates here (the admin registration alert is sent now, not at sign-up). The code works exactly once.",
+    request: z.object({
+      email: z.string().trim().min(3).max(254),
+      code: z.string().trim().min(6).max(6),
+      ip: z.string().max(64).optional(),
+    }),
+    response: signInResponse,
+    async handler(ctx, args): Promise<SignInResult> {
+      const email = normalizeEmail(args.email);
+      if (!email) throw new Error("Enter a valid email address.");
+      const db = ctx.db<typeof schema>();
+      const settings = await getSettings(db);
+      const check = await checkEmailCode(db, email, "signup", args.code);
+      if (check === "not_found")
+        throw new Error("No code was sent to this email — request a new one.");
+      if (check === "expired")
+        throw new Error("That code has expired — request a new one.");
+      if (check === "wrong")
+        throw new Error(
+          "Wrong code — check the code in your email and try again.",
+        );
+      if (check === "too_many")
+        throw new Error("Too many wrong attempts — request a new code.");
+      const rows = await db
+        .select()
+        .from(schema.users)
+        .where(eq(schema.users.email, email))
+        .limit(1);
+      const user = rows[0];
+      if (!user) throw new Error("No account for this email — sign up first.");
+      if (user.loginMethod !== "email")
+        throw new Error("This email does not use email sign-in.");
+      if (user.blocked === 1) {
+        return { status: "blocked", token: null, user: null };
+      }
+      if (user.emailVerified === 0) {
+        await db
+          .update(schema.users)
+          .set({ emailVerified: 1 })
+          .where(eq(schema.users.id, user.id));
+        // Registration alert for the owner — the account becomes a
+        // real account only now, when the email is proven.
+        const geo = await lookupGeo(args.ip?.trim() ? args.ip.trim() : null);
+        await db.insert(schema.adminNotifications).values({
+          type: "registration",
+          userId: user.id,
+          userName: user.name,
+          userEmail: user.email,
+          userCode: user.userCode,
+          countryCode: user.countryCode,
+          countryName: user.countryName,
+          flagEmoji: user.flagEmoji ?? flagFromCountryCode(user.countryCode),
+          ip: user.ip ?? geo.ip,
+          read: 0,
+        });
+      }
+      const refreshed = await db
+        .select()
+        .from(schema.users)
+        .where(eq(schema.users.id, user.id))
+        .limit(1);
+      return issueSession(db, ctx, refreshed[0] ?? user, settings);
+    },
+  }),
+
+  signInWithEmail: defineAction({
+    description:
+      "Signs in with email + password ONLY — no code step at login, ever (owner order 2026-11-27: the verification code lives only in the sign-up flow). An account whose email was never verified at sign-up was never activated and cannot log in; signing up again with the same email sends a fresh code. 'No such email' and 'wrong password' share one message so the form cannot probe which emails exist.",
+    request: z.object({
+      email: z.string().trim().min(3).max(254),
+      password: z.string().min(1).max(128),
+      ip: z.string().max(64).optional(),
+    }),
+    response: signInResponse,
+    async handler(ctx, args): Promise<SignInResult> {
+      const email = normalizeEmail(args.email);
+      if (!email) throw new Error("Enter a valid email address.");
+      const db = ctx.db<typeof schema>();
+      const settings = await getSettings(db);
+      const rows = await db
+        .select()
+        .from(schema.users)
+        .where(eq(schema.users.email, email))
+        .limit(1);
+      const user = rows[0];
+      if (!user) throw new Error("Wrong email or password.");
+      if (user.loginMethod === "google")
+        throw new Error(
+          "This email uses Google sign-in — use the Google button instead.",
+        );
+      if (!(await verifyPassword(args.password, user.passwordHash)))
+        throw new Error("Wrong email or password.");
+      if (user.blocked === 1) {
+        return { status: "blocked", token: null, user: null };
+      }
+      // An email account that was never verified at sign-up was never
+      // activated, so it cannot log in at all (owner order
+      // 2026-11-27: the code step lives ONLY in the sign-up flow, never
+      // at login). Same generic message as a wrong password — the
+      // account is simply not usable yet. Signing up again with the
+      // same email sends a fresh code and finishes the activation.
+      if (user.emailVerified === 0) throw new Error("Wrong email or password.");
+      await db
+        .update(schema.users)
+        .set({ lastSeenAt: new Date() })
+        .where(eq(schema.users.id, user.id));
+      const refreshed = await db
+        .select()
+        .from(schema.users)
+        .where(eq(schema.users.id, user.id))
+        .limit(1);
+      return issueSession(db, ctx, refreshed[0] ?? user, settings);
+    },
+  }),
+
+  requestPasswordReset: defineAction({
+    description:
+      "Sends a 6-digit password-reset code to an email account. Always succeeds from the outside — whether the email exists (or uses another sign-in method) is never revealed.",
+    request: z.object({ email: z.string().trim().min(3).max(254) }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args): Promise<{ ok: true }> {
+      const email = normalizeEmail(args.email);
+      const db = ctx.db<typeof schema>();
+      if (email) {
+        const rows = await db
+          .select()
+          .from(schema.users)
+          .where(eq(schema.users.email, email))
+          .limit(1);
+        const user = rows[0];
+        if (user && user.loginMethod === "email") {
+          await issueEmailCode(db, email, "reset");
+        }
+      }
+      return { ok: true };
+    },
+  }),
+
+  resetPasswordWithCode: defineAction({
+    description:
+      "Resets an email account's password with the 6-digit code sent to that email. The code works once, and every other session for the account is ended.",
+    request: z.object({
+      email: z.string().trim().min(3).max(254),
+      code: z.string().trim().min(6).max(6),
+      // No zod minimum here on purpose — see signUpWithEmail: the
+      // handler throws the clear 8-character error instead.
+      newPassword: z.string().max(128),
+    }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args): Promise<{ ok: true }> {
+      const email = normalizeEmail(args.email);
+      if (!email) throw new Error("Enter a valid email address.");
+      if (args.newPassword.length < 8)
+        throw new Error("New password must be at least 8 characters.");
+      const db = ctx.db<typeof schema>();
+      const check = await checkEmailCode(db, email, "reset", args.code);
+      if (check === "not_found")
+        throw new Error("No reset code was sent to this email — request a new one.");
+      if (check === "expired")
+        throw new Error("That code has expired — request a new one.");
+      if (check === "wrong")
+        throw new Error(
+          "Wrong code — check the code in your email and try again.",
+        );
+      if (check === "too_many")
+        throw new Error("Too many wrong attempts — request a new code.");
+      const rows = await db
+        .select()
+        .from(schema.users)
+        .where(eq(schema.users.email, email))
+        .limit(1);
+      const user = rows[0];
+      if (!user || user.loginMethod !== "email")
+        throw new Error("No email account for this address.");
+      await db
+        .update(schema.users)
+        .set({ passwordHash: await hashPassword(args.newPassword) })
+        .where(eq(schema.users.id, user.id));
+      // A changed password ends every other session, so a session
+      // opened before the reset cannot keep being used.
+      await db
+        .delete(schema.sessions)
+        .where(eq(schema.sessions.userId, user.id));
+      ctx.invalidateQueries();
+      return { ok: true };
+    },
+  }),
+
+  resendEmailCode: defineAction({
+    description:
+      "Re-sends the sign-up verification code to a still-unverified email account (at most one code per minute).",
+    request: z.object({ email: z.string().trim().min(3).max(254) }),
+    response: z.object({
+      status: z.enum(["code_sent", "not_pending", "email_unavailable"]),
+    }),
+    async handler(
+      ctx,
+      args,
+    ): Promise<{ status: "code_sent" | "not_pending" | "email_unavailable" }> {
+      const email = normalizeEmail(args.email);
+      if (!email) throw new Error("Enter a valid email address.");
+      const db = ctx.db<typeof schema>();
+      const rows = await db
+        .select()
+        .from(schema.users)
+        .where(eq(schema.users.email, email))
+        .limit(1);
+      const user = rows[0];
+      if (!user || user.loginMethod !== "email" || user.emailVerified === 1)
+        return { status: "not_pending" };
+      const issued = await issueEmailCode(db, email, "signup");
+      if (issued === "too_soon")
+        throw new Error(
+          "A code was just sent — please wait a minute before asking again.",
+        );
+      if (issued === "unavailable") return { status: "email_unavailable" };
+      return { status: "code_sent" };
+    },
+  }),
+
+  requestPasswordChangeCode: defineAction({
+    description:
+      "Step 1 of the Profile change-password flow (owner order 2026-11-27): the signed-in email account enters the old password and the new one, and a 6-digit code is emailed to the account's own address. The password itself changes only in changePassword, after that mailed code is entered and verified server-side. Google accounts have no password, so they cannot use this.",
+    request: z.object({
+      token: z.string().min(1).max(200),
+      oldPassword: z.string().min(1).max(128),
+      // No zod minimum here on purpose — see signUpWithEmail: the
+      // handler throws the clear 8-character error instead.
+      newPassword: z.string().max(128),
+    }),
+    response: z.object({
+      status: z.enum(["code_sent", "email_unavailable"]),
+    }),
+    async handler(
+      ctx,
+      args,
+    ): Promise<{ status: "code_sent" | "email_unavailable" }> {
+      const user = await requireUser(ctx, args.token);
+      if (user.loginMethod !== "email")
+        throw new Error(
+          "Your account uses Google sign-in and has no password to change.",
+        );
+      if (args.newPassword.length < 8)
+        throw new Error("New password must be at least 8 characters.");
+      // The old password is checked here too, so a wrong old password
+      // fails before any code is sent — and changePassword checks it
+      // again before the password moves.
+      if (!(await verifyPassword(args.oldPassword, user.passwordHash)))
+        throw new Error("Your old password is wrong.");
+      const db = ctx.db<typeof schema>();
+      const issued = await issueEmailCode(db, user.email, "change");
+      if (issued === "too_soon")
+        throw new Error(
+          "A code was just sent — please wait a minute before asking again.",
+        );
+      if (issued === "unavailable") return { status: "email_unavailable" };
+      return { status: "code_sent" };
+    },
+  }),
+
+  changePassword: defineAction({
+    description:
+      "Step 2 of the Profile change-password flow (owner order 2026-11-27): the old password must match, the new one must be at least 8 characters, AND the 6-digit code emailed to the account in step 1 must match server-side — only then does the password change. Google accounts have no password, so they cannot use this. Every OTHER session for the account is ended; the current one stays signed in.",
+    request: z.object({
+      token: z.string().min(1).max(200),
+      oldPassword: z.string().min(1).max(128),
+      // No zod minimum here on purpose — see signUpWithEmail: the
+      // handler throws the clear 8-character error instead.
+      newPassword: z.string().max(128),
+      code: z.string().trim().min(6).max(6),
+    }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args): Promise<{ ok: true }> {
+      const user = await requireUser(ctx, args.token);
+      if (user.loginMethod !== "email")
+        throw new Error(
+          "Your account uses Google sign-in and has no password to change.",
+        );
+      if (args.newPassword.length < 8)
+        throw new Error("New password must be at least 8 characters.");
+      if (!(await verifyPassword(args.oldPassword, user.passwordHash)))
+        throw new Error("Your old password is wrong.");
+      const db = ctx.db<typeof schema>();
+      // The emailed code must match the one the server sent for this
+      // account — a self-typed code never changes the password.
+      // checkEmailCode compares the SHA-256 hash server-side; a
+      // wrong code leaves the password untouched.
+      const check = await checkEmailCode(db, user.email, "change", args.code);
+      if (check === "not_found")
+        throw new Error(
+          "No change code was sent to your email — request a new one.",
+        );
+      if (check === "expired")
+        throw new Error("That code has expired — request a new one.");
+      if (check === "wrong")
+        throw new Error(
+          "Wrong code — check the code in your email and try again.",
+        );
+      if (check === "too_many")
+        throw new Error("Too many wrong attempts — request a new code.");
+      await db
+        .update(schema.users)
+        .set({ passwordHash: await hashPassword(args.newPassword) })
+        .where(eq(schema.users.id, user.id));
+      // End every OTHER session, so a session opened before the
+      // change cannot keep being used. The current session stays
+      // signed in.
+      await db
+        .delete(schema.sessions)
+        .where(
+          and(
+            eq(schema.sessions.userId, user.id),
+            ne(schema.sessions.token, args.token),
+          ),
+        );
+      ctx.invalidateQueries();
+      return { ok: true };
     },
   }),
 
