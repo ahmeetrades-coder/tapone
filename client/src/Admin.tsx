@@ -20,7 +20,7 @@ import { Wordmark, goHome } from "./App";
 
 const FIELDS = actionFields<typeof Actions>();
 
-type AdminTab = "overview" | "users" | "stats" | "withdrawals" | "methods" | "content" | "inbox" | "livechat" | "notifications" | "announcements" | "countries" | "postbacks" | "callbacks" | "settings" | "deploy";
+type AdminTab = "overview" | "users" | "stats" | "withdrawals" | "methods" | "content" | "inbox" | "livechat" | "notifications" | "announcements" | "countries" | "postbacks" | "callbacks" | "settings" | "redeem" | "deploy";
 
 const ADMIN_TABS: { id: AdminTab; label: string }[] = [
   { id: "overview", label: "Overview" },
@@ -37,6 +37,7 @@ const ADMIN_TABS: { id: AdminTab; label: string }[] = [
   { id: "postbacks", label: "Postbacks" },
   { id: "callbacks", label: "Partner Callbacks" },
   { id: "settings", label: "Settings" },
+  { id: "redeem", label: "Redeem Codes" },
   { id: "deploy", label: "GitHub & Deploy" },
 ];
 
@@ -157,6 +158,7 @@ export function Admin() {
         {tab === "postbacks" && <PostbacksTab token={token} />}
         {tab === "callbacks" && <PartnerCallbacksTab token={token} />}
         {tab === "settings" && <SettingsTab token={token} />}
+        {tab === "redeem" && <RedeemCodesTab token={token} />}
         {tab === "deploy" && <DeployTab token={token} />}
 
         <div className="mt-10 flex justify-center border-t border-[var(--border)] pt-6">
@@ -3928,6 +3930,264 @@ function PartnerCallbacksTab({ token }: { token: string }) {
 
 // --------------------------------------------------------------- settings
 
+// ---------------------------------------------------------- redeem codes
+//
+// Admin → Redeem Codes (owner order 2026-11-27): the owner creates a
+// code — the code text is typed by the owner (TAPONE10, EID2026, any
+// text), plus the dollar amount and the max number of uses. A code
+// stops working when its uses run out or the owner switches it off.
+// The list shows every code with its used count, and below it every
+// redemption (who, which code, how much, when).
+function RedeemCodesTab({ token }: { token: string }) {
+  const queryClient = useQueryClient();
+  const [code, setCode] = useState("");
+  const [amount, setAmount] = useState("");
+  const [maxUses, setMaxUses] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [okMsg, setOkMsg] = useState<string | null>(null);
+  const [busyId, setBusyId] = useState<number | null>(null);
+
+  const list = useQuery({
+    queryKey: ["admin-redeem-codes", token],
+    queryFn: () => api.adminListRedeemCodes({ adminToken: token }),
+  });
+
+  const refresh = () =>
+    void queryClient.invalidateQueries({ queryKey: ["admin-redeem-codes", token] });
+
+  const create = useMutation({
+    mutationFn: async () => {
+      const amountCents = toCents(amount);
+      if (amountCents === null || amountCents < 1)
+        throw new Error("The amount must be a dollar amount above $0 (e.g. 1, 2 or 0.10).");
+      const uses = Number.parseInt(maxUses, 10);
+      if (!Number.isFinite(uses) || uses < 1)
+        throw new Error("Max uses must be a whole number above 0 (e.g. 10 or 20).");
+      return api.adminCreateRedeemCode({
+        adminToken: token,
+        ...(code.trim() !== "" ? { code: code.trim() } : {}),
+        amountCents,
+        maxUses: uses,
+      });
+    },
+    onSuccess: (r) => {
+      setCode("");
+      setAmount("");
+      setMaxUses("");
+      setError(null);
+      setOkMsg(`Code ${r.code} created — share it and users can redeem it.`);
+      refresh();
+    },
+    onError: (e) => {
+      setOkMsg(null);
+      setError(e.message);
+    },
+  });
+
+  const setActive = useMutation({
+    mutationFn: async (args: { id: number; active: boolean }) =>
+      api.adminSetRedeemCodeActive({
+        adminToken: token,
+        id: args.id,
+        active: args.active,
+      }),
+    onSuccess: () => {
+      setBusyId(null);
+      setError(null);
+      refresh();
+    },
+    onError: (e) => {
+      setBusyId(null);
+      setError(e.message);
+    },
+  });
+
+  const remove = useMutation({
+    mutationFn: async (id: number) =>
+      api.adminDeleteRedeemCode({ adminToken: token, id }),
+    onSuccess: () => {
+      setBusyId(null);
+      setError(null);
+      setOkMsg("Code deleted. Its past redemptions stay in the list below.");
+      refresh();
+    },
+    onError: (e) => {
+      setBusyId(null);
+      setError(e.message);
+    },
+  });
+
+  const codes = list.data?.codes ?? [];
+  const redemptions = list.data?.redemptions ?? [];
+
+  return (
+    <div>
+      <h1 className="font-display text-2xl font-extrabold">Redeem Codes</h1>
+      <p className="mt-1 text-sm leading-relaxed text-[var(--dim)]">
+        Create a code, share it on your social channels, and every user who
+        enters it in the Redeem Code section gets its full amount in their
+        balance. A code stops working when its uses run out or you switch it
+        off. One user can use the same code only once.
+      </p>
+      {error && (
+        <p role="alert" className="mt-3 text-sm font-medium text-red-600 dark:text-red-400">{error}</p>
+      )}
+      {okMsg && (
+        <p role="status" className="mt-3 text-sm font-medium text-[var(--brand-deep)] dark:text-[var(--brand)]">{okMsg}</p>
+      )}
+
+      <section className="mt-5 rounded-3xl bg-[var(--surface)] p-5 ring-1 ring-[var(--border)] sm:p-6">
+        <h2 className="font-display text-lg font-bold">Create a code</h2>
+        <form
+          className="mt-3 grid gap-4 sm:grid-cols-3"
+          onSubmit={(e) => {
+            e.preventDefault();
+            setError(null);
+            setOkMsg(null);
+            create.mutate();
+          }}
+        >
+          <div>
+            <label htmlFor="redeem-code" className="text-sm font-semibold">Code text</label>
+            <input
+              id="redeem-code"
+              {...FIELDS.adminCreateRedeemCode.code}
+              value={code}
+              onChange={(e) => setCode(e.target.value)}
+              placeholder="e.g. TAPONE10 (leave blank to generate one)"
+              autoCapitalize="characters"
+              autoComplete="off"
+              className="mt-1 w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 text-sm font-bold uppercase outline-none focus:border-[var(--brand)]"
+            />
+          </div>
+          <div>
+            <label htmlFor="redeem-amount" className="text-sm font-semibold">Amount ($)</label>
+            <input
+              id="redeem-amount"
+              value={amount}
+              onChange={(e) => setAmount(e.target.value)}
+              placeholder="e.g. 1, 2 or 0.10"
+              inputMode="decimal"
+              className="mt-1 w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 text-sm outline-none focus:border-[var(--brand)]"
+            />
+          </div>
+          <div>
+            <label htmlFor="redeem-uses" className="text-sm font-semibold">Max uses (users)</label>
+            <input
+              id="redeem-uses"
+              value={maxUses}
+              onChange={(e) => setMaxUses(e.target.value)}
+              placeholder="e.g. 10 or 20"
+              inputMode="numeric"
+              className="mt-1 w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 text-sm outline-none focus:border-[var(--brand)]"
+            />
+          </div>
+          <div className="sm:col-span-3">
+            <button
+              type="submit"
+              disabled={create.isPending}
+              className="rounded-full bg-[var(--brand)] px-6 py-2.5 text-sm font-bold text-white transition hover:bg-[var(--brand-deep)] disabled:opacity-60"
+            >
+              {create.isPending ? "Creating…" : "Create code"}
+            </button>
+          </div>
+        </form>
+      </section>
+
+      <section className="mt-5 rounded-3xl bg-[var(--surface)] p-5 ring-1 ring-[var(--border)] sm:p-6">
+        <h2 className="font-display text-lg font-bold">All codes</h2>
+        {list.isPending ? (
+          <p className="mt-3 text-sm text-[var(--dim)]">Loading…</p>
+        ) : list.isError ? (
+          <p role="alert" className="mt-3 text-sm font-medium text-red-600 dark:text-red-400">
+            {list.error.message}
+          </p>
+        ) : codes.length === 0 ? (
+          <p className="mt-3 text-sm text-[var(--dim)]">
+            No codes yet. Create your first one above.
+          </p>
+        ) : (
+          <ul className="mt-3 space-y-2">
+            {codes.map((c) => (
+              <li
+                key={c.id}
+                className="flex flex-wrap items-center gap-3 rounded-2xl bg-[var(--surface-2)] px-4 py-3 ring-1 ring-[var(--border)]"
+              >
+                <span className="min-w-0 flex-1">
+                  <span className="block font-mono text-sm font-bold">{c.code}</span>
+                  <span className="mt-0.5 block text-xs text-[var(--dim)]">
+                    {fmt(c.amountCents)} · used {c.usedCount} of {c.maxUses}
+                    {c.usedCount >= c.maxUses ? " — used up" : ""} · created{" "}
+                    {fmtDate(c.createdAt)}
+                  </span>
+                </span>
+                <span
+                  className={`rounded-full px-2.5 py-1 text-xs font-bold ${
+                    c.active === 1
+                      ? "bg-[var(--brand)]/15 text-[var(--brand-deep)] dark:text-[var(--brand)]"
+                      : "bg-red-500/10 text-red-600 dark:text-red-400"
+                  }`}
+                >
+                  {c.active === 1 ? "Active" : "Off"}
+                </span>
+                <button
+                  type="button"
+                  disabled={busyId === c.id}
+                  onClick={() => {
+                    setBusyId(c.id);
+                    setActive.mutate({ id: c.id, active: c.active !== 1 });
+                  }}
+                  className="rounded-full bg-[var(--surface)] px-4 py-2 text-xs font-bold ring-1 ring-[var(--border)] transition hover:ring-[var(--brand)] disabled:opacity-60"
+                >
+                  {c.active === 1 ? "Switch off" : "Switch on"}
+                </button>
+                <button
+                  type="button"
+                  disabled={busyId === c.id}
+                  onClick={() => {
+                    setBusyId(c.id);
+                    remove.mutate(c.id);
+                  }}
+                  className="rounded-full bg-red-500/10 px-4 py-2 text-xs font-bold text-red-600 transition hover:bg-red-500/20 disabled:opacity-60 dark:text-red-400"
+                >
+                  Delete
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
+      <section className="mt-5 rounded-3xl bg-[var(--surface)] p-5 ring-1 ring-[var(--border)] sm:p-6">
+        <h2 className="font-display text-lg font-bold">Redemptions</h2>
+        {redemptions.length === 0 ? (
+          <p className="mt-3 text-sm text-[var(--dim)]">
+            No one has redeemed a code yet.
+          </p>
+        ) : (
+          <ul className="mt-3 space-y-2">
+            {redemptions.map((r) => (
+              <li
+                key={r.id}
+                className="flex flex-wrap items-center gap-3 rounded-2xl bg-[var(--surface-2)] px-4 py-3 text-sm ring-1 ring-[var(--border)]"
+              >
+                <span className="font-bold">{r.userName}</span>
+                <span className="font-mono font-bold">{r.code}</span>
+                <span className="font-bold text-[var(--brand-deep)] dark:text-[var(--brand)]">
+                  {fmt(r.amountCents)}
+                </span>
+                <span className="ml-auto text-xs text-[var(--dim)]">
+                  {fmtDateTime(r.createdAt)}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+    </div>
+  );
+}
+
 function SettingsTab({ token }: { token: string }) {
   const queryClient = useQueryClient();
   const overview = useQuery({
@@ -3952,7 +4212,14 @@ function SettingsTab({ token }: { token: string }) {
   const [titleRows, setTitleRows] = useState<
     { name: string; level: string; standardPct: string; enhancedPct: string; reward: string }[]
   >([]);
-  const [social, setSocial] = useState<Record<string, string>>({});
+  // Social links — the full admin-managed list for the Redeem Code
+  // section: each link has a name, a link, a logo image link, and a
+  // show/hide switch. Saved as JSON (socialLinksJson) with the rest
+  // of the settings; whatever is switched ON here is what shows in
+  // the Redeem Code section for every user.
+  const [socialLinks, setSocialLinks] = useState<
+    { id: string; label: string; url: string; imageUrl: string; active: number }[]
+  >([]);
   const [adminUsername, setAdminUsername] = useState("");
   const [adminPassword, setAdminPassword] = useState("");
   const [loginMsg, setLoginMsg] = useState<string | null>(null);
@@ -3982,7 +4249,7 @@ function SettingsTab({ token }: { token: string }) {
           reward: (t.rewardCents / 100).toFixed(2),
         })),
       );
-      setSocial(s.socialLinks ?? {});
+      setSocialLinks(s.socialLinksList ?? []);
       setHydrated(true);
     }
   }, [s, hydrated]);
@@ -4036,6 +4303,32 @@ function SettingsTab({ token }: { token: string }) {
         if ((levelTitles[i]?.level ?? 0) <= (levelTitles[i - 1]?.level ?? 0))
           throw new Error("Title levels must increase from one title to the next.");
       }
+      // Social links: every row needs a name; a link or image link,
+      // when set, must start with https://. The whole list is saved
+      // as JSON — the server validates it again before storing.
+      const cleanSocialLinks = socialLinks.map((l) => ({
+        id: l.id,
+        label: l.label.trim(),
+        url: l.url.trim(),
+        imageUrl: l.imageUrl.trim(),
+        active: l.active === 1 ? 1 : 0,
+      }));
+      for (const l of cleanSocialLinks) {
+        if (!l.label)
+          throw new Error("Every social link needs a name.");
+        if (
+          l.url !== "" &&
+          !l.url.startsWith("http://") &&
+          !l.url.startsWith("https://")
+        )
+          throw new Error(`"${l.label}": the link must start with https://.`);
+        if (
+          l.imageUrl !== "" &&
+          !l.imageUrl.startsWith("http://") &&
+          !l.imageUrl.startsWith("https://")
+        )
+          throw new Error(`"${l.label}": the image link must start with https://.`);
+      }
       return api.adminUpdateSettings({
         adminToken: token,
         googleClientId: googleClientId.trim(),
@@ -4052,13 +4345,7 @@ function SettingsTab({ token }: { token: string }) {
         checkinRewardsCents: checkinRewardsCents as number[],
         levelCentsPerLevel,
         levelTitles,
-        socialDiscord: (social["discord"] ?? "").trim(),
-        socialYoutube: (social["youtube"] ?? "").trim(),
-        socialTiktok: (social["tiktok"] ?? "").trim(),
-        socialTwitter: (social["twitter"] ?? "").trim(),
-        socialFacebook: (social["facebook"] ?? "").trim(),
-        socialInstagram: (social["instagram"] ?? "").trim(),
-        socialTelegram: (social["telegram"] ?? "").trim(),
+        socialLinksJson: JSON.stringify(cleanSocialLinks),
         adminUsername: adminUsername.trim() || undefined,
         adminPassword: adminPassword === "" ? undefined : adminPassword,
       });
@@ -4161,39 +4448,113 @@ function SettingsTab({ token }: { token: string }) {
         </section>
 
         <section className="rounded-3xl bg-[var(--surface)] p-5 ring-1 ring-[var(--border)] sm:p-6">
-          <h2 className="font-display text-lg font-bold">Social links — shown in the footer to all users</h2>
+          <h2 className="font-display text-lg font-bold">Social links — shown in the Redeem Code section</h2>
           <p className="mt-1 text-sm leading-relaxed text-[var(--dim)]">
-            Paste the full link for each page and press “Save settings” at the
-            bottom. Saved links are stored in the database and appear in the
-            footer of the homepage and the dashboard for every user right
-            away. Leave a field blank to hide that platform.
+            Add a link, remove one, or switch one on or off — only the
+            links switched ON show in the Redeem Code section, each with
+            its logo image. The public footer still lists every link that
+            has a URL, as before. Press “Save settings” at the bottom to
+            save the whole list.
           </p>
-          <div className="mt-3 grid gap-4 sm:grid-cols-2">
-            {(
-              [
-                ["youtube", "YouTube", "socialYoutube"],
-                ["tiktok", "TikTok", "socialTiktok"],
-                ["facebook", "Facebook", "socialFacebook"],
-                ["discord", "Discord", "socialDiscord"],
-                ["twitter", "X (Twitter)", "socialTwitter"],
-                ["telegram", "Telegram", "socialTelegram"],
-                ["instagram", "Instagram", "socialInstagram"],
-              ] as const
-            ).map(([id, label, field]) => (
-              <div key={id}>
-                <label htmlFor={`set-${id}`} className="text-sm font-semibold">{label} link</label>
-                <input
-                  id={`set-${id}`}
-                  {...FIELDS.adminUpdateSettings[field]}
-                  value={social[id] ?? ""}
-                  onChange={(e) => setSocial((prev) => ({ ...prev, [id]: e.target.value }))}
-                  placeholder={`https://… your ${label} page`}
-                  inputMode="url"
-                  className={fieldCls}
-                />
+          <div className="mt-3 space-y-3">
+            {socialLinks.map((l, i) => (
+              <div
+                key={l.id}
+                className="rounded-2xl bg-[var(--surface-2)] p-4 ring-1 ring-[var(--border)]"
+              >
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div>
+                    <label htmlFor={`set-social-name-${i}`} className="text-sm font-semibold">Name</label>
+                    <input
+                      id={`set-social-name-${i}`}
+                      value={l.label}
+                      onChange={(e) =>
+                        setSocialLinks((prev) =>
+                          prev.map((x, j) => (j === i ? { ...x, label: e.target.value } : x)),
+                        )
+                      }
+                      placeholder="e.g. Facebook"
+                      className={fieldCls}
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor={`set-social-url-${i}`} className="text-sm font-semibold">Link</label>
+                    <input
+                      id={`set-social-url-${i}`}
+                      value={l.url}
+                      onChange={(e) =>
+                        setSocialLinks((prev) =>
+                          prev.map((x, j) => (j === i ? { ...x, url: e.target.value } : x)),
+                        )
+                      }
+                      placeholder="https://… your page"
+                      inputMode="url"
+                      className={fieldCls}
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor={`set-social-img-${i}`} className="text-sm font-semibold">Image link (logo)</label>
+                    <input
+                      id={`set-social-img-${i}`}
+                      value={l.imageUrl}
+                      onChange={(e) =>
+                        setSocialLinks((prev) =>
+                          prev.map((x, j) => (j === i ? { ...x, imageUrl: e.target.value } : x)),
+                        )
+                      }
+                      placeholder="https://… logo image"
+                      inputMode="url"
+                      className={fieldCls}
+                    />
+                  </div>
+                  <div className="flex items-end justify-between gap-3 pb-1">
+                    <label className="flex cursor-pointer items-center gap-2 text-sm font-semibold">
+                      <input
+                        type="checkbox"
+                        checked={l.active === 1}
+                        onChange={(e) =>
+                          setSocialLinks((prev) =>
+                            prev.map((x, j) =>
+                              j === i ? { ...x, active: e.target.checked ? 1 : 0 } : x,
+                            ),
+                          )
+                        }
+                        className="h-4 w-4 accent-[var(--brand)]"
+                      />
+                      Show in Redeem Code
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setSocialLinks((prev) => prev.filter((_, j) => j !== i))
+                      }
+                      className="rounded-full bg-red-500/10 px-4 py-2 text-xs font-bold text-red-600 transition hover:bg-red-500/20 dark:text-red-400"
+                    >
+                      Remove
+                    </button>
+                  </div>
+                </div>
               </div>
             ))}
           </div>
+          <button
+            type="button"
+            onClick={() =>
+              setSocialLinks((prev) => [
+                ...prev,
+                {
+                  id: `custom-${Date.now().toString(36)}`,
+                  label: "",
+                  url: "",
+                  imageUrl: "",
+                  active: 1,
+                },
+              ])
+            }
+            className="mt-3 rounded-full bg-[var(--surface-2)] px-5 py-2.5 text-sm font-bold ring-1 ring-[var(--border)] transition hover:ring-[var(--brand)]"
+          >
+            + Add a link
+          </button>
         </section>
 
         <section className="rounded-3xl bg-[var(--surface)] p-5 ring-1 ring-[var(--border)] sm:p-6">
