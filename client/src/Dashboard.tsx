@@ -2092,18 +2092,6 @@ function DailyContestTab({ token }: { token: string }) {
             </div>
           )}
 
-          <h2 className="mt-8 font-display text-lg font-bold">Today&apos;s prizes</h2>
-          <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3">
-            {d.ladderCents.map((prize, i) => (
-              <div
-                key={i}
-                className="flex items-center justify-between gap-2 rounded-xl bg-[var(--surface)] px-3.5 py-2.5 text-sm ring-1 ring-[var(--border)]"
-              >
-                <span className="font-semibold text-[var(--dim)]">#{i + 1}</span>
-                <span className="font-display font-bold">{fmt(prize)}</span>
-              </div>
-            ))}
-          </div>
           {d.lastSettlement && (
             <p className="mt-5 text-xs leading-relaxed text-[var(--dim)]">
               Last settled day ({d.lastSettlement.dayKey}): {d.lastSettlement.winners} winner
