@@ -3712,7 +3712,7 @@ export const Actions = {
 
   signUpWithEmail: defineAction({
     description:
-      "Starts an email + password sign-up: creates the account UNVERIFIED and emails a 6-digit code to that address. The account activates only when verifyEmailCode succeeds — no session is issued here, and the admin registration alert is sent at activation, not at this step. One account per email (owner order 2026-11-27): an address that already has an activated account — email or Google — returns email_in_use and creates nothing. Usernames are unique, case-insensitively (owner order 2026-11-27): a typed username that is already taken is refused with an error and creates nothing; with no username typed, the default from the email prefix is made unique automatically. Signing up again with an unverified address just sends a fresh code (and updates the password). VPN connections are allowed (owner order 2026-11-27).",
+      "Starts an email + password sign-up: creates the account UNVERIFIED and emails a 6-digit code to that address. The account activates only when verifyEmailCode succeeds — no session is issued here, and the admin registration alert is sent at activation, not at this step. One account per email (owner order 2026-11-27): an address that already has an activated account — email or Google — returns email_in_use and creates nothing. A username is REQUIRED (owner order 2026-11-27): an empty username is refused with an error and creates nothing, and the old email-prefix default is no longer used. Usernames are unique, case-insensitively (owner order 2026-11-27): a typed username that is already taken is refused with an error and creates nothing. Signing up again with an unverified address just sends a fresh code (and updates the password). VPN connections are allowed (owner order 2026-11-27).",
     request: z.object({
       email: z.string().trim().min(3).max(254),
       // No zod minimum here on purpose: the handler below throws the
@@ -3741,6 +3741,12 @@ export const Actions = {
       if (!email) throw new Error("Enter a valid email address.");
       if (args.password.length < 8)
         throw new Error("Password must be at least 8 characters.");
+      // A username is REQUIRED (owner order 2026-11-27): an empty
+      // username is refused before anything is created or any code is
+      // sent. This sits before the account lookup, so it covers both
+      // the new-account path and the unverified re-send path below.
+      if (!args.name?.trim())
+        throw new Error("Please enter a username.");
       const db = ctx.db<typeof schema>();
 
       const existing = await db
@@ -3787,23 +3793,15 @@ export const Actions = {
 
       // Usernames are unique (owner order 2026-11-27): a typed username
       // that is already taken is refused BEFORE any account is created
-      // and before any code is sent. No username typed: the default
-      // comes from the email prefix and is made unique automatically
-      // (2, 3, …) if it is taken.
-      const typedUsername = args.name?.trim();
-      let username: string;
-      if (typedUsername) {
-        if (await isUsernameTaken(db, typedUsername))
-          throw new Error(
-            "This username is already taken — please choose another.",
-          );
-        username = typedUsername;
-      } else {
-        username = await uniqueUsername(
-          db,
-          email.split("@")[0] || "TapOne User",
+      // and before any code is sent. The username is required (see the
+      // check at the top of this handler) — the old email-prefix
+      // default is no longer used for an empty username.
+      const typedUsername = args.name?.trim() ?? "";
+      if (await isUsernameTaken(db, typedUsername))
+        throw new Error(
+          "This username is already taken — please choose another.",
         );
-      }
+      const username = typedUsername;
 
       const geo = await lookupGeo(args.ip?.trim() ? args.ip.trim() : null);
       // VPN is allowed (owner order 2026-11-27) — no check here.
@@ -3982,10 +3980,16 @@ export const Actions = {
 
   requestPasswordReset: defineAction({
     description:
-      "Sends a 6-digit password-reset code to an email account. Always succeeds from the outside — whether the email exists (or uses another sign-in method) is never revealed.",
+      "Sends a 6-digit password-reset code to an email account. Returns code_sent when a code was actually issued (or the email is unknown, so nothing about the account is revealed); returns google_account — and sends no code — when the email belongs to a Google-only account, so the sign-in screen can point the user at Google instead of a code that will never arrive.",
     request: z.object({ email: z.string().trim().min(3).max(254) }),
-    response: z.object({ ok: z.literal(true) }),
-    async handler(ctx, args): Promise<{ ok: true }> {
+    response: z.object({
+      ok: z.literal(true),
+      status: z.enum(["code_sent", "google_account"]),
+    }),
+    async handler(
+      ctx,
+      args,
+    ): Promise<{ ok: true; status: "code_sent" | "google_account" }> {
       const email = normalizeEmail(args.email);
       const db = ctx.db<typeof schema>();
       if (email) {
@@ -3995,11 +3999,20 @@ export const Actions = {
           .where(eq(schema.users.email, email))
           .limit(1);
         const user = rows[0];
-        if (user && user.loginMethod === "email") {
+        if (user && user.loginMethod !== "email") {
+          // A Google-only account has no password to reset, so no code
+          // is issued. The caller is told (rather than the generic
+          // code screen) so the user is not left waiting for a code
+          // that will never arrive. Signup already reveals that an
+          // email has an account, so this is consistent with the
+          // site's existing posture.
+          return { ok: true, status: "google_account" };
+        }
+        if (user) {
           await issueEmailCode(db, email, "reset");
         }
       }
-      return { ok: true };
+      return { ok: true, status: "code_sent" };
     },
   }),
 
