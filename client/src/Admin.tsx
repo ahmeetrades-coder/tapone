@@ -20,7 +20,7 @@ import { Wordmark, goHome } from "./App";
 
 const FIELDS = actionFields<typeof Actions>();
 
-type AdminTab = "overview" | "users" | "stats" | "withdrawals" | "methods" | "content" | "inbox" | "notifications" | "announcements" | "countries" | "postbacks" | "callbacks" | "settings" | "deploy";
+type AdminTab = "overview" | "users" | "stats" | "withdrawals" | "methods" | "content" | "inbox" | "livechat" | "notifications" | "announcements" | "countries" | "postbacks" | "callbacks" | "settings" | "deploy";
 
 const ADMIN_TABS: { id: AdminTab; label: string }[] = [
   { id: "overview", label: "Overview" },
@@ -30,6 +30,7 @@ const ADMIN_TABS: { id: AdminTab; label: string }[] = [
   { id: "methods", label: "Withdraw Methods" },
   { id: "content", label: "Offerwalls / Surveys / Games" },
   { id: "inbox", label: "Inbox" },
+  { id: "livechat", label: "Live Chat" },
   { id: "notifications", label: "Notifications" },
   { id: "announcements", label: "Announcements" },
   { id: "countries", label: "Countries" },
@@ -149,6 +150,7 @@ export function Admin() {
         {tab === "methods" && <WithdrawMethodsTab token={token} />}
         {tab === "content" && <ContentTab token={token} />}
         {tab === "inbox" && <InboxTab token={token} />}
+        {tab === "livechat" && <LiveChatTab token={token} />}
         {tab === "notifications" && <NotificationsTab token={token} />}
         {tab === "announcements" && <AnnouncementsTab token={token} />}
         {tab === "countries" && <CountriesTab token={token} />}
@@ -2268,7 +2270,7 @@ function InboxTab({ token }: { token: string }) {
           }}
         >
           <label htmlFor="adm-reply" className="font-display text-base font-bold">
-            Reply — the user sees it in their Mailbox
+            Reply — sent straight to the user's email
           </label>
           <textarea
             id="adm-reply"
@@ -2292,7 +2294,7 @@ function InboxTab({ token }: { token: string }) {
   return (
     <div>
       <h1 className="font-display text-2xl font-extrabold">Inbox</h1>
-      <p className="mt-1 text-sm text-[var(--dim)]">Help messages from users. Open one to reply — replies land in the user's Mailbox.</p>
+      <p className="mt-1 text-sm text-[var(--dim)]">Help messages from users. Open one to reply — replies are emailed to the user from info@tapone.store.</p>
       {threads.isPending ? (
         <p className="mt-4 text-sm text-[var(--dim)]">Loading…</p>
       ) : threads.data && threads.data.threads.length > 0 ? (
@@ -2324,6 +2326,332 @@ function InboxTab({ token }: { token: string }) {
         <p className="mt-6 rounded-2xl border-2 border-dashed border-[var(--border)] bg-[var(--surface)] px-5 py-10 text-center text-sm text-[var(--dim)]">
           No messages yet. User help requests will appear here.
         </p>
+      )}
+    </div>
+  );
+}
+
+// --------------------------------------------------------- live chat
+//
+// Owner moderation view for the public Live Chat inside Help: every
+// message live, reply as Official TapOne (verified tick), block /
+// unblock users (permanent or 1 / 7 / 30 days) and appoint / remove
+// chat managers. A manager's messages carry a Manager tick and a
+// manager can also block / unblock users. Only the owner can appoint
+// or remove a manager.
+
+function LiveChatTab({ token }: { token: string }) {
+  const queryClient = useQueryClient();
+  const [reply, setReply] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [blockDays, setBlockDays] = useState<Record<number, string>>({});
+  const [busyUser, setBusyUser] = useState<number | null>(null);
+
+  const chat = useQuery({
+    queryKey: ["admin-live-chat", token],
+    queryFn: () => api.adminGetLiveChat({ adminToken: token }),
+    refetchInterval: 5000,
+  });
+
+  const messages = chat.data?.messages ?? [];
+  const blockedByUser = new Map(
+    (chat.data?.blocked ?? []).map((b) => [b.userId, b.expiresAt]),
+  );
+
+  const refresh = () =>
+    void queryClient.invalidateQueries({ queryKey: ["admin-live-chat", token] });
+
+  const send = useMutation({
+    mutationFn: async () =>
+      api.adminSendChatMessage({ adminToken: token, body: reply.trim() }),
+    onSuccess: () => {
+      setReply("");
+      setError(null);
+      refresh();
+    },
+    onError: (e) => setError(e.message),
+  });
+
+  const blockUser = useMutation({
+    mutationFn: async (args: { userId: number; days?: number }) =>
+      api.adminBlockChatUser({
+        adminToken: token,
+        userId: args.userId,
+        ...(args.days ? { days: args.days } : {}),
+      }),
+    onSuccess: () => {
+      setBusyUser(null);
+      setError(null);
+      refresh();
+    },
+    onError: (e) => {
+      setBusyUser(null);
+      setError(e.message);
+    },
+  });
+
+  const unblockUser = useMutation({
+    mutationFn: async (userId: number) =>
+      api.adminUnblockChatUser({ adminToken: token, userId }),
+    onSuccess: () => {
+      setBusyUser(null);
+      setError(null);
+      refresh();
+    },
+    onError: (e) => {
+      setBusyUser(null);
+      setError(e.message);
+    },
+  });
+
+  const setManager = useMutation({
+    mutationFn: async (args: { userId: number; isManager: boolean }) =>
+      api.adminSetChatManager({
+        adminToken: token,
+        userId: args.userId,
+        isManager: args.isManager,
+      }),
+    onSuccess: () => {
+      setBusyUser(null);
+      setError(null);
+      refresh();
+    },
+    onError: (e) => {
+      setBusyUser(null);
+      setError(e.message);
+    },
+  });
+
+  return (
+    <div>
+      <h1 className="font-display text-2xl font-extrabold">Live Chat</h1>
+      <p className="mt-1 text-sm text-[var(--dim)]">
+        The public chat inside Help — every message from every user, live.
+        Reply as Official TapOne, block or unblock users, and appoint chat
+        managers.
+      </p>
+
+      {chat.isPending ? (
+        <p className="mt-4 text-sm text-[var(--dim)]">Loading…</p>
+      ) : chat.isError ? (
+        <p role="alert" className="mt-4 text-sm font-medium text-red-600 dark:text-red-400">
+          {chat.error.message}
+        </p>
+      ) : (
+        <>
+          <section
+            className="mt-5 space-y-3 rounded-3xl bg-[var(--surface)] p-4 ring-1 ring-[var(--border)]"
+            aria-label="Live Chat messages"
+          >
+            {messages.length === 0 ? (
+              <p className="py-6 text-center text-sm text-[var(--dim)]">
+                No chat messages yet.
+              </p>
+            ) : (
+              messages.map((m) => (
+                <div key={m.id} className="flex items-start gap-2.5">
+                  {m.pictureUrl ? (
+                    <img
+                      src={m.pictureUrl}
+                      alt={m.name}
+                      className="h-9 w-9 shrink-0 rounded-full object-cover ring-1 ring-[var(--border)]"
+                    />
+                  ) : (
+                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[var(--surface-2)] font-display font-extrabold text-[var(--brand)] ring-1 ring-[var(--border)]">
+                      {(m.name || "?").slice(0, 1).toUpperCase()}
+                    </span>
+                  )}
+                  <div className="min-w-0 flex-1">
+                    <p className="flex flex-wrap items-center gap-1.5 text-sm">
+                      <span className="font-bold">
+                        {m.role === "owner" ? "TapOne" : m.name}
+                      </span>
+                      {m.role === "owner" && (
+                        <span className="rounded-full bg-[var(--gold)] px-2 py-0.5 text-[11px] font-bold text-[var(--ink)]">
+                          ✓ Official TapOne
+                        </span>
+                      )}
+                      {m.role === "manager" && (
+                        <span className="rounded-full bg-blue-600 px-2 py-0.5 text-[11px] font-bold text-white">
+                          ✓ Manager
+                        </span>
+                      )}
+                      <span className="text-xs text-[var(--dim)]">
+                        {fmtDateTime(m.createdAt)}
+                      </span>
+                    </p>
+                    <p className="whitespace-pre-wrap text-sm leading-relaxed">{m.body}</p>
+                  </div>
+                </div>
+              ))
+            )}
+          </section>
+
+          <form
+            className="mt-5 rounded-3xl bg-[var(--surface)] p-5 ring-1 ring-[var(--border)]"
+            onSubmit={(e) => {
+              e.preventDefault();
+              setError(null);
+              if (!reply.trim()) {
+                setError("Write a reply first.");
+                return;
+              }
+              send.mutate();
+            }}
+          >
+            <label htmlFor="adm-chat-reply" className="font-display text-base font-bold">
+              Reply as Official TapOne
+            </label>
+            <textarea
+              id="adm-chat-reply"
+              {...FIELDS.adminSendChatMessage.body}
+              value={reply}
+              onChange={(e) => setReply(e.target.value)}
+              rows={3}
+              className="mt-2 w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 text-sm outline-none focus:border-[var(--brand)]"
+            />
+            {error && (
+              <p role="alert" className="mt-2 text-sm font-medium text-red-600 dark:text-red-400">
+                {error}
+              </p>
+            )}
+            <button
+              type="submit"
+              disabled={send.isPending}
+              className="mt-3 flex items-center gap-2 rounded-full bg-[var(--brand)] px-6 py-2.5 font-display text-sm font-bold text-white disabled:opacity-60"
+            >
+              {Icons.send("h-4 w-4")} {send.isPending ? "Sending…" : "Send reply"}
+            </button>
+          </form>
+
+          <section className="mt-6" aria-label="Chat users">
+            <h2 className="font-display text-lg font-bold">Chat users</h2>
+            <p className="mt-1 text-sm text-[var(--dim)]">
+              Everyone who has chatted, plus managers and blocked users.
+              Blocked users can still read the chat, just not send.
+            </p>
+            {(chat.data?.people ?? []).length === 0 ? (
+              <p className="mt-4 text-sm text-[var(--dim)]">Nobody has chatted yet.</p>
+            ) : (
+              <ul className="mt-4 space-y-3">
+                {(chat.data?.people ?? []).map((p) => {
+                  const blockedUntil = blockedByUser.get(p.userId);
+                  const isBlocked = blockedUntil !== undefined;
+                  return (
+                    <li
+                      key={p.userId}
+                      className="flex flex-wrap items-center gap-3 rounded-2xl bg-[var(--surface)] p-4 ring-1 ring-[var(--border)]"
+                    >
+                      {p.pictureUrl ? (
+                        <img
+                          src={p.pictureUrl}
+                          alt={p.name}
+                          className="h-11 w-11 shrink-0 rounded-full object-cover ring-1 ring-[var(--border)]"
+                        />
+                      ) : (
+                        <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[var(--avatar)] font-display font-extrabold text-white">
+                          {p.name.charAt(0).toUpperCase()}
+                        </span>
+                      )}
+                      <span className="min-w-0 flex-1">
+                        <span className="flex flex-wrap items-center gap-2 font-display text-sm font-bold">
+                          {p.name}
+                          {p.isManager && (
+                            <span className="rounded-full bg-blue-600 px-2 py-0.5 text-[11px] font-bold text-white">
+                              ✓ Manager
+                            </span>
+                          )}
+                          {isBlocked && (
+                            <span className="rounded-full bg-red-600 px-2 py-0.5 text-[11px] font-bold text-white">
+                              Blocked
+                              {blockedUntil
+                                ? ` until ${fmtDate(blockedUntil)}`
+                                : " permanently"}
+                            </span>
+                          )}
+                        </span>
+                      </span>
+                      <span className="flex flex-wrap items-center gap-2">
+                        {p.isManager ? (
+                          <button
+                            type="button"
+                            disabled={busyUser === p.userId}
+                            onClick={() => {
+                              setBusyUser(p.userId);
+                              setManager.mutate({ userId: p.userId, isManager: false });
+                            }}
+                            className="rounded-full bg-[var(--surface-2)] px-4 py-2 text-sm font-bold disabled:opacity-60"
+                          >
+                            Remove manager
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            disabled={busyUser === p.userId}
+                            onClick={() => {
+                              setBusyUser(p.userId);
+                              setManager.mutate({ userId: p.userId, isManager: true });
+                            }}
+                            className="rounded-full bg-[var(--surface-2)] px-4 py-2 text-sm font-bold disabled:opacity-60"
+                          >
+                            Make manager
+                          </button>
+                        )}
+                        {isBlocked ? (
+                          <button
+                            type="button"
+                            disabled={busyUser === p.userId}
+                            onClick={() => {
+                              setBusyUser(p.userId);
+                              unblockUser.mutate(p.userId);
+                            }}
+                            className="rounded-full bg-green-600 px-4 py-2 text-sm font-bold text-white disabled:opacity-60"
+                          >
+                            Unblock
+                          </button>
+                        ) : (
+                          <>
+                            <select
+                              value={blockDays[p.userId] ?? "permanent"}
+                              onChange={(e) =>
+                                setBlockDays((prev) => ({
+                                  ...prev,
+                                  [p.userId]: e.target.value,
+                                }))
+                              }
+                              aria-label="Block length"
+                              className="rounded-full border border-[var(--border)] bg-[var(--surface)] px-2 py-2 text-sm font-bold outline-none"
+                            >
+                              <option value="permanent">Permanent</option>
+                              <option value="1">1 day</option>
+                              <option value="7">7 days</option>
+                              <option value="30">30 days</option>
+                            </select>
+                            <button
+                              type="button"
+                              disabled={busyUser === p.userId}
+                              onClick={() => {
+                                setBusyUser(p.userId);
+                                const v = blockDays[p.userId] ?? "permanent";
+                                blockUser.mutate({
+                                  userId: p.userId,
+                                  ...(v === "permanent" ? {} : { days: Number(v) }),
+                                });
+                              }}
+                              className="rounded-full bg-red-600 px-4 py-2 text-sm font-bold text-white disabled:opacity-60"
+                            >
+                              Block
+                            </button>
+                          </>
+                        )}
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </section>
+        </>
       )}
     </div>
   );
