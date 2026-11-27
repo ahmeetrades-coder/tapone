@@ -2499,10 +2499,72 @@ function ProfileTab({
     },
     onError: (e) => setNameError(e.message),
   });
+  // Change password — email accounts ONLY (owner order 2026-11-27).
+  // Google accounts have no password, so the box below never shows
+  // for them. TWO steps (owner order 2026-11-27 ~08:47 PST): (1) old
+  // + new password (new needs at least 8 characters, same rule as
+  // sign-up) — a 6-digit code is emailed to the account; (2) the
+  // user enters that mailed code, and only then does the password
+  // change. A wrong code changes nothing. The old-password check
+  // runs in both steps.
+  const [oldPass, setOldPass] = useState("");
+  const [newPass, setNewPass] = useState("");
+  const [passStep, setPassStep] = useState<"form" | "code">("form");
+  const [passCode, setPassCode] = useState("");
+  const [passError, setPassError] = useState<string | null>(null);
+  const [passOk, setPassOk] = useState<string | null>(null);
+  const [passInfo, setPassInfo] = useState<string | null>(null);
+  const requestPassCode = useMutation({
+    mutationFn: async () => {
+      if (!oldPass) throw new Error("Enter your old password.");
+      if (newPass.length < 8)
+        throw new Error("New password must be at least 8 characters.");
+      return api.requestPasswordChangeCode({ token, oldPassword: oldPass, newPassword: newPass });
+    },
+    onSuccess: (result) => {
+      if (result.status === "code_sent") {
+        setPassError(null);
+        setPassOk(null);
+        setPassInfo(`We sent a 6-digit code to ${user.email} — enter it below to confirm the password change.`);
+        setPassStep("code");
+      } else {
+        setPassInfo(null);
+        setPassError("We could not send the verification email right now — please try again later.");
+      }
+    },
+    onError: (e) => {
+      setPassOk(null);
+      setPassError(e.message);
+    },
+  });
+  const changePass = useMutation({
+    mutationFn: async () => {
+      if (!oldPass) throw new Error("Enter your old password.");
+      if (newPass.length < 8)
+        throw new Error("New password must be at least 8 characters.");
+      if (passCode.trim().length !== 6)
+        throw new Error("Enter the 6-digit code sent to your email.");
+      return api.changePassword({ token, oldPassword: oldPass, newPassword: newPass, code: passCode.trim() });
+    },
+    onSuccess: () => {
+      setPassError(null);
+      setPassInfo(null);
+      setPassOk("Password changed.");
+      setOldPass("");
+      setNewPass("");
+      setPassCode("");
+      setPassStep("form");
+    },
+    onError: (e) => {
+      setPassOk(null);
+      setPassError(e.message);
+    },
+  });
   const [tokenCopied, setTokenCopied] = useState(false);
   // Profile shows NO IP address, NO country and NO login method —
-  // IP and country are admin-only (never even sent to this client)
-  // and sign-in is Google-only, so there is no method to show.
+  // IP and country are admin-only (never even sent to this client).
+  // The Change password box below shows only for email accounts
+  // (user.loginMethod === "email") — Google accounts have no password.
   // The Offer Token IS shown: it is this user's own unique token —
   // every TapOne user has a different one.
   const rows: [string, string][] = [
@@ -2716,6 +2778,125 @@ function ProfileTab({
           has a different one. Offers, surveys, games and payment methods
           are matched to your account automatically.
         </p>
+        {user.loginMethod === "email" && (
+          <div className="mt-6 rounded-2xl bg-[var(--surface-2)] p-4">
+            <p className="font-display text-base font-bold">Change password</p>
+            <p className="mt-0.5 text-xs leading-relaxed text-[var(--dim)]">
+              Your new password must be at least 8 characters. We will
+              email a 6-digit code to confirm the change.
+            </p>
+            <form
+              className="mt-3 space-y-3"
+              onSubmit={(e) => {
+                e.preventDefault();
+                setPassError(null);
+                setPassOk(null);
+                if (passStep === "form") requestPassCode.mutate();
+                else changePass.mutate();
+              }}
+            >
+              {passStep === "form" ? (
+                <>
+                  <div>
+                    <label htmlFor="profile-old-pass" className="text-sm font-semibold">Old password</label>
+                    <input
+                      id="profile-old-pass"
+                      {...FIELDS.changePassword.oldPassword}
+                      type="password"
+                      value={oldPass}
+                      onChange={(e) => setOldPass(e.target.value)}
+                      autoComplete="current-password"
+                      placeholder="Your old password"
+                      className="mt-1 w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 text-sm outline-none focus:border-[var(--brand)]"
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="profile-new-pass" className="text-sm font-semibold">New password</label>
+                    <input
+                      id="profile-new-pass"
+                      {...FIELDS.changePassword.newPassword}
+                      type="password"
+                      value={newPass}
+                      onChange={(e) => setNewPass(e.target.value)}
+                      autoComplete="new-password"
+                      placeholder="At least 8 characters"
+                      className="mt-1 w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 text-sm outline-none focus:border-[var(--brand)]"
+                    />
+                    <p aria-live="polite" className={`mt-1 text-xs font-medium ${newPass.length >= 8 ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400"}`}>
+                      {newPass.length >= 8 ? "✓ Password is long enough" : "✗ Password must be at least 8 characters"}
+                    </p>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div>
+                    <label htmlFor="profile-pass-code" className="text-sm font-semibold">6-digit code</label>
+                    <input
+                      id="profile-pass-code"
+                      type="text"
+                      inputMode="numeric"
+                      value={passCode}
+                      onChange={(e) => setPassCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                      placeholder="123456"
+                      autoComplete="one-time-code"
+                      className="mt-1 w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 text-center text-lg font-bold tracking-[0.3em] outline-none focus:border-[var(--brand)]"
+                    />
+                    <p className="mt-1 text-xs leading-relaxed text-[var(--dim)]">
+                      Check your inbox or spam folder.
+                    </p>
+                  </div>
+                  <p className="text-center text-sm">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPassError(null);
+                        setPassInfo(null);
+                        setPassStep("form");
+                      }}
+                      className="font-semibold text-[var(--brand-deep)] underline"
+                    >
+                      ← Back
+                    </button>
+                    {" · "}
+                    <button
+                      type="button"
+                      disabled={requestPassCode.isPending}
+                      onClick={() => {
+                        setPassError(null);
+                        requestPassCode.mutate();
+                      }}
+                      className="font-semibold text-[var(--brand-deep)] underline disabled:opacity-50"
+                    >
+                      Resend code
+                    </button>
+                  </p>
+                </>
+              )}
+              {passInfo && (
+                <p role="status" className="text-sm font-medium text-[var(--brand-deep)] dark:text-[var(--brand)]">{passInfo}</p>
+              )}
+              {passError && (
+                <p role="alert" className="text-sm font-medium text-red-600 dark:text-red-400">{passError}</p>
+              )}
+              {passOk && (
+                <p role="status" className="text-sm font-medium text-[var(--brand-deep)] dark:text-[var(--brand)]">{passOk}</p>
+              )}
+              <button
+                type="submit"
+                disabled={passStep === "form" ? requestPassCode.isPending : changePass.isPending}
+                className="rounded-full bg-[var(--brand)] px-5 py-2 text-sm font-bold text-white transition hover:bg-[var(--brand-deep)] disabled:opacity-60"
+              >
+                {passStep === "form"
+                  ? requestPassCode.isPending
+                    ? "Sending code…"
+                    : "Send verification code"
+                  : changePass.isPending
+                    ? "Saving…"
+                    : "Verify and change password"}
+              </button>
+            </form>
+          </div>
+        )}
       </section>
 
       <section className="mt-5 rounded-3xl bg-[var(--surface)] p-5 ring-1 ring-[var(--border)] sm:p-6" aria-label="Settings">

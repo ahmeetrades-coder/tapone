@@ -861,7 +861,7 @@ function UsersTab({ token }: { token: string }) {
         <p className="mt-4 text-sm text-[var(--dim)]">Loading…</p>
       ) : filtered.length === 0 ? (
         <p className="mt-6 rounded-2xl border-2 border-dashed border-[var(--border)] bg-[var(--surface)] px-5 py-10 text-center text-sm text-[var(--dim)]">
-          No users yet. Accounts appear here the moment someone signs in with Google.
+          No users yet. Accounts appear here the moment someone signs in.
         </p>
       ) : (
         <ul className="mt-4 space-y-3">
@@ -901,7 +901,7 @@ function UsersTab({ token }: { token: string }) {
                   ["Country", `${u.flagEmoji ?? "🌍"} ${u.countryName ?? "—"}`],
                   ["IP address", u.ip ?? "—"],
                   ["ISP", u.isp ?? "—"],
-                  ["Login method", "Google"],
+                  ["Login method", u.loginMethod === "email" ? "Email" : u.loginMethod === "google" ? "Google" : u.loginMethod],
                   ["Referral code", u.referralCode],
                   ["Invited by", u.referredByCode ?? "—"],
                   ["Joined", fmtDate(u.createdAt)],
@@ -2865,7 +2865,7 @@ function CountriesTab({ token }: { token: string }) {
           </ul>
         ) : (
           <p className="mt-3 rounded-2xl border-2 border-dashed border-[var(--border)] bg-[var(--surface)] px-5 py-8 text-center text-sm text-[var(--dim)]">
-            No country is banned. Signups are open worldwide (except VPN connections).
+            No country is banned. Signups are open worldwide.
           </p>
         )}
       </section>

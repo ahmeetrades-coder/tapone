@@ -74,8 +74,6 @@ export function SignInCard({
         setSessionToken(result.token);
         clearReferralCode();
         onSignedIn(result.token);
-      } else if (result.status === "vpn_blocked") {
-        setBlockedMsg("vpn");
       } else if (result.status === "blocked") {
         setBlockedMsg("blocked");
       } else if (result.status === "country_banned") {
@@ -84,6 +82,186 @@ export function SignInCard({
     },
     onError: (error) => setFormError(error.message),
   });
+
+  // ------------------------------------------------ email + password
+  //
+  // Email sign-up / login (owner order 2026-11-27) sits next to the
+  // Google button. Sign-up sends a 6-digit code to the address; the
+  // account activates only after the code is typed in. The Terms /
+  // Privacy tick gates email sign-in exactly like Google.
+  const [emailView, setEmailView] = useState<"main" | "code" | "forgot">("main");
+  // The email screen is a SECOND step (owner order 2026-11-27): the
+  // main card shows only the Google button + a "Continue with email"
+  // button; tapping it opens this email screen, where the Sign up /
+  // Login choice lives. Google stays untouched on the main card.
+  const [showEmail, setShowEmail] = useState(false);
+  const [codePurpose, setCodePurpose] = useState<"signup" | "reset">("signup");
+  const [emailMode, setEmailMode] = useState<"login" | "signup">("login");
+  const [emailName, setEmailName] = useState("");
+  const [emailAddr, setEmailAddr] = useState("");
+  const [emailPass, setEmailPass] = useState("");
+  const [codeEmail, setCodeEmail] = useState("");
+  const [code, setCode] = useState("");
+  const [forgotEmail, setForgotEmail] = useState("");
+  const [newPass, setNewPass] = useState("");
+  const [emailInfo, setEmailInfo] = useState<string | null>(null);
+  const [emailError, setEmailError] = useState<string | null>(null);
+
+  const needConsent = () => {
+    if (consentedRef.current) return true;
+    setConsentError("Please tick the box above to agree to the Terms of Service and Privacy Policy before signing in.");
+    return false;
+  };
+
+  const signedInFromEmail = (result: { status: string; token: string | null }) => {
+    if (result.status === "ok" && result.token) {
+      setSessionToken(result.token);
+      clearReferralCode();
+      onSignedIn(result.token);
+    } else if (result.status === "blocked") {
+      setBlockedMsg("blocked");
+    } else if (result.status === "country_banned") {
+      setBlockedMsg("country_banned");
+    }
+    // No "email_not_verified" branch on purpose: login is email +
+    // password only (owner order 2026-11-27) — an unverified account
+    // simply gets "Wrong email or password." Signing up again with
+    // the same email sends a fresh code.
+  };
+
+  const emailSignUp = useMutation({
+    mutationFn: async () => {
+      const referralCode = captureReferralCode() ?? undefined;
+      return api.signUpWithEmail({
+        email: emailAddr.trim(),
+        password: emailPass,
+        name: emailName.trim() || undefined,
+        ip: network?.ip ?? undefined,
+        referralCode,
+      });
+    },
+    onSuccess: (result) => {
+      if (result.status === "code_sent") {
+        setCodePurpose("signup");
+        setCodeEmail(emailAddr.trim().toLowerCase());
+        setCode("");
+        setEmailInfo(`We sent a 6-digit code to ${emailAddr.trim()} — enter it below to activate your account.`);
+        setEmailView("code");
+      } else if (result.status === "email_in_use") {
+        setEmailError("This email already has an account — please log in instead.");
+      } else if (result.status === "email_unavailable") {
+        setEmailError("We could not send the verification email right now — please try again later.");
+      } else if (result.status === "country_banned") {
+        setBlockedMsg("country_banned");
+      }
+    },
+    onError: (error) => setEmailError(error.message),
+  });
+
+  const emailSignIn = useMutation({
+    mutationFn: async () =>
+      api.signInWithEmail({
+        email: emailAddr.trim(),
+        password: emailPass,
+        ip: network?.ip ?? undefined,
+      }),
+    onSuccess: (result) => signedInFromEmail(result),
+    onError: (error) => setEmailError(error.message),
+  });
+
+  const verifyCode = useMutation({
+    mutationFn: async () =>
+      api.verifyEmailCode({
+        email: codeEmail,
+        code: code.trim(),
+        ip: network?.ip ?? undefined,
+      }),
+    onSuccess: (result) => signedInFromEmail(result),
+    onError: (error) => setEmailError(error.message),
+  });
+
+  const resendCode = useMutation({
+    mutationFn: async () => api.resendEmailCode({ email: codeEmail }),
+    onSuccess: (result) => {
+      if (result.status === "code_sent") setEmailInfo("A new code was sent — check your email.");
+      else if (result.status === "email_unavailable") setEmailError("We could not send the email right now — please try again later.");
+      else setEmailError("This account is not waiting for a code — sign in instead.");
+    },
+    onError: (error) => setEmailError(error.message),
+  });
+
+  const forgotRequest = useMutation({
+    mutationFn: async () => api.requestPasswordReset({ email: forgotEmail.trim() }),
+    onSuccess: () => {
+      setCodePurpose("reset");
+      setCodeEmail(forgotEmail.trim().toLowerCase());
+      setCode("");
+      setNewPass("");
+      setEmailInfo("If an account uses this email, a reset code is on its way — enter it below with a new password.");
+      setEmailView("code");
+    },
+    onError: (error) => setEmailError(error.message),
+  });
+
+  const resetPass = useMutation({
+    mutationFn: async () =>
+      api.resetPasswordWithCode({
+        email: codeEmail,
+        code: code.trim(),
+        newPassword: newPass,
+      }),
+    onSuccess: () => {
+      setEmailView("main");
+      setEmailMode("login");
+      setEmailPass("");
+      setCode("");
+      setNewPass("");
+      setEmailInfo("Password changed — sign in with your new password.");
+    },
+    onError: (error) => setEmailError(error.message),
+  });
+
+  const submitEmailMain = () => {
+    setEmailError(null);
+    setEmailInfo(null);
+    if (!needConsent()) return;
+    if (!emailAddr.trim() || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailAddr.trim())) {
+      setEmailError("Enter a valid email address.");
+      return;
+    }
+    if (emailMode === "signup") {
+      if (emailPass.length < 8) {
+        setEmailError("Password must be at least 8 characters.");
+        return;
+      }
+      emailSignUp.mutate();
+    } else {
+      if (!emailPass) {
+        setEmailError("Enter your password.");
+        return;
+      }
+      emailSignIn.mutate();
+    }
+  };
+
+  const submitCode = () => {
+    setEmailError(null);
+    setEmailInfo(null);
+    if (code.trim().length !== 6) {
+      setEmailError("Enter the 6-digit code from your email.");
+      return;
+    }
+    if (codePurpose === "reset") {
+      if (newPass.length < 8) {
+        setEmailError("New password must be at least 8 characters.");
+        return;
+      }
+      resetPass.mutate();
+    } else {
+      if (!needConsent()) return;
+      verifyCode.mutate();
+    }
+  };
 
   // Returning from the full-page Google sign-in: the credential (or an
   // error) arrives in the URL fragment. Consume it once on mount.
@@ -147,28 +325,11 @@ export function SignInCard({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [googleClientId, gisAttempt]);
 
-  if (blockedMsg === "vpn" || network?.vpnSuspected) {
-    // VPN = direct ban: NO login path is offered on this screen at all
-    // (no Google button) and the server also refuses to issue any
-    // session to a VPN connection.
-    return (
-      <div className="rounded-2xl border border-red-300 bg-red-50 p-5 text-left dark:border-red-900 dark:bg-red-950/40">
-        <div className="flex items-start gap-3">
-          <span className="text-red-600 dark:text-red-400">{Icons.shield("h-7 w-7")}</span>
-          <div>
-            <p className="font-display text-base font-bold text-red-700 dark:text-red-300">
-              You use VPN
-            </p>
-            <p className="mt-1 text-sm text-red-700/90 dark:text-red-200/90">
-              You use VPN, so entry is not allowed. VPN and proxy
-              connections are banned on TapOne — you cannot log in while
-              using one. Please disconnect your VPN or proxy and try again.
-            </p>
-          </div>
-        </div>
-      </div>
-    );
-  }
+  // VPN is NOT blocked any more (owner order 2026-11-27): a VPN
+  // sign-up creates the account and a VPN login signs in normally,
+  // so there is no VPN screen here at all. The connection is still
+  // detected (network.ip) so the server can lock the account's
+  // country from the login IP, as before.
   if (blockedMsg === "blocked") {
     return (
       <div className="rounded-2xl border border-red-300 bg-red-50 p-5 text-left dark:border-red-900 dark:bg-red-950/40">
@@ -220,28 +381,269 @@ export function SignInCard({
             Start earning in seconds
           </p>
           <p className="mt-1 text-sm text-[var(--dim)]">
-            One Google button for both sign up and login. No password, no
-            forms to remember.
+            Sign up or log in with Google, or with your email and a
+            password. Email sign-up needs a 6-digit code we send you.
           </p>
         </>
       )}
-      <label className="mt-4 flex cursor-pointer items-start gap-2.5 text-left text-sm leading-relaxed text-[var(--text)]"><input type="checkbox" checked={consented} onChange={(e) => { setConsented(e.target.checked); consentedRef.current = e.target.checked; if (e.target.checked) setConsentError(null); }} className="mt-0.5 h-5 w-5 shrink-0 accent-[var(--brand)]" /><span>I agree to the{" "}<button type="button" onClick={() => onOpenLegal?.("terms")} className="font-semibold text-[var(--brand-deep)] underline">Terms of Service</button>{" "}and{" "}<button type="button" onClick={() => onOpenLegal?.("privacy")} className="font-semibold text-[var(--brand-deep)] underline">Privacy Policy</button>.</span></label>{consentError && (<p role="alert" className="mt-2 text-center text-sm font-medium text-red-600 dark:text-red-400">{consentError}</p>)}<div className="relative mt-4"><div className="flex min-h-[44px] justify-center" ref={gisRef} aria-label="Continue with Google" />{!consented && (<button type="button" aria-label="Tick the box above to continue with Google" title="Tick the box above to agree to the Terms of Service and Privacy Policy" onClick={() => setConsentError("Please tick the box above to agree to the Terms of Service and Privacy Policy before signing in with Google.")} className="absolute inset-0 cursor-not-allowed rounded-xl bg-[var(--surface)]/60" />)}</div>
-      {formError && (
+      <label className="mt-4 flex cursor-pointer items-start gap-2.5 text-left text-sm leading-relaxed text-[var(--text)]"><input type="checkbox" checked={consented} onChange={(e) => { setConsented(e.target.checked); consentedRef.current = e.target.checked; if (e.target.checked) setConsentError(null); }} className="mt-0.5 h-5 w-5 shrink-0 accent-[var(--brand)]" /><span>I agree to the{" "}<button type="button" onClick={() => onOpenLegal?.("terms")} className="font-semibold text-[var(--brand-deep)] underline">Terms of Service</button>{" "}and{" "}<button type="button" onClick={() => onOpenLegal?.("privacy")} className="font-semibold text-[var(--brand-deep)] underline">Privacy Policy</button>.</span></label>{consentError && (<p role="alert" className="mt-2 text-center text-sm font-medium text-red-600 dark:text-red-400">{consentError}</p>)}{!showEmail && (<div className="relative mt-4"><div className="flex min-h-[44px] justify-center" ref={gisRef} aria-label="Continue with Google" />{!consented && (<button type="button" aria-label="Tick the box above to continue with Google" title="Tick the box above to agree to the Terms of Service and Privacy Policy" onClick={() => setConsentError("Please tick the box above to agree to the Terms of Service and Privacy Policy before signing in with Google.")} className="absolute inset-0 cursor-not-allowed rounded-xl bg-[var(--surface)]/60" />)}</div>)}
+      {!showEmail && formError && (
         <p role="alert" className="mt-3 text-center text-sm font-medium text-red-600 dark:text-red-400">
           {formError}
         </p>
       )}
-      {!googleClientId && (
+      {!showEmail ? (
+        <button
+          type="button"
+          onClick={() => {
+            setEmailError(null);
+            setEmailInfo(null);
+            setEmailView("main");
+            setShowEmail(true);
+          }}
+          className="mt-4 flex w-full items-center justify-center gap-2 rounded-full bg-[var(--surface)] px-5 py-3 text-sm font-bold ring-1 ring-[var(--border)] transition hover:ring-[var(--brand)]"
+        >
+          {Icons.mail("h-5 w-5")} Continue with email
+        </button>
+      ) : (
+        <div className="mt-4">
+          <button
+            type="button"
+            onClick={() => {
+              setEmailError(null);
+              setEmailInfo(null);
+              setEmailView("main");
+              setShowEmail(false);
+            }}
+            className="text-sm font-semibold text-[var(--dim)]"
+          >
+            ← Back
+          </button>
+          <p className="mt-2 font-display text-base font-bold text-[var(--text)]">
+            Continue with email
+          </p>
+        </div>
+      )}
+      {showEmail && emailInfo && (
+        <p role="status" className="mt-3 text-center text-sm font-medium text-[var(--brand-deep)] dark:text-[var(--brand)]">
+          {emailInfo}
+        </p>
+      )}
+      {showEmail && emailError && (
+        <p role="alert" className="mt-3 text-center text-sm font-medium text-red-600 dark:text-red-400">
+          {emailError}
+        </p>
+      )}
+      {showEmail && emailView === "main" && (
+        <div className="mt-4">
+          <div className="grid grid-cols-2 gap-2 rounded-full bg-[var(--surface-2)] p-1" role="tablist" aria-label="Email log in or sign up">
+            {(["login", "signup"] as const).map((m) => (
+              <button
+                key={m}
+                type="button"
+                role="tab"
+                aria-selected={emailMode === m}
+                onClick={() => {
+                  setEmailMode(m);
+                  setEmailError(null);
+                  setEmailInfo(null);
+                }}
+                className={`rounded-full px-3 py-2 text-sm font-bold ${emailMode === m ? "bg-[var(--brand)] text-white" : "text-[var(--dim)]"}`}
+              >
+                {m === "login" ? "Log in" : "Sign up"}
+              </button>
+            ))}
+          </div>
+          <div className="mt-3 space-y-3">
+            {emailMode === "signup" && (
+              <div>
+                <label htmlFor="email-name" className="text-sm font-semibold">Your name <span className="font-normal text-[var(--dim)]">(optional)</span></label>
+                <input id="email-name" type="text" value={emailName} onChange={(e) => setEmailName(e.target.value)} placeholder="Your name" autoComplete="name" className="mt-1 w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 text-sm outline-none focus:border-[var(--brand)]" />
+              </div>
+            )}
+            <div>
+              <label htmlFor="email-addr" className="text-sm font-semibold">Email</label>
+              <input id="email-addr" type="email" value={emailAddr} onChange={(e) => setEmailAddr(e.target.value)} placeholder="you@example.com" autoComplete="email" className="mt-1 w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 text-sm outline-none focus:border-[var(--brand)]" />
+            </div>
+            <div>
+              <label htmlFor="email-pass" className="text-sm font-semibold">Password {emailMode === "signup" && <span className="font-normal text-[var(--dim)]">(at least 8 characters)</span>}</label>
+              <input id="email-pass" type="password" value={emailPass} onChange={(e) => setEmailPass(e.target.value)} placeholder="Your password" autoComplete={emailMode === "signup" ? "new-password" : "current-password"} className="mt-1 w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 text-sm outline-none focus:border-[var(--brand)]" />
+              {emailMode === "signup" && (
+                <p aria-live="polite" className={`mt-1 text-xs font-medium ${emailPass.length >= 8 ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400"}`}>
+                  {emailPass.length >= 8 ? "✓ Password is long enough" : "✗ Password must be at least 8 characters"}
+                </p>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={submitEmailMain}
+              disabled={emailSignUp.isPending || emailSignIn.isPending}
+              className="w-full rounded-full bg-[var(--brand)] px-5 py-3 text-sm font-bold text-white transition hover:bg-[var(--brand-deep)] disabled:opacity-50"
+            >
+              {emailSignUp.isPending || emailSignIn.isPending
+                ? "Please wait…"
+                : emailMode === "signup"
+                  ? "Sign up with email"
+                  : "Log in with email"}
+            </button>
+            {emailMode === "login" && (
+              <p className="text-center text-sm">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setForgotEmail(emailAddr);
+                    setEmailError(null);
+                    setEmailInfo(null);
+                    setEmailView("forgot");
+                  }}
+                  className="font-semibold text-[var(--brand-deep)] underline"
+                >
+                  Forgot password?
+                </button>
+              </p>
+            )}
+          </div>
+        </div>
+      )}
+      {showEmail && emailView === "code" && (
+        <div className="mt-4 space-y-3">
+          <p className="text-sm leading-relaxed text-[var(--dim)]">
+            {codePurpose === "reset"
+              ? `Enter the reset code sent to ${codeEmail} and choose a new password.`
+              : `Enter the 6-digit code sent to ${codeEmail}.`}
+          </p>
+          <div>
+            <label htmlFor="email-code" className="text-sm font-semibold">6-digit code</label>
+            <input
+              id="email-code"
+              type="text"
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              maxLength={6}
+              value={code}
+              onChange={(e) => setCode(e.target.value.replace(/[^0-9]/g, "").slice(0, 6))}
+              placeholder="123456"
+              className="mt-1 w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 text-center text-lg font-bold tracking-[0.3em] outline-none focus:border-[var(--brand)]"
+            />
+            <p className="mt-1 text-xs leading-relaxed text-[var(--dim)]">
+              Check your inbox or spam folder.
+            </p>
+          </div>
+          {codePurpose === "reset" && (
+            <div>
+              <label htmlFor="email-newpass" className="text-sm font-semibold">New password <span className="font-normal text-[var(--dim)]">(at least 8 characters)</span></label>
+              <input id="email-newpass" type="password" value={newPass} onChange={(e) => setNewPass(e.target.value)} placeholder="New password" autoComplete="new-password" className="mt-1 w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 text-sm outline-none focus:border-[var(--brand)]" />
+              <p aria-live="polite" className={`mt-1 text-xs font-medium ${newPass.length >= 8 ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400"}`}>
+                {newPass.length >= 8 ? "✓ Password is long enough" : "✗ Password must be at least 8 characters"}
+              </p>
+            </div>
+          )}
+          <button
+            type="button"
+            onClick={submitCode}
+            disabled={verifyCode.isPending || resetPass.isPending}
+            className="w-full rounded-full bg-[var(--brand)] px-5 py-3 text-sm font-bold text-white transition hover:bg-[var(--brand-deep)] disabled:opacity-50"
+          >
+            {verifyCode.isPending || resetPass.isPending
+              ? "Please wait…"
+              : codePurpose === "reset"
+                ? "Set new password"
+                : "Verify and continue"}
+          </button>
+          <p className="text-center text-sm">
+            {codePurpose === "signup" ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setEmailError(null);
+                  setEmailInfo(null);
+                  resendCode.mutate();
+                }}
+                disabled={resendCode.isPending}
+                className="font-semibold text-[var(--brand-deep)] underline disabled:opacity-50"
+              >
+                Send a new code
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => {
+                  setEmailError(null);
+                  setEmailInfo(null);
+                  setForgotEmail(codeEmail);
+                  setEmailView("forgot");
+                }}
+                className="font-semibold text-[var(--brand-deep)] underline"
+              >
+                Send a new code
+              </button>
+            )}
+            {" · "}
+            <button
+              type="button"
+              onClick={() => {
+                setEmailError(null);
+                setEmailInfo(null);
+                setEmailView("main");
+              }}
+              className="font-semibold text-[var(--brand-deep)] underline"
+            >
+              Back
+            </button>
+          </p>
+        </div>
+      )}
+      {showEmail && emailView === "forgot" && (
+        <div className="mt-4 space-y-3">
+          <p className="text-sm leading-relaxed text-[var(--dim)]">
+            Enter the email of your account — if an account uses it, a reset code is on its way.
+          </p>
+          <div>
+            <label htmlFor="forgot-email" className="text-sm font-semibold">Email</label>
+            <input id="forgot-email" type="email" value={forgotEmail} onChange={(e) => setForgotEmail(e.target.value)} placeholder="you@example.com" autoComplete="email" className="mt-1 w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 text-sm outline-none focus:border-[var(--brand)]" />
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              setEmailError(null);
+              setEmailInfo(null);
+              if (!forgotEmail.trim() || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(forgotEmail.trim())) {
+                setEmailError("Enter a valid email address.");
+                return;
+              }
+              forgotRequest.mutate();
+            }}
+            disabled={forgotRequest.isPending}
+            className="w-full rounded-full bg-[var(--brand)] px-5 py-3 text-sm font-bold text-white transition hover:bg-[var(--brand-deep)] disabled:opacity-50"
+          >
+            {forgotRequest.isPending ? "Please wait…" : "Send reset code"}
+          </button>
+          <p className="text-center text-sm">
+            <button
+              type="button"
+              onClick={() => {
+                setEmailError(null);
+                setEmailInfo(null);
+                setEmailView("main");
+              }}
+              className="font-semibold text-[var(--brand-deep)] underline"
+            >
+              Back to log in
+            </button>
+          </p>
+        </div>
+      )}
+      {!showEmail && !googleClientId && (
         <p className="mt-3 text-center text-sm leading-relaxed text-[var(--dim)]">
           Google sign-in is being set up — please check back shortly.
         </p>
       )}
-      {googleClientId && gisState === "loading" && (
+      {!showEmail && googleClientId && gisState === "loading" && (
         <p className="mt-2 text-center text-sm text-[var(--dim)]" role="status">
           Loading the Google button…
         </p>
       )}
-      {googleClientId && gisState === "failed" && (
+      {!showEmail && googleClientId && gisState === "failed" && (
         <div className="mt-4 rounded-2xl border border-amber-300 bg-amber-50 p-4 text-left dark:border-amber-900 dark:bg-amber-950/40">
           <p className="font-display text-sm font-bold text-amber-800 dark:text-amber-200">
             The Google button didn't load on this test version
@@ -277,8 +679,8 @@ export function SignInCard({
         </div>
       )}
       <p className="mt-3 text-center text-xs leading-relaxed text-[var(--dim)]">
-        Sign up and login happen with this one Google button — TapOne has no
-        email or password form. VPN connections are not allowed.
+        You can sign in with Google or with email + password. New email
+        accounts are verified with a code sent to your email.
       </p>
     </div>
   );
@@ -519,7 +921,7 @@ type StaticPageContent = { title: string; body: string[]; sections?: { heading: 
       {
         heading: "2. What we collect",
         body: [
-          "When you sign in with Google we store your name, email address and profile picture so we can run your account. We also give you a unique Offer Token (your TapOne user ID), which is shown in your Profile.",
+          "When you sign in we store your name, email address and profile picture so we can run your account. If you sign up with email and a password, we store a scrambled (hashed) copy of your password — never the password itself. We also give you a unique Offer Token (your TapOne user ID), which is shown in your Profile.",
           "We record the IP address of your sign-in connection, and the country derived from it. Your country decides which offers, surveys, games and payment methods you see, and it cannot be changed manually.",
           "We keep a record of your earnings, withdrawals, level and check-in progress, referrals, and the messages you send us through Help, so payments can be reviewed and paid correctly.",
           "We store only the settings needed to run the site: your dark/light choice and your referral code when you arrive from an invite link.",
@@ -530,7 +932,7 @@ type StaticPageContent = { title: string; body: string[]; sections?: { heading: 
         heading: "3. How we use your information",
         body: [
           "To run your account, match offers and payment methods to your country, credit your earnings, and review and pay your withdrawals.",
-          "To prevent fraud: VPN and proxy connections are not allowed, and accounts using fake details, emulators or location-spoofing can be blocked.",
+          "To prevent fraud: accounts using fake details, emulators or location-spoofing can be blocked.",
           "To reply to the messages you send us through Help, and to tell the admin when a new user registers.",
           "To improve TapOne and to meet our payment and record-keeping duties.",
         ],
@@ -551,7 +953,7 @@ type StaticPageContent = { title: string; body: string[]; sections?: { heading: 
           "Partner offerwalls and survey providers receive only your TapOne user ID (your Offer Token) so that a completed offer or survey can be credited to your account. They do not receive your email address, IP address or payment details from us.",
           "When you open a partner offerwall or survey, that partner may collect data directly from you on its own pages under its own privacy policy. TapOne does not control that collection.",
           "Your payment details are shared only with the payment method you choose when you request a withdrawal, so that the payment can be sent to you.",
-          "We share data with Google only to sign you in with your Google account. We do not share your data with anyone else except when the law requires it.",
+          "We share data with Google only to sign you in with your Google account. Your password is never shared with anyone — it is stored scrambled on our server. We do not share your data with anyone else except when the law requires it.",
         ],
       },
       {
@@ -623,7 +1025,7 @@ type StaticPageContent = { title: string; body: string[]; sections?: { heading: 
   terms: {
     title: "Terms of Service",
     body: [
-      "Last updated: 23 November 2026. TapOne launched on 19 November 2026. By signing in to TapOne you agree to these terms. If you have any question, contact us at info@tapone.store or through Help inside your account.", ], sections: [ { heading: "1. What TapOne is", body: [ "TapOne is a rewards website. Members complete surveys, offers and games from our partner networks (offerwalls), and earn real dollars for every completed task. All amounts are in US dollars (USD) only — there are no coins, points or other currencies.", "TapOne has no deposits and no gambling. You can only withdraw money you earned. There are no gift cards.", ], }, { heading: "2. Your account", body: [ "One person, one account. You sign up and log in with Google only — there is no email or password form on TapOne.", "You must give accurate details. Using a VPN, proxy, emulator or fake details to fake your location or complete offers is not allowed and leads to a blocked account.", "You can change your username up to 3 times in your lifetime. After that the option locks. Your country is detected automatically from your sign-in connection and cannot be changed.", ], }, { heading: "3. How earnings work", body: [ "You keep 70% of every offer, survey and game payout, in dollars. TapOne keeps 30%.", "Offer payouts are credited only when our partner confirms the completion through the postback system. Reversed or fraudulent completions are removed from your balance.", "Level rewards and the weekly check-in bonus are credited automatically as shown in your account. When someone signs up with your invite code, you earn 8% of what they earn.", ], },
+      "Last updated: 23 November 2026. TapOne launched on 19 November 2026. By signing in to TapOne you agree to these terms. If you have any question, contact us at info@tapone.store or through Help inside your account.", ], sections: [ { heading: "1. What TapOne is", body: [ "TapOne is a rewards website. Members complete surveys, offers and games from our partner networks (offerwalls), and earn real dollars for every completed task. All amounts are in US dollars (USD) only — there are no coins, points or other currencies.", "TapOne has no deposits and no gambling. You can only withdraw money you earned. There are no gift cards.", ], }, { heading: "2. Your account", body: [ "One person, one account. You sign up and log in with Google, or with your email and a password. Email accounts are verified with a code sent to your email.", "You must give accurate details. Using an emulator or fake details to fake your location or complete offers is not allowed and leads to a blocked account.", "You can change your username up to 3 times in your lifetime. After that the option locks. Your country is detected automatically from your sign-in connection and cannot be changed.", ], }, { heading: "3. How earnings work", body: [ "You keep 70% of every offer, survey and game payout, in dollars. TapOne keeps 30%.", "Offer payouts are credited only when our partner confirms the completion through the postback system. Reversed or fraudulent completions are removed from your balance.", "Level rewards and the weekly check-in bonus are credited automatically as shown in your account. When someone signs up with your invite code, you earn 8% of what they earn.", ], },
       { heading: "4. Withdrawals", body: [ "The minimum withdrawal is $5.00. Withdrawals are reviewed and paid manually by the admin.", "Payment methods are matched to your account from your sign-in connection, so the methods you see depend on your country — for example Easypaisa and JazzCash in Pakistan, UPI in India, and PayPal, bank transfer, Wise, Payoneer or Binance USDT in other countries. Every method is shown with its logo.", "Make sure your payment details are correct — payments sent to wrong details entered by you cannot be recovered.", ], }, { heading: "5. Fair use", body: [ "Do not create multiple accounts, do not complete offers for other people, and do not use bots, scripts or any other trick to fake completions. Accounts that break these rules can be blocked by the admin, and unpaid earnings on a blocked account are not paid out.", "The admin can also ban a country, in which case no account can be created from that country at all.", ], }, { heading: "6. Content and availability", body: [ "Offers, surveys and games come from our partners, so availability, payouts and payment methods can change at any time. A partner may stop an offer or reverse a completion, and TapOne cannot pay for completions a partner does not confirm.", "TapOne is provided as-is. We do our best to keep the site running, but we are not responsible for partner offers that change or disappear.", ], },
       { heading: "7. Changes to these terms", body: [ "We may update these terms when TapOne changes. The date at the top of this page shows the latest version. If you keep using TapOne after a change, you accept the updated terms.", ], },
        
@@ -632,9 +1034,9 @@ type StaticPageContent = { title: string; body: string[]; sections?: { heading: 
   faq: {
     title: "FAQ",
     body: [
-      "How do I earn? Sign in with Google, complete offers, surveys and games from our partners, and 70% of every payout lands in your TapOne balance in dollars.",
+      "How do I earn? Sign in, complete offers, surveys and games from our partners, and 70% of every payout lands in your TapOne balance in dollars.",
       "How do I withdraw? Reach the minimum withdrawal and request a payout to one of the payment methods shown in your account. Requests are reviewed and paid manually.",
-      "Why do I see these payment methods? Offers and payment methods are matched to your account from your sign-in connection, so what you see is picked for you automatically. VPN and proxy connections are not allowed.",
+      "Why do I see these payment methods? Offers and payment methods are matched to your account from your sign-in connection, so what you see is picked for you automatically.",
     ],
   },
   cookies: {
@@ -667,7 +1069,7 @@ type StaticPageContent = { title: string; body: string[]; sections?: { heading: 
     title: "Contact Us",
     body: [
       "The fastest way to reach us is the Help option inside your account — messages go straight to the TapOne team and your reply will be sent to your email by TapOne.",
-      "Sign in with Google, open Help from the menu, and send your message. We usually reply within a couple of days.",
+      "Sign in, open Help from the menu, and send your message. We usually reply within a couple of days.",
     ],
   },
 };
@@ -929,8 +1331,8 @@ const hashLegalPage: "terms" | "privacy" | null = hash === "#/terms" ? "terms" :
                 {[
                   {
                     n: "1",
-                    title: "Sign in with Google",
-                    text: "One button signs you up and logs you in. Offers and payment methods are matched to your account automatically.",
+                    title: "Sign in — Google or email",
+                    text: "Sign in with Google, or with your email and a password. Offers and payment methods are matched to your account automatically.",
                   },
                   {
                     n: "2",
@@ -959,7 +1361,7 @@ const hashLegalPage: "terms" | "privacy" | null = hash === "#/terms" ? "terms" :
                 {[
                   {
                     q: "How do I sign up?",
-                    a: "With the Google button at the top of this page — one button for both sign up and login. There is no email or password form.",
+                    a: "With the Google button at the top of this page, or with your email and a password — email sign-up needs a 6-digit code we send you.",
                   },
                   {
                     q: "How much of each payout do I keep?",
@@ -971,7 +1373,7 @@ const hashLegalPage: "terms" | "privacy" | null = hash === "#/terms" ? "terms" :
                   },
                   {
                     q: "Why do I see these payment methods?",
-                    a: "Payment methods are matched to your account automatically when you sign in. VPN connections are not allowed.",
+                    a: "Payment methods are matched to your account automatically when you sign in.",
                   },
                 ].map((item) => (
                   <details key={item.q} className="rounded-2xl bg-[var(--surface)] px-5 py-4 ring-1 ring-[var(--border)]">
