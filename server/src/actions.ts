@@ -77,6 +77,18 @@ async function getSettings(db: DB): Promise<Record<string, string>> {
   return out;
 }
 
+// Social links — the owner's social channels, shown with their logo
+// in the Redeem Code section (and as text pills in the public footer).
+// The list is stored as JSON in the `social_links_json` setting:
+// [{ id, label, url, imageUrl, active }] — fully admin-managed (add /
+// remove / edit / show / hide), no hard-coded list. When no JSON has
+// been saved yet, the list is seeded from the legacy `social_*`
+// settings keys, so links the owner already saved keep working: only
+// Facebook is shown (active = 1) — TikTok, Twitter, YouTube and the
+// rest start hidden (owner order 2026-11-27: "abhi sirf Facebook
+// dena"). Default logo images come from the Simple Icons CDN
+// (cdn.simpleicons.org — verified 200 for every slug below); the
+// owner can replace any image link from the Admin panel.
 const SOCIAL_PLATFORMS: { id: string; label: string; key: string }[] = [
   { id: "discord", label: "Discord", key: "social_discord" },
   { id: "twitter", label: "X", key: "social_twitter" },
@@ -87,11 +99,89 @@ const SOCIAL_PLATFORMS: { id: string; label: string; key: string }[] = [
   { id: "instagram", label: "Instagram", key: "social_instagram" },
 ];
 
-function socialLinksFrom(settings: Record<string, string>) {
+const SOCIAL_ICON_SLUGS: Record<string, string> = {
+  discord: "discord",
+  twitter: "x",
+  telegram: "telegram",
+  facebook: "facebook",
+  youtube: "youtube",
+  tiktok: "tiktok",
+  instagram: "instagram",
+};
+
+export type SocialLink = {
+  id: string;
+  label: string;
+  url: string;
+  imageUrl: string;
+  active: number;
+};
+
+function defaultSocialImage(id: string): string {
+  return `https://cdn.simpleicons.org/${SOCIAL_ICON_SLUGS[id] ?? id}`;
+}
+
+function normalizeSocialLink(raw: unknown): SocialLink | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const id = typeof r.id === "string" ? r.id.trim().toLowerCase() : "";
+  if (!/^[a-z0-9][a-z0-9_-]{0,29}$/.test(id)) return null;
+  const label = typeof r.label === "string" ? r.label.trim().slice(0, 30) : "";
+  if (!label) return null;
+  const url = typeof r.url === "string" ? r.url.trim().slice(0, 500) : "";
+  const imageUrl =
+    typeof r.imageUrl === "string" && r.imageUrl.trim() !== ""
+      ? r.imageUrl.trim().slice(0, 500)
+      : defaultSocialImage(id);
+  return {
+    id,
+    label,
+    url,
+    imageUrl,
+    active: r.active === 0 || r.active === false ? 0 : 1,
+  };
+}
+
+// The full admin-managed list (every entry, even one with no URL yet
+// and even a hidden one — the Admin editor needs them all). Falls back
+// to the legacy per-platform settings keys when no JSON is saved yet.
+function parseSocialLinks(settings: Record<string, string>): SocialLink[] {
+  const raw = (settings["social_links_json"] ?? "").trim();
+  if (raw !== "") {
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        const links = parsed
+          .map(normalizeSocialLink)
+          .filter((l): l is SocialLink => l !== null)
+          .slice(0, 50);
+        if (links.length > 0) return links;
+      }
+    } catch {
+      // Corrupt JSON: fall through to the legacy seed below.
+    }
+  }
+  // Seed from the legacy social_* keys. Only Facebook is shown — the
+  // owner decides the rest from the Admin panel.
   return SOCIAL_PLATFORMS.map((s) => ({
-    platform: s.id,
+    id: s.id,
     label: s.label,
     url: (settings[s.key] ?? "").trim(),
+    imageUrl: defaultSocialImage(s.id),
+    active: s.id === "facebook" ? 1 : 0,
+  }));
+}
+
+// What getPublicHome returns: every link that has a URL (same rule as
+// before, so the public footer keeps showing every saved link). The
+// Redeem Code section filters on `active` itself; the footer does not.
+function socialLinksFrom(settings: Record<string, string>) {
+  return parseSocialLinks(settings).map((s) => ({
+    platform: s.id,
+    label: s.label,
+    url: s.url,
+    imageUrl: s.imageUrl,
+    active: s.active,
   })).filter((s) => s.url !== "");
 }
 
@@ -3019,7 +3109,16 @@ export const Actions = {
       }),
       minWithdrawCents: z.number(),
       socialLinks: z.array(
-        z.object({ platform: z.string(), label: z.string(), url: z.string() }),
+        z.object({
+          platform: z.string(),
+          label: z.string(),
+          url: z.string(),
+          imageUrl: z.string(),
+          // 1 = the owner shows this link in the Redeem Code section;
+          // 0 = hidden there (the public footer still lists every link
+          // that has a URL, as before).
+          active: z.number(),
+        }),
       ),
       recentPayouts: z.array(
         z.object({
@@ -5693,6 +5792,19 @@ export const Actions = {
           }),
         ),
         socialLinks: z.record(z.string(), z.string()),
+        // The full admin-managed social links list (every entry, even
+        // one with no URL yet or switched off) — the Settings editor
+        // reads and writes this; socialLinks above is the legacy
+        // per-platform URL map, kept so older saves still read.
+        socialLinksList: z.array(
+          z.object({
+            id: z.string(),
+            label: z.string(),
+            url: z.string(),
+            imageUrl: z.string(),
+            active: z.number(),
+          }),
+        ),
       }),
     }),
     async handler(ctx, args) {
@@ -5765,6 +5877,7 @@ export const Actions = {
           socialLinks: Object.fromEntries(
             SOCIAL_PLATFORMS.map((s) => [s.id, settings[s.key] ?? ""]),
           ),
+          socialLinksList: parseSocialLinks(settings),
         },
       };
     },
@@ -7691,6 +7804,11 @@ export const Actions = {
       socialFacebook: z.string().trim().max(500).optional(),
       socialInstagram: z.string().trim().max(500).optional(),
       socialTelegram: z.string().trim().max(500).optional(),
+      // The whole admin-managed social links list as JSON
+      // ([{ id, label, url, imageUrl, active }], max 50 links) — the
+      // Settings editor sends this instead of the fixed per-platform
+      // fields above. Validated and stored as `social_links_json`.
+      socialLinksJson: z.string().max(20000).optional(),
       adminUsername: z.string().trim().min(3).max(80).optional(),
       adminPassword: z.string().min(6).max(200).optional(),
     }),
@@ -7758,6 +7876,40 @@ export const Actions = {
       for (const [value, key] of socialArgs) {
         if (value !== undefined) updates.push([key, value]);
       }
+      if (args.socialLinksJson !== undefined) {
+        // Validate the whole list before storing anything: bad JSON or
+        // a bad entry refuses the save instead of breaking the footer
+        // and the Redeem Code section for every user.
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(args.socialLinksJson);
+        } catch {
+          throw new Error("Social links could not be saved — the list is not valid.");
+        }
+        if (!Array.isArray(parsed) || parsed.length > 50)
+          throw new Error("Social links must be a list of at most 50 links.");
+        const seen = new Set<string>();
+        for (const entry of parsed) {
+          const link = normalizeSocialLink(entry);
+          if (!link) throw new Error("Each social link needs a name and a valid id.");
+          if (seen.has(link.id))
+            throw new Error(`Two social links use the id "${link.id}".`);
+          seen.add(link.id);
+          if (
+            link.url !== "" &&
+            !link.url.startsWith("http://") &&
+            !link.url.startsWith("https://")
+          )
+            throw new Error(`"${link.label}": the link must start with https://.`);
+          if (
+            link.imageUrl !== "" &&
+            !link.imageUrl.startsWith("http://") &&
+            !link.imageUrl.startsWith("https://")
+          )
+            throw new Error(`"${link.label}": the image link must start with https://.`);
+        }
+        updates.push(["social_links_json", JSON.stringify(parsed)]);
+      }
       if (args.adminUsername !== undefined)
         updates.push(["admin_username", args.adminUsername]);
       if (args.adminPassword !== undefined)
@@ -7773,6 +7925,252 @@ export const Actions = {
       }
       ctx.invalidateQueries();
       return { ok: true };
+    },
+  }),
+
+  // ---------------------------------------------------------- redeem codes
+  //
+  // The Redeem Code section (replaces Contact Us, owner order
+  // 2026-11-27): the owner creates a code from the Admin panel — the
+  // code text itself is typed by the owner (TAPONE10, EID2026, any
+  // text), plus a dollar amount of any value and a max number of uses.
+  // A user types the code in the Redeem Code section and the FULL
+  // amount lands in their balance — no 70/30 split, no affiliate
+  // commission, the owner pays it in full. Rules enforced here:
+  //   - a code stops working when its max uses are reached, or when
+  //     the owner deactivates it;
+  //   - one user can redeem the same code only once, ever (enforced
+  //     by the UNIQUE (code_id, user_id) index on redeem_redemptions
+  //     as well as the check below);
+  //   - invalid / inactive / used-up codes credit nothing and return
+  //     a plain-English error the section shows to the user.
+  // Every successful redemption is recorded (who, which code, amount,
+  // when) and listed for the admin. Redeem earnings count like other
+  // earnings: they can unlock level rewards and the daily check-in
+  // goal, exactly as offer credits do.
+  redeemCode: defineAction({
+    description:
+      "Redeems a code from the Redeem Code section: credits its full amount to the signed-in user's balance. Fails with a plain error for an invalid, inactive or used-up code, or one the user already used.",
+    request: z.object({
+      token: z.string().min(1).max(200),
+      code: z.string().trim().min(1).max(40),
+    }),
+    response: z.object({
+      ok: z.literal(true),
+      code: z.string(),
+      amountCents: z.number(),
+    }),
+    async handler(ctx, args) {
+      const user = await requireUser(ctx, args.token);
+      const db = ctx.db<typeof schema>();
+      const codeText = args.code.trim().toUpperCase();
+      const rows = await db
+        .select()
+        .from(schema.redeemCodes)
+        .where(eq(schema.redeemCodes.code, codeText))
+        .limit(1);
+      const row = rows[0];
+      if (!row) throw new Error("That code is not valid. Check it and try again.");
+      if (row.active !== 1)
+        throw new Error("This code is no longer active.");
+      if (row.usedCount >= row.maxUses)
+        throw new Error("This code has already been used up.");
+      const already = await db
+        .select()
+        .from(schema.redeemRedemptions)
+        .where(
+          and(
+            eq(schema.redeemRedemptions.codeId, row.id),
+            eq(schema.redeemRedemptions.userId, user.id),
+          ),
+        )
+        .limit(1);
+      if (already.length > 0)
+        throw new Error("You have already used this code.");
+      const statements: BatchItem<"sqlite">[] = [
+        db.insert(schema.redeemRedemptions).values({
+          codeId: row.id,
+          code: row.code,
+          userId: user.id,
+          amountCents: row.amountCents,
+        }),
+        db
+          .update(schema.redeemCodes)
+          .set({ usedCount: row.usedCount + 1 })
+          .where(eq(schema.redeemCodes.id, row.id)),
+        db
+          .update(schema.users)
+          .set({
+            balanceCents: user.balanceCents + row.amountCents,
+            totalEarnedCents: user.totalEarnedCents + row.amountCents,
+          })
+          .where(eq(schema.users.id, user.id)),
+        db.insert(schema.transactions).values({
+          userId: user.id,
+          kind: "redeem_code",
+          amountCents: row.amountCents,
+          note: `Redeem code ${row.code}`,
+        }),
+      ];
+      const [first, ...rest] = statements;
+      if (first) await db.batch([first, ...rest]);
+      await checkLevelUps(db, user.id);
+      await syncWeeklyCheckin(db, user.id);
+      return { ok: true as const, code: row.code, amountCents: row.amountCents };
+    },
+  }),
+
+  adminListRedeemCodes: defineAction({
+    description:
+      "Admin list of every redeem code with its used count, plus the latest redemptions (who redeemed which code, how much, when).",
+    request: z.object({ adminToken: z.string().min(1).max(200) }),
+    response: z.object({
+      codes: z.array(
+        z.object({
+          id: z.number(),
+          code: z.string(),
+          amountCents: z.number(),
+          maxUses: z.number(),
+          usedCount: z.number(),
+          active: z.number(),
+          createdAt: z.string(),
+        }),
+      ),
+      redemptions: z.array(
+        z.object({
+          id: z.number(),
+          code: z.string(),
+          userName: z.string(),
+          amountCents: z.number(),
+          createdAt: z.string(),
+        }),
+      ),
+    }),
+    async handler(ctx, args) {
+      await requireAdmin(ctx, args.adminToken);
+      const db = ctx.db<typeof schema>();
+      const codes = await db
+        .select()
+        .from(schema.redeemCodes)
+        .orderBy(desc(schema.redeemCodes.id));
+      const reds = await db
+        .select()
+        .from(schema.redeemRedemptions)
+        .orderBy(desc(schema.redeemRedemptions.id))
+        .limit(50);
+      const userIds = [...new Set(reds.map((r) => r.userId))];
+      const users = userIds.length
+        ? await db.select().from(schema.users).where(inArray(schema.users.id, userIds))
+        : [];
+      const byId = new Map(users.map((u) => [u.id, u]));
+      return {
+        codes: codes.map((c) => ({
+          id: c.id,
+          code: c.code,
+          amountCents: c.amountCents,
+          maxUses: c.maxUses,
+          usedCount: c.usedCount,
+          active: c.active,
+          createdAt: c.createdAt.toISOString(),
+        })),
+        redemptions: reds.map((r) => ({
+          id: r.id,
+          code: r.code,
+          userName: (byId.get(r.userId)?.name ?? "TapOne user").split(" ")[0] ?? "TapOne user",
+          amountCents: r.amountCents,
+          createdAt: r.createdAt.toISOString(),
+        })),
+      };
+    },
+  }),
+
+  adminCreateRedeemCode: defineAction({
+    description:
+      "Admin creates a redeem code: the code text is typed by the owner (any text, e.g. TAPONE10), plus the dollar amount and the max number of uses. Leave the code blank and one is generated for you.",
+    request: z.object({
+      adminToken: z.string().min(1).max(200),
+      code: z.string().trim().max(32).optional(),
+      amountCents: z.number().int().min(1).max(1_000_000),
+      maxUses: z.number().int().min(1).max(10000),
+    }),
+    response: z.object({ ok: z.literal(true), id: z.number(), code: z.string() }),
+    async handler(ctx, args) {
+      await requireAdmin(ctx, args.adminToken);
+      const db = ctx.db<typeof schema>();
+      const codeText =
+        args.code && args.code.trim() !== ""
+          ? args.code.trim().toUpperCase()
+          : randomCode(8);
+      if (!/^[A-Z0-9][A-Z0-9-]{3,31}$/.test(codeText))
+        throw new Error(
+          "The code must be 4–32 letters, numbers or dashes (e.g. TAPONE10).",
+        );
+      const existing = await db
+        .select()
+        .from(schema.redeemCodes)
+        .where(eq(schema.redeemCodes.code, codeText))
+        .limit(1);
+      if (existing.length > 0)
+        throw new Error("A code with this text already exists.");
+      const inserted = await db
+        .insert(schema.redeemCodes)
+        .values({
+          code: codeText,
+          amountCents: args.amountCents,
+          maxUses: args.maxUses,
+        })
+        .returning({ id: schema.redeemCodes.id });
+      const id = inserted[0]?.id;
+      if (!id) throw new Error("The code could not be created. Try again.");
+      return { ok: true as const, id, code: codeText };
+    },
+  }),
+
+  adminSetRedeemCodeActive: defineAction({
+    description:
+      "Admin activates or deactivates a redeem code. A deactivated code stops working at once; its past redemptions stay recorded.",
+    request: z.object({
+      adminToken: z.string().min(1).max(200),
+      id: z.number().int().positive(),
+      active: z.boolean(),
+    }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args) {
+      await requireAdmin(ctx, args.adminToken);
+      const db = ctx.db<typeof schema>();
+      const rows = await db
+        .select()
+        .from(schema.redeemCodes)
+        .where(eq(schema.redeemCodes.id, args.id))
+        .limit(1);
+      if (!rows[0]) throw new Error("Code not found.");
+      await db
+        .update(schema.redeemCodes)
+        .set({ active: args.active ? 1 : 0 })
+        .where(eq(schema.redeemCodes.id, args.id));
+      return { ok: true as const };
+    },
+  }),
+
+  adminDeleteRedeemCode: defineAction({
+    description:
+      "Admin deletes a redeem code. Its past redemptions stay recorded (they carry the code text), so the history is not lost.",
+    request: z.object({
+      adminToken: z.string().min(1).max(200),
+      id: z.number().int().positive(),
+    }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args) {
+      await requireAdmin(ctx, args.adminToken);
+      const db = ctx.db<typeof schema>();
+      const rows = await db
+        .select()
+        .from(schema.redeemCodes)
+        .where(eq(schema.redeemCodes.id, args.id))
+        .limit(1);
+      if (!rows[0]) throw new Error("Code not found.");
+      await db.delete(schema.redeemCodes).where(eq(schema.redeemCodes.id, args.id));
+      return { ok: true as const };
     },
   }),
 
