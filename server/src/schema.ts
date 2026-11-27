@@ -132,7 +132,7 @@ export const emailVerifications = sqliteTable("email_verifications", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   email: text("email").notNull(),
   codeHash: text("code_hash").notNull(),
-  purpose: text("purpose", { enum: ["signup", "reset", "change"] })
+  purpose: text("purpose", { enum: ["signup", "reset"] })
     .notNull()
     .default("signup"),
   attempts: integer("attempts").notNull().default(0),

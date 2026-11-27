@@ -223,6 +223,43 @@ function nameChangesLeft(u: UserRow): number {
   return Math.max(0, MAX_NAME_CHANGES - u.nameChanges);
 }
 
+// Usernames are UNIQUE, case-insensitively (owner order 2026-11-27):
+// no two accounts may hold the same username, however it is cased
+// ("Nexon" and "nexon" are the same username). The check is code-only
+// on purpose — there is NO unique DB constraint, so names that already
+// exist in duplicate can never break a migration or a deploy.
+async function isUsernameTaken(
+  db: DB,
+  username: string,
+  excludeUserId?: number,
+): Promise<boolean> {
+  const rows = await db
+    .select({ id: schema.users.id })
+    .from(schema.users)
+    .where(sql`lower(${schema.users.name}) = ${username.toLowerCase()}`)
+    .limit(1);
+  const found = rows[0];
+  if (!found) return false;
+  if (excludeUserId !== undefined && found.id === excludeUserId) return false;
+  return true;
+}
+
+// Returns a username that is free, appending a number (2, 3, …) when
+// the base is taken. Used for names the user did not choose — the
+// email-prefix default at email sign-up and the Google account name
+// at Google sign-up — so a sign-up is never blocked by a collision
+// and never creates a duplicate.
+async function uniqueUsername(db: DB, base: string): Promise<string> {
+  const clean = base.trim() || "TapOne User";
+  if (!(await isUsernameTaken(db, clean))) return clean;
+  const stem = clean.length > 38 ? clean.slice(0, 38) : clean;
+  for (let n = 2; n < 1000; n++) {
+    const candidate = `${stem}${n}`;
+    if (!(await isUsernameTaken(db, candidate))) return candidate;
+  }
+  return `${stem}${Date.now() % 100000}`;
+}
+
 function publicUser(u: UserRow, titles: readonly TitleDef[] = DEFAULT_TITLES) {
   return {
     id: u.id,
@@ -592,12 +629,13 @@ async function sendResendEmail(args: {
   }
 }
 
-/** What a 6-digit code is for. "change" is the Profile change-password
- *  code (owner order 2026-11-27): the code is emailed to the account's
- *  own address and must match server-side before the password moves.
- *  One live code per (email, purpose), so the three flows never
- *  overwrite each other's codes. */
-type EmailCodePurpose = "signup" | "reset" | "change";
+/** What a 6-digit code is for. Only two purposes exist: "signup"
+ *  (email sign-up verification) and "reset" (forgot-password reset).
+ *  The Profile change-password flow — and its "change" purpose — were
+ *  removed completely by owner order 2026-11-27, so no code is ever
+ *  issued or checked for it any more. One live code per (email,
+ *  purpose), so the two flows never overwrite each other's codes. */
+type EmailCodePurpose = "signup" | "reset";
 
 function sendVerificationCodeEmail(
   email: string,
@@ -607,15 +645,11 @@ function sendVerificationCodeEmail(
   const subject =
     purpose === "reset"
       ? "Your TapOne password reset code"
-      : purpose === "change"
-        ? "Your TapOne password change code"
-        : "Your TapOne verification code";
+      : "Your TapOne verification code";
   const line =
     purpose === "reset"
       ? "You asked to reset your TapOne password. Use this code to set a new password:"
-      : purpose === "change"
-        ? "You asked to change your TapOne password. Use this code to confirm the change:"
-        : "Use this code to verify your email and activate your TapOne account:";
+      : "Use this code to verify your email and activate your TapOne account:";
   return sendResendEmail({
     to: email,
     subject,
@@ -3547,6 +3581,11 @@ export const Actions = {
       }
       if (!email) throw new Error("Google sign-in could not be verified. Try again.");
       if (!name) name = email.split("@")[0] ?? "TapOne User";
+      // Usernames are unique (owner order 2026-11-27): if the Google
+      // account name is already taken, a number is appended (2, 3, …)
+      // until it is free — a Google sign-up is never blocked by a
+      // collision and never creates a duplicate username.
+      name = await uniqueUsername(db, name);
 
       const geo = await lookupGeo(args.ip?.trim() ? args.ip.trim() : null);
       // VPN is NOT blocked (owner order 2026-11-27): a VPN sign-up
@@ -3673,7 +3712,7 @@ export const Actions = {
 
   signUpWithEmail: defineAction({
     description:
-      "Starts an email + password sign-up: creates the account UNVERIFIED and emails a 6-digit code to that address. The account activates only when verifyEmailCode succeeds — no session is issued here, and the admin registration alert is sent at activation, not at this step. One account per email (owner order 2026-11-27): an address that already has an activated account — email or Google — returns email_in_use and creates nothing. Signing up again with an unverified address just sends a fresh code (and updates the password). VPN connections are allowed (owner order 2026-11-27).",
+      "Starts an email + password sign-up: creates the account UNVERIFIED and emails a 6-digit code to that address. The account activates only when verifyEmailCode succeeds — no session is issued here, and the admin registration alert is sent at activation, not at this step. One account per email (owner order 2026-11-27): an address that already has an activated account — email or Google — returns email_in_use and creates nothing. Usernames are unique, case-insensitively (owner order 2026-11-27): a typed username that is already taken is refused with an error and creates nothing; with no username typed, the default from the email prefix is made unique automatically. Signing up again with an unverified address just sends a fresh code (and updates the password). VPN connections are allowed (owner order 2026-11-27).",
     request: z.object({
       email: z.string().trim().min(3).max(254),
       // No zod minimum here on purpose: the handler below throws the
@@ -3714,11 +3753,23 @@ export const Actions = {
         if (user.loginMethod === "email" && user.emailVerified === 0) {
           // Still unverified: a fresh code, and the password they just
           // typed becomes the account password.
+          const typedName = args.name?.trim();
+          // Usernames are unique (owner order 2026-11-27): a typed
+          // username that belongs to someone else is refused before
+          // anything is updated and before any code is sent.
+          if (
+            typedName &&
+            typedName.toLowerCase() !== user.name.toLowerCase() &&
+            (await isUsernameTaken(db, typedName, user.id))
+          )
+            throw new Error(
+              "This username is already taken — please choose another.",
+            );
           await db
             .update(schema.users)
             .set({
               passwordHash: await hashPassword(args.password),
-              name: args.name?.trim() || user.name,
+              name: typedName || user.name,
             })
             .where(eq(schema.users.id, user.id));
           const issued = await issueEmailCode(db, email, "signup");
@@ -3732,6 +3783,26 @@ export const Actions = {
         return { status: "email_in_use" }; // Activated account of
         // either kind — one account per email (owner order
         // 2026-11-27); no duplicate is created.
+      }
+
+      // Usernames are unique (owner order 2026-11-27): a typed username
+      // that is already taken is refused BEFORE any account is created
+      // and before any code is sent. No username typed: the default
+      // comes from the email prefix and is made unique automatically
+      // (2, 3, …) if it is taken.
+      const typedUsername = args.name?.trim();
+      let username: string;
+      if (typedUsername) {
+        if (await isUsernameTaken(db, typedUsername))
+          throw new Error(
+            "This username is already taken — please choose another.",
+          );
+        username = typedUsername;
+      } else {
+        username = await uniqueUsername(
+          db,
+          email.split("@")[0] || "TapOne User",
+        );
       }
 
       const geo = await lookupGeo(args.ip?.trim() ? args.ip.trim() : null);
@@ -3768,7 +3839,7 @@ export const Actions = {
         .insert(schema.users)
         .values({
           userCode,
-          name: args.name?.trim() || email.split("@")[0] || "TapOne User",
+          name: username,
           email,
           passwordHash: await hashPassword(args.password),
           emailVerified: 0,
@@ -4011,106 +4082,6 @@ export const Actions = {
         );
       if (issued === "unavailable") return { status: "email_unavailable" };
       return { status: "code_sent" };
-    },
-  }),
-
-  requestPasswordChangeCode: defineAction({
-    description:
-      "Step 1 of the Profile change-password flow (owner order 2026-11-27): the signed-in email account enters the old password and the new one, and a 6-digit code is emailed to the account's own address. The password itself changes only in changePassword, after that mailed code is entered and verified server-side. Google accounts have no password, so they cannot use this.",
-    request: z.object({
-      token: z.string().min(1).max(200),
-      oldPassword: z.string().min(1).max(128),
-      // No zod minimum here on purpose — see signUpWithEmail: the
-      // handler throws the clear 8-character error instead.
-      newPassword: z.string().max(128),
-    }),
-    response: z.object({
-      status: z.enum(["code_sent", "email_unavailable"]),
-    }),
-    async handler(
-      ctx,
-      args,
-    ): Promise<{ status: "code_sent" | "email_unavailable" }> {
-      const user = await requireUser(ctx, args.token);
-      if (user.loginMethod !== "email")
-        throw new Error(
-          "Your account uses Google sign-in and has no password to change.",
-        );
-      if (args.newPassword.length < 8)
-        throw new Error("New password must be at least 8 characters.");
-      // The old password is checked here too, so a wrong old password
-      // fails before any code is sent — and changePassword checks it
-      // again before the password moves.
-      if (!(await verifyPassword(args.oldPassword, user.passwordHash)))
-        throw new Error("Your old password is wrong.");
-      const db = ctx.db<typeof schema>();
-      const issued = await issueEmailCode(db, user.email, "change");
-      if (issued === "too_soon")
-        throw new Error(
-          "A code was just sent — please wait a minute before asking again.",
-        );
-      if (issued === "unavailable") return { status: "email_unavailable" };
-      return { status: "code_sent" };
-    },
-  }),
-
-  changePassword: defineAction({
-    description:
-      "Step 2 of the Profile change-password flow (owner order 2026-11-27): the old password must match, the new one must be at least 8 characters, AND the 6-digit code emailed to the account in step 1 must match server-side — only then does the password change. Google accounts have no password, so they cannot use this. Every OTHER session for the account is ended; the current one stays signed in.",
-    request: z.object({
-      token: z.string().min(1).max(200),
-      oldPassword: z.string().min(1).max(128),
-      // No zod minimum here on purpose — see signUpWithEmail: the
-      // handler throws the clear 8-character error instead.
-      newPassword: z.string().max(128),
-      code: z.string().trim().min(6).max(6),
-    }),
-    response: z.object({ ok: z.literal(true) }),
-    async handler(ctx, args): Promise<{ ok: true }> {
-      const user = await requireUser(ctx, args.token);
-      if (user.loginMethod !== "email")
-        throw new Error(
-          "Your account uses Google sign-in and has no password to change.",
-        );
-      if (args.newPassword.length < 8)
-        throw new Error("New password must be at least 8 characters.");
-      if (!(await verifyPassword(args.oldPassword, user.passwordHash)))
-        throw new Error("Your old password is wrong.");
-      const db = ctx.db<typeof schema>();
-      // The emailed code must match the one the server sent for this
-      // account — a self-typed code never changes the password.
-      // checkEmailCode compares the SHA-256 hash server-side; a
-      // wrong code leaves the password untouched.
-      const check = await checkEmailCode(db, user.email, "change", args.code);
-      if (check === "not_found")
-        throw new Error(
-          "No change code was sent to your email — request a new one.",
-        );
-      if (check === "expired")
-        throw new Error("That code has expired — request a new one.");
-      if (check === "wrong")
-        throw new Error(
-          "Wrong code — check the code in your email and try again.",
-        );
-      if (check === "too_many")
-        throw new Error("Too many wrong attempts — request a new code.");
-      await db
-        .update(schema.users)
-        .set({ passwordHash: await hashPassword(args.newPassword) })
-        .where(eq(schema.users.id, user.id));
-      // End every OTHER session, so a session opened before the
-      // change cannot keep being used. The current session stays
-      // signed in.
-      await db
-        .delete(schema.sessions)
-        .where(
-          and(
-            eq(schema.sessions.userId, user.id),
-            ne(schema.sessions.token, args.token),
-          ),
-        );
-      ctx.invalidateQueries();
-      return { ok: true };
     },
   }),
 
@@ -5670,27 +5641,34 @@ export const Actions = {
 
   updateDisplayName: defineAction({
     description:
-      "Changes the signed-in user's display name (1–40 characters). Lifetime limit: 3 changes per account — every successful change is counted on the user row, and once all 3 are used the name is locked and further changes are refused. Saving the name the user already has is not a change and is never counted. The name lives on the user row, so a new name shows at once everywhere the name appears — referrals, winner banners, admin lists. The Google email on the account never changes.",
+      "Changes the signed-in user's username (1–40 characters). Usernames are unique, case-insensitively (owner order 2026-11-27): a username another account already holds is refused and does NOT consume one of the 3 changes. Lifetime limit: 3 changes per account — every successful change is counted on the user row, and once all 3 are used the username is locked and further changes are refused. Saving the username the user already has is not a change and is never counted. The username lives on the user row, so a new username shows at once everywhere it appears — referrals, winner banners, admin lists. The Google email on the account never changes.",
     request: z.object({
       token: z.string().min(1).max(200),
       name: z
         .string()
         .trim()
-        .min(1, "Type a display name.")
-        .max(40, "Display name can be at most 40 characters."),
+        .min(1, "Type a username.")
+        .max(40, "Username can be at most 40 characters."),
     }),
     response: z.object({ name: z.string(), nameChangesLeft: z.number() }),
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
       const user = await requireUser(ctx, args.token);
-      // Re-saving the current name is not a change — never counted,
+      // Re-saving the current username is not a change — never counted,
       // and allowed even when the limit is used up.
       if (args.name === user.name) {
         return { name: user.name, nameChangesLeft: nameChangesLeft(user) };
       }
       if (user.nameChanges >= MAX_NAME_CHANGES)
         throw new Error(
-          `You have used all ${MAX_NAME_CHANGES} display name changes — your name is now locked as "${user.name}".`,
+          `You have used all ${MAX_NAME_CHANGES} username changes — your username is now locked as "${user.name}".`,
+        );
+      // Usernames are unique (owner order 2026-11-27): a taken
+      // username is refused here, before any change is saved and
+      // before one of the 3 lifetime changes is consumed.
+      if (await isUsernameTaken(db, args.name, user.id))
+        throw new Error(
+          "This username is already taken — please choose another.",
         );
       const used = user.nameChanges + 1;
       await db
