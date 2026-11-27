@@ -41,7 +41,7 @@ const TABS: { id: DashboardTab; label: string; icon: (c?: string) => ReactNode }
   { id: "history", label: "History", icon: Icons.history },
   { id: "profile", label: "Profile", icon: Icons.user },
   { id: "help", label: "Help", icon: Icons.mail },
-  { id: "contact", label: "Contact us", icon: Icons.mail },
+  { id: "contact", label: "Redeem Code", icon: Icons.mail },
 ];
 
 type MeData = ApiResponse<typeof api, "getMe">;
@@ -57,6 +57,7 @@ const KIND_LABELS: Record<string, string> = {
   checkin_bonus: "Check-in bonus",
   contest_prize: "Daily contest prize",
   level_reward: "Level reward",
+  redeem_code: "Redeem code reward",
 };
 
 function StatusChip({ status }: { status: "pending" | "approved" | "rejected" }) {
@@ -340,7 +341,7 @@ export function Dashboard({
               {tab === "invite" && <AffiliateTab token={token} />}
               {tab === "profile" && <ProfileTab token={token} user={user} go={pick} onSignOut={onSignOut} />}
               {tab === "help" && <HelpTab token={token} />}
-              {tab === "contact" && <ContactTab />}
+              {tab === "contact" && <RedeemTab token={token} />}
             </>
           )}
         </main>
@@ -2746,69 +2747,161 @@ function ProfileTab({
   );
 }
 
-// ------------------------------------------------------------ contact tab
+// ------------------------------------------------------------ redeem tab
+//
+// Redeem Code (replaces Contact Us, owner order 2026-11-27): the
+// owner's social channels, read live from the admin Social Links
+// settings (getPublicHome) — only the links the owner switched ON in
+// Admin show here, each WITH its logo image. Below them, the code
+// box: the user types a code the owner shared on those channels and
+// its full amount lands in their balance at once. Only Facebook is
+// switched on by default; the owner adds or shows the rest himself.
+const REDEEM_BLURBS: Record<string, string> = {
+  youtube: "Watch our videos and updates",
+  tiktok: "Short videos and announcements",
+  facebook: "Follow our page and message us",
+  twitter: "Follow us on X (Twitter)",
+  instagram: "Photos and updates",
+  discord: "Join our community",
+  telegram: "Announcements and updates",
+};
 
-// Contact Us: the owner's social channels, read live from the same
-// admin Social Links settings that feed the footer (getPublicHome), so
-// whatever link the owner saves in Admin → Settings shows here for ALL
-// users and opens directly on tap. Platforms the owner hasn't added
-// yet show as "not added yet" instead of a dead link.
-const CONTACT_PLATFORMS: { id: string; label: string; blurb: string }[] = [
-  { id: "youtube", label: "YouTube", blurb: "Watch our videos and updates" },
-  { id: "tiktok", label: "TikTok", blurb: "Short videos and announcements" },
-  { id: "facebook", label: "Facebook", blurb: "Follow our page and message us" },
-  { id: "twitter", label: "Twitter", blurb: "Follow us on X (Twitter)" },
-];
+// A link's logo image, with a first-letter fallback when the image
+// link is empty or fails to load — a card never shows a broken image.
+function SocialLogo({ imageUrl, label }: { imageUrl: string; label: string }) {
+  const [failed, setFailed] = useState(false);
+  if (failed || !imageUrl) {
+    return (
+      <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[var(--surface-2)] font-display text-lg font-extrabold text-[var(--brand)] ring-1 ring-[var(--border)]">
+        {label.slice(0, 1).toUpperCase()}
+      </span>
+    );
+  }
+  return (
+    <img
+      src={imageUrl}
+      alt=""
+      className="h-11 w-11 shrink-0 rounded-full bg-white object-contain p-1.5 ring-1 ring-[var(--border)]"
+      onError={() => setFailed(true)}
+    />
+  );
+}
 
-function ContactTab() {
+function RedeemTab({ token }: { token: string }) {
+  const queryClient = useQueryClient();
   const home = useQuery({
     queryKey: ["public-home"],
     queryFn: () => api.getPublicHome({}),
   });
-  const links = home.data?.socialLinks ?? [];
+  // Only the links the owner switched ON in Admin → Settings show
+  // here. The public footer is different: it lists every link that
+  // has a URL, as before.
+  const links = (home.data?.socialLinks ?? []).filter(
+    (s) => s.active === 1 && s.url !== "",
+  );
+  const [code, setCode] = useState("");
+  const [redeemed, setRedeemed] = useState<{ code: string; amountCents: number } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const redeem = useMutation({
+    mutationFn: async () => api.redeemCode({ token, code: code.trim() }),
+    onSuccess: (r) => {
+      setRedeemed({ code: r.code, amountCents: r.amountCents });
+      setError(null);
+      setCode("");
+      void queryClient.invalidateQueries({ queryKey: ["me", token] });
+      void queryClient.invalidateQueries({ queryKey: ["history", token] });
+      void queryClient.invalidateQueries({ queryKey: ["dashboard", token] });
+    },
+    onError: (e) => {
+      setRedeemed(null);
+      setError(e.message);
+    },
+  });
+
   return (
     <div>
-      <h1 className="font-display text-2xl font-extrabold sm:text-3xl">Contact Us</h1>
+      <h1 className="font-display text-2xl font-extrabold sm:text-3xl">Redeem Code</h1>
       <p className="mt-1 max-w-xl text-sm leading-relaxed text-[var(--dim)]">
-        Reach the TapOne team on our social channels — tap one to open it
-        directly and contact us there. For account questions, you can also
-        use Help.
+        Daily redeem codes are shared on our social channels — join them so
+        you never miss a code. Enter a code below and its full reward goes
+        straight into your balance. For account questions, you can also use
+        Help.
       </p>
-      <section className="mt-5 grid gap-3 sm:grid-cols-2" aria-label="Contact us on social media">
-        {CONTACT_PLATFORMS.map((p) => {
-          const link = links.find((s) => s.platform === p.id);
-          return link ? (
+      {links.length > 0 && (
+        <section className="mt-5 grid gap-3 sm:grid-cols-2" aria-label="Redeem codes on social media">
+          {links.map((link) => (
             <a
-              key={p.id}
+              key={link.platform}
               href={link.url}
               target="_blank"
               rel="noreferrer"
-              aria-label={`Contact us on ${p.label} (opens in a new tab)`}
-              className="flex items-center justify-between gap-3 rounded-2xl bg-[var(--surface)] p-5 ring-1 ring-[var(--border)] transition hover:ring-[var(--brand)]"
+              aria-label={`Follow TapOne on ${link.label} (opens in a new tab)`}
+              className="flex items-center gap-3 rounded-2xl bg-[var(--surface)] p-5 ring-1 ring-[var(--border)] transition hover:ring-[var(--brand)]"
             >
-              <span>
-                <span className="block font-display text-base font-bold">{p.label}</span>
-                <span className="mt-0.5 block text-sm text-[var(--dim)]">{p.blurb}</span>
+              <SocialLogo imageUrl={link.imageUrl} label={link.label} />
+              <span className="min-w-0 flex-1">
+                <span className="block font-display text-base font-bold">{link.label}</span>
+                <span className="mt-0.5 block text-sm text-[var(--dim)]">
+                  {REDEEM_BLURBS[link.platform] ?? "Follow us"}
+                </span>
               </span>
               <span className="shrink-0 rounded-full bg-[var(--brand)] px-4 py-2 text-sm font-bold text-white">
                 Open
               </span>
             </a>
-          ) : (
-            <div
-              key={p.id}
-              className="flex items-center justify-between gap-3 rounded-2xl bg-[var(--surface)] p-5 opacity-70 ring-1 ring-[var(--border)]"
-            >
-              <span>
-                <span className="block font-display text-base font-bold">{p.label}</span>
-                <span className="mt-0.5 block text-sm text-[var(--dim)]">{p.blurb}</span>
-              </span>
-              <span className="shrink-0 rounded-full bg-[var(--surface-2)] px-4 py-2 text-sm font-bold text-[var(--dim)] ring-1 ring-[var(--border)]">
-                {home.isPending ? "Loading…" : "Not added yet"}
-              </span>
-            </div>
-          );
-        })}
+          ))}
+        </section>
+      )}
+      <section
+        className="mt-5 rounded-2xl bg-[var(--surface)] p-5 ring-1 ring-[var(--border)]"
+        aria-label="Redeem a code"
+      >
+        <h2 className="font-display text-lg font-bold">Enter your code</h2>
+        <p className="mt-1 text-sm leading-relaxed text-[var(--dim)]">
+          Type the code exactly as it was shared — for example TAPONE10.
+        </p>
+        <form
+          className="mt-3 flex flex-col gap-2 sm:flex-row"
+          onSubmit={(e) => {
+            e.preventDefault();
+            setError(null);
+            setRedeemed(null);
+            if (!code.trim()) {
+              setError("Enter a code first.");
+              return;
+            }
+            redeem.mutate();
+          }}
+        >
+          <input
+            {...FIELDS.redeemCode.code}
+            value={code}
+            onChange={(e) => setCode(e.target.value)}
+            placeholder="e.g. TAPONE10"
+            autoCapitalize="characters"
+            autoComplete="off"
+            className="min-w-0 flex-1 rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 text-sm font-bold uppercase outline-none focus:border-[var(--brand)]"
+          />
+          <button
+            type="submit"
+            disabled={redeem.isPending}
+            className="shrink-0 rounded-full bg-[var(--brand)] px-6 py-2.5 text-sm font-bold text-white transition hover:bg-[var(--brand-deep)] disabled:opacity-60"
+          >
+            {redeem.isPending ? "Redeeming…" : "Redeem"}
+          </button>
+        </form>
+        {redeemed && (
+          <p role="status" className="mt-3 text-sm font-bold text-[var(--brand-deep)] dark:text-[var(--brand)]">
+            Redeemed! {fmt(redeemed.amountCents)} from code {redeemed.code} was
+            added to your balance.
+          </p>
+        )}
+        {error && (
+          <p role="alert" className="mt-3 text-sm font-medium text-red-600 dark:text-red-400">
+            {error}
+          </p>
+        )}
       </section>
     </div>
   );
