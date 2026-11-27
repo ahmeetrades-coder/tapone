@@ -192,7 +192,14 @@ export function SignInCard({
 
   const forgotRequest = useMutation({
     mutationFn: async () => api.requestPasswordReset({ email: forgotEmail.trim() }),
-    onSuccess: () => {
+    onSuccess: (result) => {
+      if (result.status === "google_account") {
+        // A Google-only account has no password to reset and no code
+        // was sent — stay on the forgot screen and say so, instead of
+        // showing the code screen for a code that will never arrive.
+        setEmailInfo("This account was created with Google — please sign in with Google instead. No reset code was sent.");
+        return;
+      }
       setCodePurpose("reset");
       setCodeEmail(forgotEmail.trim().toLowerCase());
       setCode("");
@@ -230,6 +237,10 @@ export function SignInCard({
       return;
     }
     if (emailMode === "signup") {
+      if (!emailUsername.trim()) {
+        setEmailError("Please enter a username.");
+        return;
+      }
       if (emailPass.length < 8) {
         setEmailError("Password must be at least 8 characters.");
         return;
@@ -466,7 +477,7 @@ export function SignInCard({
           <div className="mt-3 space-y-3">
             {emailMode === "signup" && (
               <div>
-                <label htmlFor="email-username" className="text-sm font-semibold">Username <span className="font-normal text-[var(--dim)]">(optional)</span></label>
+                <label htmlFor="email-username" className="text-sm font-semibold">Username</label>
                 <input id="email-username" type="text" value={emailUsername} onChange={(e) => setEmailUsername(e.target.value)} placeholder="Username" autoComplete="username" className="mt-1 w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 text-sm outline-none focus:border-[var(--brand)]" />
               </div>
             )}
