@@ -1,6 +1,6 @@
 // TapOne actions: Google sign-in with IP/country lock + VPN block, content
 // (offerwalls / surveys / games) managed by the admin and read by everyone,
-// dollar withdrawals by country, admin approve/reject, help + mailbox,
+// dollar withdrawals by country, admin approve/reject, help + live chat,
 // affiliate commissions, and the offerwall postback endpoint.
 
 import {
@@ -276,7 +276,7 @@ async function notifyHelpByEmail(args: {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        from: "TapOne <noreply@tapone.store>",
+        from: "TapOne <info@tapone.store>",
         to: [HELP_EMAIL_TO],
         subject: subjectLine,
         text,
@@ -314,6 +314,85 @@ async function notifyHelpByEmail(args: {
   } catch (e) {
     console.warn(
       "[tapone] Help email to " + HELP_EMAIL_TO + " failed: " + String(e),
+    );
+  }
+}
+
+// ------------------------------------------------------- outbound help reply
+//
+// When the admin replies to a Help appeal from Admin → Inbox, the reply
+// is emailed DIRECTLY to the user, from the business address
+// info@tapone.store. There is no in-site Mailbox any more (owner order
+// 2026-11-26): the user sees only a note in Help — "Your reply will be
+// sent to your email by TapOne." — and the reply itself lands in their
+// email inbox. Best effort like notifyHelpByEmail: a mail failure never
+// loses the reply itself (it is still saved in the admin Inbox thread).
+async function notifyHelpReplyByEmail(args: {
+  userName: string;
+  userEmail: string;
+  subject: string;
+  body: string;
+}): Promise<void> {
+  const apiKey = process.env.RESEND_API_KEY?.trim();
+  if (!apiKey) {
+    console.warn(
+      "[tapone] RESEND_API_KEY is not set — help reply to " +
+        args.userEmail +
+        " was saved but NOT emailed. Set RESEND_API_KEY in the server environment to enable it.",
+    );
+    return;
+  }
+  const esc = (s: string) =>
+    s
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  const subjectLine =
+    "TapOne Help — reply to your message" +
+    (args.subject ? ": " + args.subject : "");
+  const text =
+    "Hi " +
+    args.userName +
+    ",\n\n" +
+    args.body +
+    "\n\n— The TapOne team\n\n(You sent a Help message on TapOne; this is our reply.)";
+  try {
+    const res = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer " + apiKey,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        from: "TapOne <info@tapone.store>",
+        to: [args.userEmail],
+        subject: subjectLine,
+        text,
+        html:
+          "<p>" +
+          esc(args.body).replace(/\n/g, "<br>") +
+          "</p>" +
+          "<p>— The TapOne team</p>" +
+          "<p><small>You sent a Help message on TapOne; this is our reply.</small></p>",
+      }),
+    });
+    if (!res.ok) {
+      console.warn(
+        "[tapone] Help reply email to " +
+          args.userEmail +
+          " failed (" +
+          res.status +
+          "): " +
+          (await res.text()).slice(0, 300),
+      );
+    }
+  } catch (e) {
+    console.warn(
+      "[tapone] Help reply email to " +
+        args.userEmail +
+        " failed: " +
+        String(e),
     );
   }
 }
@@ -2814,6 +2893,112 @@ async function findBannedCountry(
   return rows[0] ?? null;
 }
 
+// ------------------------------------------------------- live chat helpers
+//
+// One shared public chat (inside Help). Roles: "user", "manager" (a user
+// the owner made a chat manager — Manager tick, can also block/unblock)
+// and "owner" (the owner replying from the Admin panel — Official TapOne
+// tick, stored with user_id -1). A blocked user can still READ the chat,
+// just not send.
+
+const chatMessageShape = z.object({
+  id: z.number(),
+  userId: z.number(),
+  role: z.enum(["user", "manager", "owner"]),
+  name: z.string(),
+  pictureUrl: z.string().nullable(),
+  body: z.string(),
+  createdAt: z.string(),
+});
+
+// The active send-block for a user, if any. An expired timed block is
+// cleared lazily and no longer counts.
+async function activeChatBlock(
+  db: DB,
+  userId: number,
+): Promise<typeof schema.chatBlocks.$inferSelect | null> {
+  const rows = await db
+    .select()
+    .from(schema.chatBlocks)
+    .where(eq(schema.chatBlocks.userId, userId))
+    .limit(1);
+  const row = rows[0];
+  if (!row) return null;
+  if (row.expiresAt && row.expiresAt.getTime() <= Date.now()) {
+    await db
+      .delete(schema.chatBlocks)
+      .where(eq(schema.chatBlocks.userId, userId));
+    return null;
+  }
+  return row;
+}
+
+const CHAT_BLOCK_DAYS = [1, 7, 30] as const;
+
+// Blocks a user from sending in Live Chat. days must be 1 / 7 / 30 for a
+// timed block; null/undefined = permanent. One active block per user —
+// blocking again replaces the previous block (new expiry, new blocker).
+async function blockChatUser(
+  db: DB,
+  userId: number,
+  blockedBy: number,
+  days?: number | null,
+): Promise<void> {
+  if (days != null && !(CHAT_BLOCK_DAYS as readonly number[]).includes(days))
+    throw new Error("Block length must be 1, 7 or 30 days, or permanent.");
+  const target = await db
+    .select()
+    .from(schema.users)
+    .where(eq(schema.users.id, userId))
+    .limit(1);
+  if (!target[0]) throw new Error("That user no longer exists.");
+  const expiresAt =
+    days != null ? new Date(Date.now() + days * 24 * 60 * 60 * 1000) : null;
+  await db
+    .insert(schema.chatBlocks)
+    .values({ userId, blockedBy, expiresAt, createdAt: new Date() })
+    .onConflictDoUpdate({
+      target: schema.chatBlocks.userId,
+      set: { blockedBy, expiresAt, createdAt: new Date() },
+    });
+}
+
+// Newest chat messages (oldest first for display) with each sender's
+// current name + profile picture, plus the currently-blocked users.
+async function loadChatMessages(db: DB, limit = 100) {
+  const rows = await db
+    .select()
+    .from(schema.chatMessages)
+    .orderBy(desc(schema.chatMessages.id))
+    .limit(limit);
+  rows.reverse();
+  const users = await db.select().from(schema.users);
+  const byId = new Map(users.map((u) => [u.id, u]));
+  const blocks = await db.select().from(schema.chatBlocks);
+  const now = Date.now();
+  const blocked = blocks
+    .filter((b) => !b.expiresAt || b.expiresAt.getTime() > now)
+    .map((b) => ({
+      userId: b.userId,
+      expiresAt: b.expiresAt ? b.expiresAt.toISOString() : null,
+    }));
+  return {
+    messages: rows.map((m) => {
+      const u = m.userId > 0 ? byId.get(m.userId) : undefined;
+      return {
+        id: m.id,
+        userId: m.userId,
+        role: m.role,
+        name: m.role === "owner" ? "TapOne" : (u?.name ?? "User"),
+        pictureUrl: m.role === "owner" ? null : (u?.pictureUrl ?? null),
+        body: m.body,
+        createdAt: m.createdAt.toISOString(),
+      };
+    }),
+    blocked,
+  };
+}
+
 // ------------------------------------------------------------------ actions
 
 export const Actions = {
@@ -2903,7 +3088,7 @@ export const Actions = {
     },
   }),
 
-    getLiveCompletions: defineAction({ description: "Public latest-completed feed (Live Cashout): the newest credited offer/survey/game completions from every user, newest first. No login needed. Only first names and profile pictures are returned — never email, IP, country or account IDs.", request: z.object({}), response: z.object({ items: z.array(z.object({ id: z.number(), userName: z.string(), userPictureUrl: z.string().nullable(), network: z.string(), title: z.string(), imageUrl: z.string().nullable(), kind: z.enum(["offer", "survey"]), creditedCents: z.number(), createdAt: z.string() })) }), async handler(ctx) { const db = ctx.db<typeof schema>(); const rows = await db.select().from(schema.postbacks).where(and(eq(schema.postbacks.status, "credited"), gt(schema.postbacks.creditedCents, 0))).orderBy(desc(schema.postbacks.id)).limit(100); const userIds = [...new Set(rows.map((r) => r.userId).filter((id): id is number => id != null))]; const users = userIds.length ? await db.select().from(schema.users).where(inArray(schema.users.id, userIds)) : []; const byId = new Map(users.map((u) => [u.id, u])); const walls = await db.select().from(schema.contentItems); return { items: rows.filter((r) => isLiveNetwork(r.network, walls)).map((r) => { const u = r.userId != null ? byId.get(r.userId) : undefined; const stored = offerInfoFromRaw(r.rawJson); const wall = wallFor(r.network, walls); return { id: r.id, userName: (u?.name ?? "TapOne user").split(" ")[0] ?? "TapOne user", userPictureUrl: u?.pictureUrl ?? null, network: r.network, title: r.offerTitle ?? stored.title ?? wall?.title ?? wall?.provider ?? r.network, imageUrl: r.offerImageUrl ?? stored.imageUrl ?? wall?.imageUrl ?? null, kind: isSurveyNetwork(r.network) ? ("survey" as const) : ("offer" as const), creditedCents: r.creditedCents, createdAt: r.createdAt.toISOString() }; }).slice(0, 20) }; }, }),  getTopEarners: defineAction({ description: "Public Top 100 earners: the 100 users with the highest lifetime earnings, ranked by total earned, each with picture, first name, total earning and total cashout (approved withdrawals only). No contests, no prizes. No login needed; no email, IP, country or account IDs are ever returned.", request: z.object({}), response: z.object({ items: z.array(z.object({ rank: z.number(), name: z.string(), pictureUrl: z.string().nullable(), totalEarnedCents: z.number(), totalCashoutCents: z.number() })) }), async handler(ctx) { const db = ctx.db<typeof schema>(); const top = await db.select().from(schema.users).where(gt(schema.users.totalEarnedCents, 0)).orderBy(desc(schema.users.totalEarnedCents)).limit(100); const ids = top.map((u) => u.id); const paid = ids.length ? await db.select().from(schema.withdrawals).where(and(inArray(schema.withdrawals.userId, ids), eq(schema.withdrawals.status, "approved"))) : []; const cashout = new Map<number, number>(); for (const w of paid) cashout.set(w.userId, (cashout.get(w.userId) ?? 0) + w.amountCents); return { items: top.map((u, i) => ({ rank: i + 1, name: u.name.split(" ")[0] ?? u.name, pictureUrl: u.pictureUrl ?? null, totalEarnedCents: u.totalEarnedCents, totalCashoutCents: cashout.get(u.id) ?? 0 })) }; }, }),  detectNetwork: defineAction({
+    getLiveCompletions: defineAction({ description: "Public latest-completed feed (Live Cashout): the newest credited offer/survey/game completions from every user, newest first. Only the newest 4 ever show, rolling — each new completion pushes the oldest off the list. No login needed. Only first names and profile pictures are returned — never email, IP, country or account IDs.", request: z.object({}), response: z.object({ items: z.array(z.object({ id: z.number(), userName: z.string(), userPictureUrl: z.string().nullable(), network: z.string(), title: z.string(), imageUrl: z.string().nullable(), kind: z.enum(["offer", "survey"]), creditedCents: z.number(), createdAt: z.string() })) }), async handler(ctx) { const db = ctx.db<typeof schema>(); const rows = await db.select().from(schema.postbacks).where(and(eq(schema.postbacks.status, "credited"), gt(schema.postbacks.creditedCents, 0))).orderBy(desc(schema.postbacks.id)).limit(100); const userIds = [...new Set(rows.map((r) => r.userId).filter((id): id is number => id != null))]; const users = userIds.length ? await db.select().from(schema.users).where(inArray(schema.users.id, userIds)) : []; const byId = new Map(users.map((u) => [u.id, u])); const walls = await db.select().from(schema.contentItems); return { items: rows.filter((r) => isLiveNetwork(r.network, walls)).map((r) => { const u = r.userId != null ? byId.get(r.userId) : undefined; const stored = offerInfoFromRaw(r.rawJson); const wall = wallFor(r.network, walls); return { id: r.id, userName: (u?.name ?? "TapOne user").split(" ")[0] ?? "TapOne user", userPictureUrl: u?.pictureUrl ?? null, network: r.network, title: r.offerTitle ?? stored.title ?? wall?.title ?? wall?.provider ?? r.network, imageUrl: r.offerImageUrl ?? stored.imageUrl ?? wall?.imageUrl ?? null, kind: isSurveyNetwork(r.network) ? ("survey" as const) : ("offer" as const), creditedCents: r.creditedCents, createdAt: r.createdAt.toISOString() }; }).slice(0, 4) }; }, }),  getTopEarners: defineAction({ description: "Public Top 100 earners: the 100 users with the highest lifetime earnings, ranked by total earned, each with picture, first name, total earning and total cashout (approved withdrawals only). No contests, no prizes. No login needed; no email, IP, country or account IDs are ever returned.", request: z.object({}), response: z.object({ items: z.array(z.object({ rank: z.number(), name: z.string(), pictureUrl: z.string().nullable(), totalEarnedCents: z.number(), totalCashoutCents: z.number() })) }), async handler(ctx) { const db = ctx.db<typeof schema>(); const top = await db.select().from(schema.users).where(gt(schema.users.totalEarnedCents, 0)).orderBy(desc(schema.users.totalEarnedCents)).limit(100); const ids = top.map((u) => u.id); const paid = ids.length ? await db.select().from(schema.withdrawals).where(and(inArray(schema.withdrawals.userId, ids), eq(schema.withdrawals.status, "approved"))) : []; const cashout = new Map<number, number>(); for (const w of paid) cashout.set(w.userId, (cashout.get(w.userId) ?? 0) + w.amountCents); return { items: top.map((u, i) => ({ rank: i + 1, name: u.name.split(" ")[0] ?? u.name, pictureUrl: u.pictureUrl ?? null, totalEarnedCents: u.totalEarnedCents, totalCashoutCents: cashout.get(u.id) ?? 0 })) }; }, }),  detectNetwork: defineAction({
     description:
       "Detects the caller's IP, country, flag, VPN suspicion and whether new signups from that country are banned (no account needed).",
     request: z.object({ ip: z.string().max(64).optional() }),
@@ -3102,7 +3287,7 @@ export const Actions = {
   }),
 
   getMe: defineAction({
-    description: "Returns the signed-in user's profile, balance and unread mailbox count.",
+    description: "Returns the signed-in user's profile, balance and unread message count.",
     request: z.object({ token: z.string().min(1).max(200) }),
     response: z.object({
       user: userShape,
@@ -3985,51 +4170,125 @@ export const Actions = {
     },
   }),
 
-  getMailbox: defineAction({
-    description: "The signed-in user's help thread with admin replies; marks admin replies as read.",
+  // ------------------------------------------------------- live chat
+  //
+  // Public Live Chat inside Help: one shared room where all signed-in
+  // users can message each other. Messages are plain text (max 1000
+  // chars) and show the sender's name + current profile picture. The
+  // chat only loads when the user opens it (lazy) and refreshes every
+  // few seconds while open. A blocked user can still READ the chat,
+  // just not send. The owner replies from the Admin panel as
+  // "Official TapOne" (verified tick); a chat manager's messages carry
+  // a "Manager" tick and a manager can also block / unblock users.
+  // Only the owner can appoint or remove a manager.
+
+  getLiveChat: defineAction({
+    description:
+      "Live Chat (Help): the newest messages in the shared public chat, oldest first, with each sender's name, current profile picture and role. Also says whether the signed-in user can send (blocked users can read but not send) and which users are currently blocked.",
     request: z.object({ token: z.string().min(1).max(200) }),
     response: z.object({
-      messages: z.array(
+      messages: z.array(chatMessageShape),
+      blocked: z.array(
         z.object({
-          id: z.number(),
-          sender: z.enum(["user", "admin"]),
-          subject: z.string(),
-          body: z.string(),
-          imageUrl: z.string().nullable(),
-          status: z.string(),
-          createdAt: z.string(),
+          userId: z.number(),
+          expiresAt: z.string().nullable(),
         }),
       ),
+      myUserId: z.number(),
+      myRole: z.enum(["user", "manager"]),
+      canSend: z.boolean(),
+      blockedUntil: z.string().nullable(),
     }),
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
       const user = await requireUser(ctx, args.token);
-      const rows = await db
-        .select()
-        .from(schema.messages)
-        .where(eq(schema.messages.userId, user.id))
-        .orderBy(schema.messages.id)
-        .limit(200);
-      await db
-        .update(schema.messages)
-        .set({ readByUser: 1 })
-        .where(
-          and(
-            eq(schema.messages.userId, user.id),
-            eq(schema.messages.sender, "admin"),
-          ),
-        );
+      const block = await activeChatBlock(db, user.id);
+      const { messages, blocked } = await loadChatMessages(db, 100);
       return {
-        messages: rows.map((m) => ({
-          id: m.id,
-          sender: m.sender,
-          subject: m.subject,
-          body: m.body,
-          imageUrl: m.imageUrl,
-          status: m.status,
-          createdAt: m.createdAt.toISOString(),
-        })),
+        messages,
+        blocked,
+        myUserId: user.id,
+        myRole:
+          user.isChatManager === 1 ? ("manager" as const) : ("user" as const),
+        canSend: block == null,
+        blockedUntil: block?.expiresAt ? block.expiresAt.toISOString() : null,
       };
+    },
+  }),
+
+  sendChatMessage: defineAction({
+    description:
+      "Sends one message to the shared Live Chat. Blocked users cannot send (they can still read). A chat manager's message carries the Manager role.",
+    request: z.object({
+      token: z.string().min(1).max(200),
+      body: z.string().trim().min(1).max(1000),
+    }),
+    response: z.object({ ok: z.literal(true), id: z.number() }),
+    async handler(ctx, args): Promise<{ ok: true; id: number }> {
+      const db = ctx.db<typeof schema>();
+      const user = await requireUser(ctx, args.token);
+      const block = await activeChatBlock(db, user.id);
+      if (block) {
+        throw new Error(
+          "You are blocked from sending messages in Live Chat" +
+            (block.expiresAt
+              ? " until " + block.expiresAt.toISOString().slice(0, 10) + "."
+              : " permanently."),
+        );
+      }
+      const inserted = await db
+        .insert(schema.chatMessages)
+        .values({
+          userId: user.id,
+          role: user.isChatManager === 1 ? "manager" : "user",
+          body: args.body,
+        })
+        .returning({ id: schema.chatMessages.id });
+      ctx.invalidateQueries();
+      return { ok: true, id: inserted[0]?.id ?? 0 };
+    },
+  }),
+
+  managerBlockChatUser: defineAction({
+    description:
+      "A chat manager blocks a user from sending messages in Live Chat (the user can still read). days 1 / 7 / 30 = timed block; omitted = permanent.",
+    request: z.object({
+      token: z.string().min(1).max(200),
+      userId: z.number().int().positive(),
+      days: z.number().int().optional(),
+    }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args): Promise<{ ok: true }> {
+      const db = ctx.db<typeof schema>();
+      const manager = await requireUser(ctx, args.token);
+      if (manager.isChatManager !== 1)
+        throw new Error("Only a chat manager can do this.");
+      if (args.userId === manager.id)
+        throw new Error("You cannot block yourself.");
+      await blockChatUser(db, args.userId, manager.id, args.days);
+      ctx.invalidateQueries();
+      return { ok: true };
+    },
+  }),
+
+  managerUnblockChatUser: defineAction({
+    description:
+      "A chat manager unblocks a user in Live Chat so they can send messages again.",
+    request: z.object({
+      token: z.string().min(1).max(200),
+      userId: z.number().int().positive(),
+    }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args): Promise<{ ok: true }> {
+      const db = ctx.db<typeof schema>();
+      const manager = await requireUser(ctx, args.token);
+      if (manager.isChatManager !== 1)
+        throw new Error("Only a chat manager can do this.");
+      await db
+        .delete(schema.chatBlocks)
+        .where(eq(schema.chatBlocks.userId, args.userId));
+      ctx.invalidateQueries();
+      return { ok: true };
     },
   }),
 
@@ -6351,7 +6610,8 @@ export const Actions = {
   }),
 
   adminReply: defineAction({
-    description: "Sends a mailbox reply from the admin to a user; it appears in the user's mailbox.",
+    description:
+      "Sends a reply from the admin to a user: it is emailed straight to the user's email from TapOne <info@tapone.store>, and also saved in the admin Inbox thread. There is no in-site Mailbox any more — the user sees only the note in Help that their reply will be sent to their email.",
     request: z.object({
       adminToken: z.string().min(1).max(200),
       userId: z.number().int().positive(),
@@ -6361,6 +6621,26 @@ export const Actions = {
     async handler(ctx, args): Promise<{ ok: true }> {
       await requireAdmin(ctx, args.adminToken);
       const db = ctx.db<typeof schema>();
+      const userRows = await db
+        .select()
+        .from(schema.users)
+        .where(eq(schema.users.id, args.userId))
+        .limit(1);
+      const user = userRows[0];
+      if (!user) throw new Error("That user no longer exists.");
+      // Subject line for the email: the subject of the user's latest
+      // appeal in this thread, if any.
+      const latest = await db
+        .select()
+        .from(schema.messages)
+        .where(
+          and(
+            eq(schema.messages.userId, args.userId),
+            eq(schema.messages.sender, "user"),
+          ),
+        )
+        .orderBy(desc(schema.messages.id))
+        .limit(1);
       await db.insert(schema.messages).values({
         userId: args.userId,
         sender: "admin",
@@ -6369,7 +6649,17 @@ export const Actions = {
         imageUrl: null,
         status: "approved",
         readByAdmin: 1,
-        readByUser: 0,
+        // No in-site Mailbox any more, so there is no unread state to
+        // carry for this reply — it is delivered by email instead.
+        readByUser: 1,
+      });
+      // Email the reply directly to the user — best effort: a mail
+      // failure must never lose the reply itself.
+      await notifyHelpReplyByEmail({
+        userName: user.name,
+        userEmail: user.email,
+        subject: latest[0]?.subject ?? "",
+        body: args.body,
       });
       ctx.invalidateQueries();
       return { ok: true };
@@ -6378,7 +6668,7 @@ export const Actions = {
 
   adminApproveHelpMessage: defineAction({
     description:
-      "Approves one user help appeal after the admin has read and solved it; the user then sees Approved instead of Pending in their Mailbox.",
+      "Approves one user help appeal after the admin has read and solved it.",
     request: z.object({
       adminToken: z.string().min(1).max(200),
       messageId: z.number().int().positive(),
@@ -6400,6 +6690,148 @@ export const Actions = {
         .update(schema.messages)
         .set({ status: "approved", readByAdmin: 1 })
         .where(eq(schema.messages.id, args.messageId));
+      ctx.invalidateQueries();
+      return { ok: true };
+    },
+  }),
+
+  // ------------------------------------------------------- live chat (admin)
+  //
+  // The owner's Live Chat moderation view: read every message, reply as
+  // "Official TapOne", block / unblock users (permanent or 1 / 7 / 30
+  // days) and appoint / remove chat managers. Only the owner can
+  // appoint or remove a manager.
+
+  adminGetLiveChat: defineAction({
+    description:
+      "Admin Live Chat view: the newest chat messages with each sender's name, picture and role, plus every person who has chatted (or is a manager, or is blocked) with their manager / block state.",
+    request: z.object({ adminToken: z.string().min(1).max(200) }),
+    response: z.object({
+      messages: z.array(chatMessageShape),
+      blocked: z.array(
+        z.object({
+          userId: z.number(),
+          expiresAt: z.string().nullable(),
+        }),
+      ),
+      people: z.array(
+        z.object({
+          userId: z.number(),
+          name: z.string(),
+          pictureUrl: z.string().nullable(),
+          isManager: z.boolean(),
+          blockedUntil: z.string().nullable(),
+        }),
+      ),
+    }),
+    async handler(ctx, args) {
+      await requireAdmin(ctx, args.adminToken);
+      const db = ctx.db<typeof schema>();
+      const { messages, blocked } = await loadChatMessages(db, 100);
+      const blockedByUser = new Map(
+        blocked.map((b) => [b.userId, b.expiresAt]),
+      );
+      const users = await db.select().from(schema.users);
+      const chatterIds = new Set(
+        messages.filter((m) => m.userId > 0).map((m) => m.userId),
+      );
+      const people = users
+        .filter(
+          (u) =>
+            chatterIds.has(u.id) ||
+            u.isChatManager === 1 ||
+            blockedByUser.has(u.id),
+        )
+        .map((u) => ({
+          userId: u.id,
+          name: u.name,
+          pictureUrl: u.pictureUrl,
+          isManager: u.isChatManager === 1,
+          blockedUntil: blockedByUser.get(u.id) ?? null,
+        }));
+      return { messages, blocked, people };
+    },
+  }),
+
+  adminSendChatMessage: defineAction({
+    description:
+      "The owner replies in Live Chat from the Admin panel. Every user sees it as Official TapOne with a verified tick.",
+    request: z.object({
+      adminToken: z.string().min(1).max(200),
+      body: z.string().trim().min(1).max(1000),
+    }),
+    response: z.object({ ok: z.literal(true), id: z.number() }),
+    async handler(ctx, args): Promise<{ ok: true; id: number }> {
+      await requireAdmin(ctx, args.adminToken);
+      const db = ctx.db<typeof schema>();
+      const inserted = await db
+        .insert(schema.chatMessages)
+        .values({ userId: -1, role: "owner", body: args.body })
+        .returning({ id: schema.chatMessages.id });
+      ctx.invalidateQueries();
+      return { ok: true, id: inserted[0]?.id ?? 0 };
+    },
+  }),
+
+  adminBlockChatUser: defineAction({
+    description:
+      "The owner blocks a user from sending messages in Live Chat (the user can still read). days 1 / 7 / 30 = timed block; omitted = permanent.",
+    request: z.object({
+      adminToken: z.string().min(1).max(200),
+      userId: z.number().int().positive(),
+      days: z.number().int().optional(),
+    }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args): Promise<{ ok: true }> {
+      await requireAdmin(ctx, args.adminToken);
+      const db = ctx.db<typeof schema>();
+      await blockChatUser(db, args.userId, -1, args.days);
+      ctx.invalidateQueries();
+      return { ok: true };
+    },
+  }),
+
+  adminUnblockChatUser: defineAction({
+    description:
+      "The owner unblocks a user in Live Chat so they can send messages again.",
+    request: z.object({
+      adminToken: z.string().min(1).max(200),
+      userId: z.number().int().positive(),
+    }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args): Promise<{ ok: true }> {
+      await requireAdmin(ctx, args.adminToken);
+      const db = ctx.db<typeof schema>();
+      await db
+        .delete(schema.chatBlocks)
+        .where(eq(schema.chatBlocks.userId, args.userId));
+      ctx.invalidateQueries();
+      return { ok: true };
+    },
+  }),
+
+  adminSetChatManager: defineAction({
+    description:
+      "The owner appoints or removes a chat manager. A manager's messages carry a Manager tick and a manager can also block / unblock chat users. Only the owner can do this.",
+    request: z.object({
+      adminToken: z.string().min(1).max(200),
+      userId: z.number().int().positive(),
+      isManager: z.boolean(),
+    }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args): Promise<{ ok: true }> {
+      await requireAdmin(ctx, args.adminToken);
+      const db = ctx.db<typeof schema>();
+      const target = await db
+        .select()
+        .from(schema.users)
+        .where(eq(schema.users.id, args.userId))
+        .limit(1);
+      if (!target[0]) throw new Error("That user no longer exists.");
+      await db
+        .update(schema.users)
+        .set({ isChatManager: args.isManager ? 1 : 0 })
+        .where(eq(schema.users.id, args.userId));
       ctx.invalidateQueries();
       return { ok: true };
     },
