@@ -97,7 +97,7 @@ export function SignInCard({
   const [showEmail, setShowEmail] = useState(false);
   const [codePurpose, setCodePurpose] = useState<"signup" | "reset">("signup");
   const [emailMode, setEmailMode] = useState<"login" | "signup">("login");
-  const [emailName, setEmailName] = useState("");
+  const [emailUsername, setEmailUsername] = useState("");
   const [emailAddr, setEmailAddr] = useState("");
   const [emailPass, setEmailPass] = useState("");
   const [codeEmail, setCodeEmail] = useState("");
@@ -135,7 +135,7 @@ export function SignInCard({
       return api.signUpWithEmail({
         email: emailAddr.trim(),
         password: emailPass,
-        name: emailName.trim() || undefined,
+        name: emailUsername.trim() || undefined,
         ip: network?.ip ?? undefined,
         referralCode,
       });
@@ -281,7 +281,12 @@ export function SignInCard({
   }, []);
 
   useEffect(() => {
-    if (!googleClientId) return;
+    // The Google button renders once into the gisRef div; the div
+    // unmounts while the email screen is open, which destroys the
+    // rendered button — so it is re-rendered whenever the main card
+    // is shown again (owner order 2026-11-27: Back must never lose
+    // the Google button).
+    if (!googleClientId || showEmail) return;
     let cancelled = false;
     let timer: number | undefined;
     setGisState("loading");
@@ -323,7 +328,7 @@ export function SignInCard({
       if (timer !== undefined) window.clearInterval(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [googleClientId, gisAttempt]);
+  }, [googleClientId, gisAttempt, showEmail]);
 
   // VPN is NOT blocked any more (owner order 2026-11-27): a VPN
   // sign-up creates the account and a VPN login signs in normally,
@@ -396,12 +401,16 @@ export function SignInCard({
         <button
           type="button"
           onClick={() => {
+            // The Terms / Privacy tick gates the email screen exactly
+            // like Google sign-in (owner order 2026-11-27): without
+            // the tick, the email screen does not open at all.
+            if (!needConsent()) return;
             setEmailError(null);
             setEmailInfo(null);
             setEmailView("main");
             setShowEmail(true);
           }}
-          className="mt-4 flex w-full items-center justify-center gap-2 rounded-full bg-[var(--surface)] px-5 py-3 text-sm font-bold ring-1 ring-[var(--border)] transition hover:ring-[var(--brand)]"
+          className="mt-4 flex w-full items-center justify-center gap-2 rounded-full bg-[var(--brand)] px-5 py-3 text-sm font-bold text-white shadow-sm transition hover:bg-[var(--brand-deep)]"
         >
           {Icons.mail("h-5 w-5")} Continue with email
         </button>
@@ -457,8 +466,8 @@ export function SignInCard({
           <div className="mt-3 space-y-3">
             {emailMode === "signup" && (
               <div>
-                <label htmlFor="email-name" className="text-sm font-semibold">Your name <span className="font-normal text-[var(--dim)]">(optional)</span></label>
-                <input id="email-name" type="text" value={emailName} onChange={(e) => setEmailName(e.target.value)} placeholder="Your name" autoComplete="name" className="mt-1 w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 text-sm outline-none focus:border-[var(--brand)]" />
+                <label htmlFor="email-username" className="text-sm font-semibold">Username <span className="font-normal text-[var(--dim)]">(optional)</span></label>
+                <input id="email-username" type="text" value={emailUsername} onChange={(e) => setEmailUsername(e.target.value)} placeholder="Username" autoComplete="username" className="mt-1 w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 text-sm outline-none focus:border-[var(--brand)]" />
               </div>
             )}
             <div>
@@ -921,7 +930,7 @@ type StaticPageContent = { title: string; body: string[]; sections?: { heading: 
       {
         heading: "2. What we collect",
         body: [
-          "When you sign in we store your name, email address and profile picture so we can run your account. If you sign up with email and a password, we store a scrambled (hashed) copy of your password — never the password itself. We also give you a unique Offer Token (your TapOne user ID), which is shown in your Profile.",
+          "When you sign in we store your username, email address and profile picture so we can run your account. If you sign up with email and a password, we store a scrambled (hashed) copy of your password — never the password itself. We also give you a unique Offer Token (your TapOne user ID), which is shown in your Profile.",
           "We record the IP address of your sign-in connection, and the country derived from it. Your country decides which offers, surveys, games and payment methods you see, and it cannot be changed manually.",
           "We keep a record of your earnings, withdrawals, level and check-in progress, referrals, and the messages you send us through Help, so payments can be reviewed and paid correctly.",
           "We store only the settings needed to run the site: your dark/light choice and your referral code when you arrive from an invite link.",

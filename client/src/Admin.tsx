@@ -847,7 +847,7 @@ function UsersTab({ token }: { token: string }) {
           aria-label="Search users"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search name, email or ID…"
+          placeholder="Search username, email or ID…"
           className="w-full max-w-xs rounded-full border border-[var(--border)] bg-[var(--surface)] px-4 py-2.5 text-sm outline-none focus:border-[var(--brand)]"
         />
       </div>
