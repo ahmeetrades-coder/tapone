@@ -616,7 +616,7 @@ export function SignInCard({
       {showEmail && emailView === "forgot" && (
         <div className="mt-4 space-y-3">
           <p className="text-sm leading-relaxed text-[var(--dim)]">
-            Enter the email of your account — if an account uses it, a reset code is on its way.
+            Enter the email of your account. If it uses email sign-in, a reset code will be sent.
           </p>
           <div>
             <label htmlFor="forgot-email" className="text-sm font-semibold">Email</label>
