@@ -9,7 +9,7 @@ z,
 type ActionsModule,
 type Ctx,
 } from "@hatch/space-sdk";
-import { and, desc, eq, gt, gte, inArray, isNull, ne, or } from "drizzle-orm";
+import { and, desc, eq, gt, gte, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
 import type { BatchItem } from "drizzle-orm/batch";
 import * as schema from "./schema";
 import { createHash } from "node:crypto";
@@ -56,6 +56,11 @@ const DEFAULT_SETTINGS: Record<string, string> = {
   // levels RewardJoy-verified; rewards the owner's $1,000 split).
   level_cents_per_level: "100",
   level_titles_json: "",
+  // Daily Contest (owner-approved 2026-11-26, Admin → Settings →
+  // Money): the total prize pool paid out every day, in cents.
+  // Default $20.00. The owner can lower or raise it; the ladder
+  // below rescales proportionally (dailyContestLadder).
+  daily_contest_total_cents: "2000",
   // Built-in withdraw methods per country, as JSON
   // { "PK": ["easypaisa", ...], "DEFAULT": [...] } written from
   // Admin → Withdraw Methods. Empty = the built-in table in code
@@ -1152,6 +1157,273 @@ async function syncWeeklyCheckin(db: DB, userId: number): Promise<void> {
   await checkLevelUps(db, userId);
 }
 
+// ------------------------------------------------------- daily contest
+// DAILY CONTEST (owner-approved 2026-11-26, "haan bana do"). A NEW
+// feature — NOT the old Leaderboard with its Daily $100 / Affiliate
+// $1500 contests, which the owner ordered removed on 2026-11-22
+// (commit d4474b8). Nothing from that removal is restored: the old
+// contestJoins / contestPayouts / contestAwards tables are dead
+// leftovers and this feature does not touch them.
+//
+// Rules, exactly as approved:
+//  - One contest per UTC calendar day (dayKey "YYYY-MM-DD", 00:00 UTC
+//    to 24:00 UTC). The dashboard shows a live countdown to the next
+//    UTC midnight; at midnight the contest refreshes.
+//  - Ranking: each user's earnings during that UTC day, top 30 only.
+//    ONLY offerwall / survey / game earnings count — transactions of
+//    kind "offer_credit" (every postback credit lands there). Affiliate
+//    commissions, check-in bonuses, level rewards and earlier contest
+//    prizes never count, so a contest prize can never feed the next
+//    day's ranking (no feedback loop). $0 earners never appear.
+//  - Prize pool: the owner's setting daily_contest_total_cents
+//    (default $20.00 = 2000 cents). The ladder below is the approved
+//    $20.00 split; any other total rescales it proportionally.
+//  - Settlement: when a UTC day ends, the top-30 prizes are credited
+//    IN FULL to the winners' balances (no 70/30 split — the prize is
+//    not an offerwall payout). Settlement is lazy: it runs on the
+//    first dashboard / contest read after midnight (getDashboard,
+//    getDailyContest) and on the admin's Settle button, because this
+//    server has no cron. It is idempotent per day (see
+//    settleDailyContestDay): a redeploy or a repeated call can never
+//    double-pay.
+//  - A prize is a transactions row of kind "contest_prize", so it
+//    shows in the winner's History as "Daily contest prize". It does
+//    NOT touch totalEarnedCents and never calls checkLevelUps —
+//    contest prizes do not move level progress ($1 earned = 1 level
+//    stays based on offerwall / survey / game earnings only).
+
+const DAILY_CONTEST_MAX_RANK = 30;
+const DAILY_CONTEST_DEFAULT_TOTAL_CENTS = 2000;
+
+// Owner-approved ladder at the $20.00 default total, rank 1..30 in
+// cents. Sums to exactly 2000: 400+250+150+120+80, then 5×60, 5×50,
+// 5×40, 5×30, 5×20.
+const DAILY_CONTEST_BASE_LADDER_CENTS: number[] = [
+  400, 250, 150, 120, 80,
+  60, 60, 60, 60, 60,
+  50, 50, 50, 50, 50,
+  40, 40, 40, 40, 40,
+  30, 30, 30, 30, 30,
+  20, 20, 20, 20, 20,
+];
+
+interface DailyContestWinner {
+  userId: number;
+  rank: number;
+  earnedCents: number;
+  prizeCents: number;
+}
+
+/** UTC calendar day key "YYYY-MM-DD" for a date (never local time). */
+function utcDayKeyOf(d: Date): string {
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(d.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+/** Milliseconds since epoch of 00:00 UTC on the given UTC day key. */
+function utcDayStartMs(dayKey: string): number {
+  const [y = 1970, m = 1, d = 1] = dayKey.split("-").map(Number);
+  return Date.UTC(y, m - 1, d);
+}
+
+/** The UTC day key `delta` days after `dayKey`. */
+function shiftUtcDayKey(dayKey: string, delta: number): string {
+  return utcDayKeyOf(new Date(utcDayStartMs(dayKey) + delta * 86400000));
+}
+
+/** Milliseconds since epoch of the next UTC midnight after `now`. */
+function nextUtcMidnightMs(now = new Date()): number {
+  return utcDayStartMs(utcDayKeyOf(now)) + 86400000;
+}
+
+/** The owner's daily prize pool, in cents (default $20.00). */
+function dailyContestTotalFrom(settings: Record<string, string>): number {
+  const n = settingInt(settings, "daily_contest_total_cents");
+  return n >= 0 && n <= 100_000_000 ? n : DAILY_CONTEST_DEFAULT_TOTAL_CENTS;
+}
+
+/**
+ * The prize ladder for a given pool total, rank 1..30 in cents.
+ * Each rung is the $20.00 base rung scaled by total/2000 and rounded
+ * to cents; the rounding drift (at most a few cents either way) is
+ * put on rank 1, so the ladder ALWAYS sums to exactly totalCents —
+ * the site never pays a cent more or less than the owner's setting.
+ * A total of 0 pays nothing (all rungs 0).
+ */
+function dailyContestLadder(totalCents: number): number[] {
+  if (totalCents <= 0)
+    return DAILY_CONTEST_BASE_LADDER_CENTS.map(() => 0);
+  const scaled = DAILY_CONTEST_BASE_LADDER_CENTS.map((c) =>
+    Math.round((c * totalCents) / DAILY_CONTEST_DEFAULT_TOTAL_CENTS),
+  );
+  const drift = totalCents - scaled.reduce((s, c) => s + c, 0);
+  scaled[0] = (scaled[0] ?? 0) + drift;
+  return scaled;
+}
+
+/**
+ * Top-30 standings for one UTC day: userId + offer_credit earnings
+ * in [day 00:00 UTC, next day 00:00 UTC), highest first. Only users
+ * with earnings > $0 appear (the site-wide rule: $0 never shows).
+ */
+async function dailyContestStandings(
+  db: DB,
+  dayKey: string,
+): Promise<{ userId: number; earnedCents: number }[]> {
+  const start = new Date(utcDayStartMs(dayKey));
+  const end = new Date(utcDayStartMs(dayKey) + 86400000);
+  const rows = await db
+    .select({
+      userId: schema.transactions.userId,
+      earnedCents:
+        sql<number>`coalesce(sum(${schema.transactions.amountCents}), 0)`,
+    })
+    .from(schema.transactions)
+    .where(
+      and(
+        eq(schema.transactions.kind, "offer_credit"),
+        gte(schema.transactions.createdAt, start),
+        lt(schema.transactions.createdAt, end),
+      ),
+    )
+    .groupBy(schema.transactions.userId)
+    .orderBy(desc(sql`sum(${schema.transactions.amountCents})`))
+    .limit(DAILY_CONTEST_MAX_RANK);
+  return rows
+    .map((r) => ({ userId: r.userId, earnedCents: r.earnedCents }))
+    .filter((r) => r.earnedCents > 0);
+}
+
+/**
+ * Settle one finished UTC day: credit the top-30 prizes in full.
+ * IDEMPOTENT — the settlement row (UNIQUE day_key) is inserted FIRST
+ * with onConflictDoNothing; if it already exists (or another request
+ * won the race) nothing is paid again. Returns settled:false when the
+ * day was already settled. Prizes are balance-only: totalEarnedCents
+ * is untouched and checkLevelUps is never called, so prizes do not
+ * move level progress. The total used is the owner's setting at
+ * settlement time.
+ */
+async function settleDailyContestDay(
+  db: DB,
+  dayKey: string,
+  totalCents: number,
+): Promise<{
+  settled: boolean;
+  winners: DailyContestWinner[];
+  totalPaidCents: number;
+}> {
+  const existing = await db
+    .select()
+    .from(schema.dailyContestSettlements)
+    .where(eq(schema.dailyContestSettlements.dayKey, dayKey))
+    .limit(1);
+  if (existing.length > 0)
+    return { settled: false, winners: [], totalPaidCents: 0 };
+  const standings = await dailyContestStandings(db, dayKey);
+  const ladder = dailyContestLadder(totalCents);
+  const winners: DailyContestWinner[] = standings
+    .map((s, i) => ({
+      userId: s.userId,
+      rank: i + 1,
+      earnedCents: s.earnedCents,
+      prizeCents: ladder[i] ?? 0,
+    }))
+    .filter((w) => w.prizeCents > 0);
+  // Marker first: if a concurrent settle already inserted this day,
+  // onConflictDoNothing returns no row and we pay nothing.
+  const inserted = await db
+    .insert(schema.dailyContestSettlements)
+    .values({
+      dayKey,
+      totalCents,
+      winnersJson: JSON.stringify(winners),
+    })
+    .onConflictDoNothing()
+    .returning();
+  if (inserted.length === 0)
+    return { settled: false, winners: [], totalPaidCents: 0 };
+  if (winners.length > 0) {
+    const users = await db
+      .select()
+      .from(schema.users)
+      .where(
+        inArray(
+          schema.users.id,
+          winners.map((w) => w.userId),
+        ),
+      );
+    const byId = new Map(users.map((u) => [u.id, u]));
+    const statements: BatchItem<"sqlite">[] = [];
+    for (const w of winners) {
+      const user = byId.get(w.userId);
+      if (!user) continue;
+      statements.push(
+        db
+          .update(schema.users)
+          .set({ balanceCents: user.balanceCents + w.prizeCents })
+          .where(eq(schema.users.id, w.userId)),
+        db.insert(schema.transactions).values({
+          userId: w.userId,
+          kind: "contest_prize",
+          amountCents: w.prizeCents,
+          note: `Daily Contest prize — Rank #${w.rank} — ${dayKey}`,
+        }),
+      );
+    }
+    const [first, ...rest] = statements;
+    if (first) await db.batch([first, ...rest]);
+  }
+  return {
+    settled: true,
+    winners,
+    totalPaidCents: winners.reduce((s, w) => s + w.prizeCents, 0),
+  };
+}
+
+/**
+ * Settle every finished UTC day that is not settled yet, from the
+ * contest's start day (the first day this code ran — prizes are never
+ * paid for days before the feature existed) up to yesterday. The
+ * start day is recorded once in settings the first time this runs.
+ * Safe to call on any read: already-settled days are skipped, and a
+ * failure settles nothing — the next read retries.
+ */
+async function settleDueDailyContests(
+  db: DB,
+): Promise<{ settledDays: string[] }> {
+  const settings = await getSettings(db);
+  const totalCents = dailyContestTotalFrom(settings);
+  const todayKey = utcDayKeyOf(new Date());
+  let startKey = (settings["daily_contest_start_day"] ?? "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(startKey)) {
+    startKey = todayKey;
+    await db
+      .insert(schema.settings)
+      .values({ key: "daily_contest_start_day", value: startKey })
+      .onConflictDoNothing();
+  }
+  const settledDays: string[] = [];
+  let day = startKey;
+  let guard = 0;
+  while (day < todayKey && guard++ < 366) {
+    const r = await settleDailyContestDay(db, day, totalCents);
+    if (r.settled) settledDays.push(day);
+    day = shiftUtcDayKey(day, 1);
+  }
+  return { settledDays };
+}
+
+/** Settle due days, but never let a settlement failure break a read. */
+async function settleDueDailyContestsBestEffort(db: DB): Promise<void> {
+  try {
+    await settleDueDailyContests(db);
+  } catch {
+    // The next read retries; the page must still load.
+  }
+}
 
 const SURVEY_NETWORK_HINTS = ["survey", "cpx", "bitlabs", "theorem", "cherries", "prime opinion", "prime"];
 
@@ -3387,6 +3659,11 @@ export const Actions = {
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
       const user = await requireUser(ctx, args.token);
+      // Daily Contest: settle any finished UTC day now, so prizes land
+      // on the first dashboard visit after midnight even if nobody
+      // opens the Contest tab. Best-effort — a settlement failure must
+      // never break the dashboard.
+      await settleDueDailyContestsBestEffort(db);
       const pending = await db
         .select()
         .from(schema.withdrawals)
@@ -3844,6 +4121,186 @@ export const Actions = {
         totalCheckinCents: allRows.reduce((s, r) => s + r.amountCents, 0),
         days,
       };
+    },
+  }),
+
+  getDailyContest: defineAction({
+    description:
+      "The signed-in user's Daily Contest: today's UTC-day standings (top 30 by today's offer/survey/game earnings, $0 earners never shown), the prize ladder for the owner's current pool total, the live countdown target (next UTC midnight), the user's own rank/earnings/prize, and the most recent settled day. Settles any finished day first (lazy, idempotent — a day pays at most once).",
+    request: z.object({ token: z.string().min(1).max(200) }),
+    response: z.object({
+      dayKey: z.string(),
+      endsAt: z.string(),
+      totalCents: z.number(),
+      ladderCents: z.array(z.number()),
+      standings: z.array(
+        z.object({
+          rank: z.number(),
+          name: z.string(),
+          pictureUrl: z.string().nullable(),
+          earnedCents: z.number(),
+          prizeCents: z.number(),
+          isMe: z.boolean(),
+        }),
+      ),
+      myRank: z.number().nullable(),
+      myEarnedCents: z.number(),
+      myPrizeCents: z.number(),
+      lastSettlement: z
+        .object({
+          dayKey: z.string(),
+          totalCents: z.number(),
+          winners: z.number(),
+          totalPaidCents: z.number(),
+        })
+        .nullable(),
+    }),
+    async handler(ctx, args) {
+      const db = ctx.db<typeof schema>();
+      const user = await requireUser(ctx, args.token);
+      await settleDueDailyContestsBestEffort(db);
+      const settings = await getSettings(db);
+      const totalCents = dailyContestTotalFrom(settings);
+      const dayKey = utcDayKeyOf(new Date());
+      const standings = await dailyContestStandings(db, dayKey);
+      const ladder = dailyContestLadder(totalCents);
+      const ids = standings.map((s) => s.userId);
+      const users = ids.length
+        ? await db.select().from(schema.users).where(inArray(schema.users.id, ids))
+        : [];
+      const byId = new Map(users.map((u) => [u.id, u]));
+      const rows = standings.map((s, i) => {
+        const u = byId.get(s.userId);
+        return {
+          rank: i + 1,
+          name: (u?.name ?? "TapOne user").split(" ")[0] ?? "TapOne user",
+          pictureUrl: u?.pictureUrl ?? null,
+          earnedCents: s.earnedCents,
+          prizeCents: ladder[i] ?? 0,
+          isMe: s.userId === user.id,
+        };
+      });
+      const mine = rows.find((r) => r.isMe);
+      const last = await db
+        .select()
+        .from(schema.dailyContestSettlements)
+        .orderBy(desc(schema.dailyContestSettlements.id))
+        .limit(1);
+      const lastRow = last[0];
+      let lastSettlement: {
+        dayKey: string;
+        totalCents: number;
+        winners: number;
+        totalPaidCents: number;
+      } | null = null;
+      if (lastRow) {
+        const winners = JSON.parse(lastRow.winnersJson) as DailyContestWinner[];
+        lastSettlement = {
+          dayKey: lastRow.dayKey,
+          totalCents: lastRow.totalCents,
+          winners: winners.length,
+          totalPaidCents: winners.reduce((s, w) => s + w.prizeCents, 0),
+        };
+      }
+      return {
+        dayKey,
+        endsAt: new Date(nextUtcMidnightMs()).toISOString(),
+        totalCents,
+        ladderCents: ladder,
+        standings: rows,
+        myRank: mine?.rank ?? null,
+        myEarnedCents: mine?.earnedCents ?? 0,
+        myPrizeCents: mine?.prizeCents ?? 0,
+        lastSettlement,
+      };
+    },
+  }),
+
+  adminGetDailyContest: defineAction({
+    description:
+      "Admin view of the Daily Contest: today's UTC-day standings, the prize ladder for the current pool total, the countdown target, and the recent settled days (day, pool total, winners, total paid). Settles any finished day first (lazy, idempotent).",
+    request: z.object({ adminToken: z.string().min(1).max(200) }),
+    response: z.object({
+      dayKey: z.string(),
+      endsAt: z.string(),
+      totalCents: z.number(),
+      ladderCents: z.array(z.number()),
+      standings: z.array(
+        z.object({
+          rank: z.number(),
+          name: z.string(),
+          pictureUrl: z.string().nullable(),
+          earnedCents: z.number(),
+          prizeCents: z.number(),
+        }),
+      ),
+      settlements: z.array(
+        z.object({
+          dayKey: z.string(),
+          totalCents: z.number(),
+          winners: z.number(),
+          totalPaidCents: z.number(),
+        }),
+      ),
+    }),
+    async handler(ctx, args) {
+      await requireAdmin(ctx, args.adminToken);
+      const db = ctx.db<typeof schema>();
+      await settleDueDailyContestsBestEffort(db);
+      const settings = await getSettings(db);
+      const totalCents = dailyContestTotalFrom(settings);
+      const dayKey = utcDayKeyOf(new Date());
+      const standings = await dailyContestStandings(db, dayKey);
+      const ladder = dailyContestLadder(totalCents);
+      const ids = standings.map((s) => s.userId);
+      const users = ids.length
+        ? await db.select().from(schema.users).where(inArray(schema.users.id, ids))
+        : [];
+      const byId = new Map(users.map((u) => [u.id, u]));
+      const settled = await db
+        .select()
+        .from(schema.dailyContestSettlements)
+        .orderBy(desc(schema.dailyContestSettlements.id))
+        .limit(7);
+      return {
+        dayKey,
+        endsAt: new Date(nextUtcMidnightMs()).toISOString(),
+        totalCents,
+        ladderCents: ladder,
+        standings: standings.map((s, i) => {
+          const u = byId.get(s.userId);
+          return {
+            rank: i + 1,
+            name: (u?.name ?? "TapOne user").split(" ")[0] ?? "TapOne user",
+            pictureUrl: u?.pictureUrl ?? null,
+            earnedCents: s.earnedCents,
+            prizeCents: ladder[i] ?? 0,
+          };
+        }),
+        settlements: settled.map((row) => {
+          const winners = JSON.parse(row.winnersJson) as DailyContestWinner[];
+          return {
+            dayKey: row.dayKey,
+            totalCents: row.totalCents,
+            winners: winners.length,
+            totalPaidCents: winners.reduce((s, w) => s + w.prizeCents, 0),
+          };
+        }),
+      };
+    },
+  }),
+
+  adminSettleDailyContest: defineAction({
+    description:
+      "Admin button: settle every finished Daily Contest day that is not settled yet. Idempotent — a day that already settled pays nothing again. Returns the days settled by this call.",
+    request: z.object({ adminToken: z.string().min(1).max(200) }),
+    response: z.object({ settledDays: z.array(z.string()) }),
+    async handler(ctx, args) {
+      await requireAdmin(ctx, args.adminToken);
+      const db = ctx.db<typeof schema>();
+      const r = await settleDueDailyContests(db);
+      ctx.invalidateQueries();
+      return { settledDays: r.settledDays };
     },
   }),
 
@@ -4963,6 +5420,7 @@ export const Actions = {
         pubscaleSecretSet: z.boolean(),
         checkinBonusCents: z.number(),
         levelRewardCents: z.number(),
+        dailyContestTotalCents: z.number(),
         checkinGoalCents: z.number(),
         checkinRewardsCents: z.array(z.number()),
         levelCentsPerLevel: z.number(),
@@ -5034,6 +5492,7 @@ export const Actions = {
           pubscaleSecretSet: (settings["pubscale_secret_key"] ?? "") !== "",
           checkinBonusCents: settingInt(settings, "checkin_bonus_cents"),
           levelRewardCents: settingInt(settings, "level_reward_cents"),
+          dailyContestTotalCents: dailyContestTotalFrom(settings),
           checkinGoalCents: checkinGoalFrom(settings),
           checkinRewardsCents: checkinRewardsFrom(settings),
           levelCentsPerLevel: levelConfigFrom(settings).centsPerLevel,
@@ -6756,11 +7215,12 @@ export const Actions = {
 
   adminUpdateSettings: defineAction({
     description:
-      "Updates site settings: Google client ID, minimum withdrawal, revenue share, affiliate rates, postback secret, TheoremReach secret key, the weekly check-in goal + 7 day rewards, the level pace and title table, and the admin username/password.",
+      "Updates site settings: Google client ID, minimum withdrawal, revenue share, affiliate rates, postback secret, TheoremReach secret key, the weekly check-in goal + 7 day rewards, the level pace and title table, the Daily Contest total prize pool, and the admin username/password.",
     request: z.object({
       adminToken: z.string().min(1).max(200),
       googleClientId: z.string().trim().max(300).optional(),
       minWithdrawCents: z.number().int().nonnegative().max(100_000_000).optional(),
+      dailyContestTotalCents: z.number().int().min(0).max(100_000_000).optional(),
       userSharePct: z.number().int().min(1).max(100).optional(),
       affiliateEarningPct: z.number().int().min(0).max(100).optional(),
       affiliateSpendingPct: z.number().int().min(0).max(100).optional(),
@@ -6811,6 +7271,8 @@ export const Actions = {
         updates.push(["google_client_id", args.googleClientId]);
       if (args.minWithdrawCents !== undefined)
         updates.push(["min_withdraw_cents", String(args.minWithdrawCents)]);
+      if (args.dailyContestTotalCents !== undefined)
+        updates.push(["daily_contest_total_cents", String(args.dailyContestTotalCents)]);
       if (args.userSharePct !== undefined)
         updates.push(["user_share_pct", String(args.userSharePct)]);
       if (args.affiliateEarningPct !== undefined)
