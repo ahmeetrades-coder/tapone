@@ -18,6 +18,7 @@ export type DashboardTab =
   | "partners"
   | "level"
   | "cashout"
+  | "contest"
   | "withdraw"
   | "invite"
     | "history"
@@ -34,6 +35,7 @@ const TABS: { id: DashboardTab; label: string; icon: (c?: string) => ReactNode }
   { id: "partners", label: "Surveys partners", icon: Icons.users },
   { id: "level", label: "Level & Privileges", icon: Icons.chart },
   { id: "cashout", label: "Live Cashout", icon: Icons.wallet },
+  { id: "contest", label: "Daily Contest", icon: Icons.trophy },
   { id: "withdraw", label: "Withdraw", icon: Icons.wallet },
   { id: "invite", label: "Invite Friends", icon: Icons.users },
   { id: "history", label: "History", icon: Icons.history },
@@ -336,6 +338,7 @@ export function Dashboard({
               {tab === "apps" && <ContentSection token={token} kind="offerwall" heading="Apps" />}
               {tab === "partners" && <ContentSection token={token} kind="survey" heading="Surveys partners" />}
               {tab === "cashout" && <LiveCashoutTab onWithdraw={() => pick("withdraw")} />}
+              {tab === "contest" && <DailyContestTab token={token} />}
               {tab === "withdraw" && <WithdrawTab token={token} />}
               {tab === "history" && <HistoryTab token={token} />}
               {tab === "level" && <LevelTab token={token} go={pick} />}
@@ -2003,6 +2006,122 @@ function HistoryTab({ token }: { token: string }) {
         <div className="mt-6 rounded-3xl border-2 border-dashed border-[var(--border)] bg-[var(--surface)] px-6 py-10 text-center text-sm text-[var(--dim)]">
           No history yet — your earnings and withdrawals will appear here.
         </div>
+      )}
+    </div>
+  );
+}
+
+// --------------------------------------------------------------- daily contest
+
+function DailyContestTab({ token }: { token: string }) {
+  const contest = useQuery({
+    queryKey: ["daily-contest", token],
+    queryFn: () => api.getDailyContest({ token }),
+    // Standings move as users earn, so refresh every minute.
+    refetchInterval: 60_000,
+  });
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const t = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(t);
+  }, []);
+  const d = contest.data;
+  const endsMs = d ? new Date(d.endsAt).getTime() : 0;
+  const leftMs = Math.max(0, endsMs - nowMs);
+  const hh = Math.floor(leftMs / 3600000);
+  const mm = Math.floor((leftMs % 3600000) / 60000);
+  const ss = Math.floor((leftMs % 60000) / 1000);
+  const countdown = `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
+  return (
+    <div>
+      <h1 className="font-display text-2xl font-extrabold sm:text-3xl">Daily Contest</h1>
+      <p className="mt-1 text-sm text-[var(--dim)]">
+        Top 30 by today&apos;s earnings from offers, surveys and games. Prizes are paid in full to the winners&apos;
+        balances when the day ends at midnight UTC — then a new contest starts.
+      </p>
+      {contest.isPending ? (
+        <p className="mt-6 text-sm text-[var(--dim)]">Loading…</p>
+      ) : contest.isError || !d ? (
+        <p className="mt-6 text-sm text-[var(--dim)]">Could not load the contest — pull to retry.</p>
+      ) : (
+        <>
+          <div className="mt-5 grid grid-cols-2 gap-3">
+            <div className="rounded-2xl bg-[var(--surface)] p-4 ring-1 ring-[var(--border)]">
+              <p className="font-display text-xl font-extrabold break-words">{fmt(d.totalCents)}</p>
+              <p className="mt-0.5 text-xs font-semibold text-[var(--dim)]">Today&apos;s prize pool</p>
+            </div>
+            <div className="rounded-2xl bg-[var(--surface)] p-4 ring-1 ring-[var(--border)]">
+              <p className="font-display text-xl font-extrabold tabular-nums break-words">{countdown}</p>
+              <p className="mt-0.5 text-xs font-semibold text-[var(--dim)]">Left until midnight UTC</p>
+            </div>
+            <div className="rounded-2xl bg-[var(--surface)] p-4 ring-1 ring-[var(--border)]">
+              <p className="font-display text-xl font-extrabold break-words">
+                {d.myRank ? `#${d.myRank}` : "—"}
+              </p>
+              <p className="mt-0.5 text-xs font-semibold text-[var(--dim)]">Your rank today</p>
+            </div>
+            <div className="rounded-2xl bg-[var(--surface)] p-4 ring-1 ring-[var(--border)]">
+              <p className="font-display text-xl font-extrabold break-words">{fmt(d.myEarnedCents)}</p>
+              <p className="mt-0.5 text-xs font-semibold text-[var(--dim)]">
+                Your earnings today{d.myPrizeCents > 0 ? ` · prize ${fmt(d.myPrizeCents)}` : ""}
+              </p>
+            </div>
+          </div>
+
+          {d.standings.length > 0 ? (
+            <ul className="mt-5 divide-y divide-[var(--border)] rounded-2xl bg-[var(--surface)] px-4 ring-1 ring-[var(--border)]">
+              {d.standings.map((s) => (
+                <li
+                  key={s.rank}
+                  className={`flex items-center gap-3 py-3 ${s.isMe ? "rounded-xl bg-[var(--brand)]/10 px-2" : ""}`}
+                >
+                  <span className="w-7 shrink-0 text-center font-display text-base font-extrabold">#{s.rank}</span>
+                  <span className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-full bg-[var(--avatar)] font-display text-sm font-extrabold text-white">
+                    {s.pictureUrl ? (
+                      <img src={s.pictureUrl} alt="" className="h-full w-full object-cover" />
+                    ) : (
+                      s.name.charAt(0).toUpperCase()
+                    )}
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-sm font-semibold">
+                      {s.name}
+                      {s.isMe ? " (you)" : ""}
+                    </span>
+                    <span className="block text-xs text-[var(--dim)]">Earned {fmt(s.earnedCents)} today</span>
+                  </span>
+                  <span className="shrink-0 font-display text-base font-bold text-[var(--brand-deep)]">
+                    {fmt(s.prizeCents)}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <div className="mt-6 rounded-3xl border-2 border-dashed border-[var(--border)] bg-[var(--surface)] px-6 py-10 text-center text-sm text-[var(--dim)]">
+              No earnings yet today — complete an offer, survey or game to join the contest.
+            </div>
+          )}
+
+          <h2 className="mt-8 font-display text-lg font-bold">Today&apos;s prizes</h2>
+          <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3">
+            {d.ladderCents.map((prize, i) => (
+              <div
+                key={i}
+                className="flex items-center justify-between gap-2 rounded-xl bg-[var(--surface)] px-3.5 py-2.5 text-sm ring-1 ring-[var(--border)]"
+              >
+                <span className="font-semibold text-[var(--dim)]">#{i + 1}</span>
+                <span className="font-display font-bold">{fmt(prize)}</span>
+              </div>
+            ))}
+          </div>
+          {d.lastSettlement && (
+            <p className="mt-5 text-xs leading-relaxed text-[var(--dim)]">
+              Last settled day ({d.lastSettlement.dayKey}): {d.lastSettlement.winners} winner
+              {d.lastSettlement.winners === 1 ? "" : "s"} paid {fmt(d.lastSettlement.totalPaidCents)} from a{" "}
+              {fmt(d.lastSettlement.totalCents)} pool.
+            </p>
+          )}
+        </>
       )}
     </div>
   );

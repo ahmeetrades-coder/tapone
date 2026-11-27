@@ -426,3 +426,27 @@ export const contestAwards = sqliteTable("contest_awards", {
     .notNull()
     .$defaultFn(() => new Date()),
 });
+
+// dailyContestSettlements — one row per settled day of the NEW Daily
+// Contest (owner-approved 2026-11-26; NOT the old Leaderboard daily /
+// affiliate contests removed 2026-11-22 — those tables above,
+// contestJoins / contestPayouts / contestAwards, are dead leftovers
+// and this feature deliberately does not use them). day_key is the UTC
+// calendar day ("YYYY-MM-DD"); the UNIQUE index on it is the
+// idempotency key — a day can be settled at most once, so a redeploy
+// or a repeated settle call can never double-pay. winners_json is the
+// settled ladder [{ userId, rank, earnedCents, prizeCents }] (the
+// audit trail; each prize is also a transactions row of kind
+// "contest_prize" so it shows in the winner's History).
+export const dailyContestSettlements = sqliteTable(
+  "daily_contest_settlements",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    dayKey: text("day_key").notNull(),
+    totalCents: integer("total_cents").notNull().default(0),
+    winnersJson: text("winners_json").notNull().default("[]"),
+    createdAt: integer("created_at", { mode: "timestamp_ms" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+);
