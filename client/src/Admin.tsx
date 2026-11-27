@@ -58,6 +58,28 @@ function toCents(dollars: string): number | null {
   return Math.round(n * 100);
 }
 
+// Daily Contest ladder at the $20.00 default total (rank 1..30, cents).
+// Mirrors dailyContestLadder in server/src/actions.ts: scale each rung
+// to the given total, round to cents, put the rounding drift on rank 1
+// so the ladder always sums to exactly the total.
+const DAILY_CONTEST_BASE_LADDER_CENTS = [
+  400, 250, 150, 120, 80,
+  60, 60, 60, 60, 60,
+  50, 50, 50, 50, 50,
+  40, 40, 40, 40, 40,
+  30, 30, 30, 30, 30,
+  20, 20, 20, 20, 20,
+];
+
+function dailyContestLadderPreview(totalCents: number): number[] {
+  if (totalCents <= 0) return DAILY_CONTEST_BASE_LADDER_CENTS.map(() => 0);
+  const scaled = DAILY_CONTEST_BASE_LADDER_CENTS.map((c) =>
+    Math.round((c * totalCents) / 2000),
+  );
+  scaled[0] = (scaled[0] ?? 0) + (totalCents - scaled.reduce((s, c) => s + c, 0));
+  return scaled;
+}
+
 export function Admin() {
   const [token, setToken] = useState<string | null>(() => getAdminToken());
   const [tab, setTab] = useState<AdminTab>("overview");
@@ -268,6 +290,8 @@ function Overview({
             ))}
           </div>
 
+          <DailyContestOverview token={token} />
+
           <section className="mt-6 rounded-3xl bg-[var(--surface)] p-5 ring-1 ring-[var(--border)] sm:p-6" aria-label="Postback setup">
             <h2 className="font-display text-lg font-bold">Offerwall postback — give this to partners (e.g. MM Wall)</h2>
             <p className="mt-2 max-w-2xl text-sm leading-relaxed text-[var(--dim)]">
@@ -357,6 +381,90 @@ function Overview({
         </>
       )}
     </div>
+  );
+}
+
+// ------------------------------------------------------- daily contest
+
+function DailyContestOverview({ token }: { token: string }) {
+  const queryClient = useQueryClient();
+  const contest = useQuery({
+    queryKey: ["admin-daily-contest", token],
+    queryFn: () => api.adminGetDailyContest({ adminToken: token }),
+  });
+  const [settleMsg, setSettleMsg] = useState<string | null>(null);
+  const settle = useMutation({
+    mutationFn: () => api.adminSettleDailyContest({ adminToken: token }),
+    onSuccess: (r) => {
+      setSettleMsg(
+        r.settledDays.length > 0
+          ? `Settled and paid: ${r.settledDays.join(", ")}`
+          : "Nothing to settle — every finished day is already paid.",
+      );
+      void queryClient.invalidateQueries({ queryKey: ["admin-daily-contest", token] });
+    },
+    onError: (e) => setSettleMsg(e.message),
+  });
+  const d = contest.data;
+  return (
+    <section className="mt-6 rounded-3xl bg-[var(--surface)] p-5 ring-1 ring-[var(--border)] sm:p-6" aria-label="Daily Contest">
+      <h2 className="font-display text-lg font-bold">Daily Contest</h2>
+      <p className="mt-1 text-sm leading-relaxed text-[var(--dim)]">
+        Top 30 by each day&apos;s offer, survey and game earnings. Prizes are paid in full to the winners&apos;
+        balances when the day ends at midnight UTC. The pool total is set in Settings → Money.
+      </p>
+      {contest.isPending ? (
+        <p className="mt-3 text-sm text-[var(--dim)]">Loading…</p>
+      ) : contest.isError || !d ? (
+        <p className="mt-3 text-sm text-[var(--dim)]">Could not load the contest.</p>
+      ) : (
+        <>
+          <p className="mt-3 text-sm">
+            Today&apos;s pool: <strong className="font-display">{fmt(d.totalCents)}</strong>
+            {" · "}next contest starts {new Date(d.endsAt).toISOString().slice(0, 10)} 00:00 UTC
+          </p>
+          {d.standings.length > 0 ? (
+            <ul className="mt-3 divide-y divide-[var(--border)] rounded-2xl bg-[var(--surface-2)] px-4 ring-1 ring-[var(--border)]">
+              {d.standings.slice(0, 10).map((s) => (
+                <li key={s.rank} className="flex items-center gap-3 py-2.5 text-sm">
+                  <span className="w-7 shrink-0 font-display font-extrabold">#{s.rank}</span>
+                  <span className="min-w-0 flex-1 truncate font-semibold">{s.name}</span>
+                  <span className="shrink-0 text-[var(--dim)]">earned {fmt(s.earnedCents)}</span>
+                  <span className="shrink-0 font-display font-bold">prize {fmt(s.prizeCents)}</span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="mt-3 text-sm text-[var(--dim)]">No earnings yet today.</p>
+          )}
+          {d.settlements.length > 0 && (
+            <div className="mt-4">
+              <p className="text-sm font-semibold">Settled days</p>
+              <ul className="mt-2 space-y-1 text-sm text-[var(--dim)]">
+                {d.settlements.map((s) => (
+                  <li key={s.dayKey}>
+                    {s.dayKey}: {s.winners} winner{s.winners === 1 ? "" : "s"} paid {fmt(s.totalPaidCents)} from a{" "}
+                    {fmt(s.totalCents)} pool
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          <button
+            type="button"
+            onClick={() => {
+              setSettleMsg(null);
+              settle.mutate();
+            }}
+            disabled={settle.isPending}
+            className="mt-4 rounded-full bg-[var(--brand)] px-4 py-2 text-sm font-bold text-white transition disabled:opacity-50"
+          >
+            {settle.isPending ? "Settling…" : "Settle finished days now"}
+          </button>
+          {settleMsg && <p className="mt-2 text-sm text-[var(--dim)]">{settleMsg}</p>}
+        </>
+      )}
+    </section>
   );
 }
 
@@ -3502,6 +3610,7 @@ function SettingsTab({ token }: { token: string }) {
 
   const [googleClientId, setGoogleClientId] = useState("");
   const [minWithdraw, setMinWithdraw] = useState("");
+  const [dailyContestTotal, setDailyContestTotal] = useState("");
   const [userSharePct, setUserSharePct] = useState("");
   const [affiliateEarningPct, setAffiliateEarningPct] = useState("");
   const [affiliateSpendingPct, setAffiliateSpendingPct] = useState("");
@@ -3528,6 +3637,7 @@ function SettingsTab({ token }: { token: string }) {
     if (s && !hydrated) {
       setGoogleClientId(s.googleClientId);
       setMinWithdraw((s.minWithdrawCents / 100).toFixed(2));
+      setDailyContestTotal((s.dailyContestTotalCents / 100).toFixed(2));
       setUserSharePct(String(s.userSharePct));
       setAffiliateEarningPct(String(s.affiliateEarningPct));
       setAffiliateSpendingPct(String(s.affiliateSpendingPct));
@@ -3554,6 +3664,10 @@ function SettingsTab({ token }: { token: string }) {
       const minWithdrawCents = toCents(minWithdraw);
       if (minWithdrawCents === null)
         throw new Error("Minimum withdrawal must be a valid dollar amount.");
+      // Daily Contest: total prize pool paid out every day (0 = no prizes).
+      const dailyContestTotalCents = toCents(dailyContestTotal);
+      if (dailyContestTotalCents === null)
+        throw new Error("Daily Contest total must be a valid dollar amount (0 = no contest prizes).");
       const pct = (raw: string, label: string) => {
         const n = Number.parseInt(raw, 10);
         if (!Number.isFinite(n) || n < 0 || n > 100)
@@ -3598,6 +3712,7 @@ function SettingsTab({ token }: { token: string }) {
         adminToken: token,
         googleClientId: googleClientId.trim(),
         minWithdrawCents,
+        dailyContestTotalCents,
         userSharePct: pct(userSharePct, "User share"),
         affiliateEarningPct: pct(affiliateEarningPct, "Affiliate earning commission"),
         affiliateSpendingPct: pct(affiliateSpendingPct, "Affiliate spending commission"),
@@ -3759,6 +3874,20 @@ function SettingsTab({ token }: { token: string }) {
             <div>
               <label htmlFor="set-min" className="text-sm font-semibold">Minimum withdrawal ($)</label>
               <input id="set-min" value={minWithdraw} onChange={(e) => setMinWithdraw(e.target.value)} inputMode="decimal" className={fieldCls} />
+            </div>
+            <div>
+              <label htmlFor="set-contest" className="text-sm font-semibold">Daily Contest total prize per day ($)</label>
+              <input id="set-contest" value={dailyContestTotal} onChange={(e) => setDailyContestTotal(e.target.value)} inputMode="decimal" className={fieldCls} />
+              <p className="mt-1 text-xs leading-relaxed text-[var(--dim)]">
+                Top 30 by each day&apos;s earnings share this pool; prizes are paid in full at midnight UTC. The ladder
+                rescales to this total and always pays exactly this much per day.
+                {(() => {
+                  const total = toCents(dailyContestTotal);
+                  if (total === null) return "";
+                  const ladder = dailyContestLadderPreview(total);
+                  return ` Top 3 win ${fmt(ladder[0] ?? 0)} / ${fmt(ladder[1] ?? 0)} / ${fmt(ladder[2] ?? 0)}.`;
+                })()}
+              </p>
             </div>
             <div>
               <label htmlFor="set-checkin-goal" className="text-sm font-semibold">Check-in daily goal ($)</label>
