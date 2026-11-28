@@ -702,7 +702,7 @@ export function SignInCard({
       <p className="mt-3 text-center text-xs leading-relaxed text-[var(--dim)]">
         {showEmail
           ? "You can sign in with your email and password. New email accounts are verified with a code sent to your email."
-          : "You can sign in with Google or with email + password. New email accounts are verified with a code sent to your email."}
+          : "You can sign in with Google or with email + password. New email accounts are verified with a code sent to your email. VPN connections are not allowed."}
       </p>
     </div>
   );
@@ -954,7 +954,7 @@ type StaticPageContent = { title: string; body: string[]; sections?: { heading: 
         heading: "3. How we use your information",
         body: [
           "To run your account, match offers and payment methods to your country, credit your earnings, and review and pay your withdrawals.",
-          "To prevent fraud: accounts using fake details, emulators or location-spoofing can be blocked.",
+          "To prevent fraud: VPN and proxy connections are not allowed, and accounts using fake details, emulators or location-spoofing can be blocked.",
           "To reply to the messages you send us through Help, and to tell the admin when a new user registers.",
           "To improve TapOne and to meet our payment and record-keeping duties.",
         ],
