@@ -330,7 +330,7 @@ export function Dashboard({
               {tab === "dashboard" && (
                 <DashboardHome token={token} user={user} go={pick} />
               )}
-              {tab === "offers" && (<><ContentSection token={token} kind="offerwall" includeSurveyWalls /><MyOffersPanel token={token} /></>)}
+              {tab === "offers" && <ContentSection token={token} kind="offerwall" includeSurveyWalls />}
               {tab === "surveys" && <SurveysSection token={token} />}
               {tab === "playtime" && <GamesSection token={token} />}
               {tab === "partners" && <ContentSection token={token} kind="survey" heading="Surveys partners" />}
@@ -2512,92 +2512,6 @@ function AffiliateTab({ token }: { token: string }) {
         )}
       </section>
     </div>
-  );
-}
-
-// ------------------------------------------------------------- my offers
-
-function OfferThumb({ imageUrl, name }: { imageUrl: string | null | undefined; name: string }) { const [imgOk, setImgOk] = useState(true); if (imageUrl && imgOk) { return (<img src={imageUrl} alt={name} className="h-10 w-10 shrink-0 rounded-xl object-contain bg-[var(--surface-2)] ring-1 ring-[var(--border)]" loading="lazy" onError={() => setImgOk(false)} />); } return (<span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[var(--surface-2)] font-display text-base font-extrabold text-[var(--brand)] ring-1 ring-[var(--border)]" aria-hidden="true">{(name || "?").slice(0, 1).toUpperCase()}</span>); } function MyOffersPanel({ token }: { token: string }) {
-  const [sub, setSub] = useState<"completed" | "offers" | "surveys" | "chargebacks" | "started">("completed");
-  const stats = useQuery({ queryKey: ["my-stats", token], queryFn: () => api.getMyStats({ token }) });
-  const mine = useQuery({ queryKey: ["my-offers", token], queryFn: () => api.getMyOffers({ token }) });
-  const s = stats.data;
-  const items = (mine.data?.items ?? []).filter((i) =>
-    sub === "completed" ? true : sub === "offers" ? i.kind === "offer" : sub === "surveys" ? i.kind === "survey" : false,
-  );
-  const cells: [string, string][] = [
-    ["Offers Completed", s ? String(s.offersCompleted) : "–"],
-    ["Offer Earnings", s ? fmt(s.offerEarningsCents) : "–"],
-    ["Pending Earnings", s ? fmt(s.pendingCents) : "–"],
-    ["% Chargeback Rate", s ? `${s.chargebackRatePct}%` : "–"],
-  ];
-  return (
-    <section className="mt-8" aria-label="My Offers">
-      <h2 className="font-display text-xl font-extrabold">My Offers</h2>
-      <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4 sm:gap-3">
-        {cells.map(([label, value]) => (
-          <div key={label} className="rounded-2xl bg-[var(--surface)] p-3 ring-1 ring-[var(--border)] sm:p-4">
-            <p className="font-display text-lg font-extrabold text-[var(--brand)] sm:text-xl">{value}</p>
-            <p className="mt-0.5 text-[11px] font-semibold text-[var(--dim)] sm:text-xs">{label}</p>
-          </div>
-        ))}
-      </div>
-      <div className="mt-4 flex flex-wrap gap-2" role="tablist" aria-label="My Offers filter">
-        {(
-          [
-            { id: "completed" as const, label: "Completed" },
-            { id: "offers" as const, label: "Offers" },
-            { id: "surveys" as const, label: "Surveys" },
-            { id: "chargebacks" as const, label: "Chargebacks" },
-            { id: "started" as const, label: "Started" },
-          ]
-        ).map((tab) => (
-          <button
-            key={tab.id}
-            type="button"
-            role="tab"
-            aria-selected={sub === tab.id}
-            onClick={() => setSub(tab.id)}
-            className={`rounded-full px-4 py-2 text-sm font-bold ring-1 transition ${
-              sub === tab.id
-                ? "bg-[var(--brand)] text-white ring-[var(--brand)]"
-                : "bg-[var(--surface)] ring-[var(--border)]"
-            }`}
-          >
-            {tab.label}
-          </button>
-        ))}
-      </div>
-      {sub === "chargebacks" ? (
-        <p className="mt-4 rounded-2xl border-2 border-dashed border-[var(--border)] bg-[var(--surface)] px-5 py-8 text-center text-sm text-[var(--dim)]">
-          No chargebacks recorded on your account.
-        </p>
-      ) : sub === "started" ? (
-        <p className="mt-4 rounded-2xl border-2 border-dashed border-[var(--border)] bg-[var(--surface)] px-5 py-8 text-center text-sm text-[var(--dim)]">
-          Offers you start will appear here.
-        </p>
-      ) : mine.isPending ? (
-        <p className="mt-4 text-sm text-[var(--dim)]">Loading…</p>
-      ) : items.length > 0 ? (
-        <ul className="mt-4 divide-y divide-[var(--border)] rounded-2xl bg-[var(--surface)] px-4 ring-1 ring-[var(--border)]">
-          {items.filter((i) => i.creditedCents > 0).map((i) => (
-            <li key={i.id} className="flex items-center justify-between gap-3 py-3">
-              <span>
-                <OfferThumb imageUrl={i.imageUrl} name={i.title} /> <span className="text-sm font-semibold">{i.title}</span>
-                <span className="block text-xs text-[var(--dim)]">
-                  {i.network} · {i.kind === "survey" ? "Survey" : "Offer"} · {fmtDateTime(i.createdAt)}
-                </span>
-              </span>
-              <span className="shrink-0 font-display text-base font-bold text-[var(--brand)]">+{fmt(i.creditedCents)}</span>
-            </li>
-          ))}
-        </ul>
-      ) : (
-        <p className="mt-4 rounded-2xl border-2 border-dashed border-[var(--border)] bg-[var(--surface)] px-5 py-8 text-center text-sm text-[var(--dim)]">
-          Nothing completed yet — finished offers and surveys land here with their earnings.
-        </p>
-      )}
-    </section>
   );
 }
 
