@@ -82,6 +82,28 @@ function dailyContestLadderPreview(totalCents: number): number[] {
   return scaled;
 }
 
+// Affiliate Contest ladder at the $50.00 default total (rank 1..30, cents).
+// Mirrors affiliateContestLadder in server/src/actions.ts: scale each rung
+// to the given total, round to cents, put the rounding drift on rank 1
+// so the ladder always sums to exactly the total.
+const AFFILIATE_CONTEST_BASE_LADDER_CENTS = [
+  1000, 625, 375, 300, 200,
+  150, 150, 150, 150, 150,
+  125, 125, 125, 125, 125,
+  100, 100, 100, 100, 100,
+  75, 75, 75, 75, 75,
+  50, 50, 50, 50, 50,
+];
+
+function affiliateContestLadderPreview(totalCents: number): number[] {
+  if (totalCents <= 0) return AFFILIATE_CONTEST_BASE_LADDER_CENTS.map(() => 0);
+  const scaled = AFFILIATE_CONTEST_BASE_LADDER_CENTS.map((c) =>
+    Math.round((c * totalCents) / 5000),
+  );
+  scaled[0] = (scaled[0] ?? 0) + (totalCents - scaled.reduce((s, c) => s + c, 0));
+  return scaled;
+}
+
 export function Admin() {
   const [token, setToken] = useState<string | null>(() => getAdminToken());
   const [tab, setTab] = useState<AdminTab>("overview");
@@ -296,6 +318,8 @@ function Overview({
 
           <DailyContestOverview token={token} />
 
+          <AffiliateContestOverview token={token} />
+
           <section className="mt-6 rounded-3xl bg-[var(--surface)] p-5 ring-1 ring-[var(--border)] sm:p-6" aria-label="Postback setup">
             <h2 className="font-display text-lg font-bold">Offerwall postback — give this to partners (e.g. MM Wall)</h2>
             <p className="mt-2 max-w-2xl text-sm leading-relaxed text-[var(--dim)]">
@@ -464,6 +488,92 @@ function DailyContestOverview({ token }: { token: string }) {
             className="mt-4 rounded-full bg-[var(--brand)] px-4 py-2 text-sm font-bold text-white transition disabled:opacity-50"
           >
             {settle.isPending ? "Settling…" : "Settle finished days now"}
+          </button>
+          {settleMsg && <p className="mt-2 text-sm text-[var(--dim)]">{settleMsg}</p>}
+        </>
+      )}
+    </section>
+  );
+}
+
+function AffiliateContestOverview({ token }: { token: string }) {
+  const queryClient = useQueryClient();
+  const [settleMsg, setSettleMsg] = useState<string | null>(null);
+  const contest = useQuery({
+    queryKey: ["admin-affiliate-contest", token],
+    queryFn: () => api.adminGetAffiliateContest({ adminToken: token }),
+    retry: false,
+  });
+  const settle = useMutation({
+    mutationFn: () => api.adminSettleAffiliateContest({ adminToken: token }),
+    onSuccess: (r) => {
+      setSettleMsg(
+        r.settledWeeks.length > 0
+          ? `Settled and paid: ${r.settledWeeks.join(", ")}`
+          : "Nothing to settle — every finished week is already paid.",
+      );
+      void queryClient.invalidateQueries({ queryKey: ["admin-affiliate-contest", token] });
+    },
+    onError: (e) => setSettleMsg(e.message),
+  });
+  const d = contest.data;
+  return (
+    <section className="mt-6 rounded-3xl bg-[var(--surface)] p-5 ring-1 ring-[var(--border)] sm:p-6" aria-label="Affiliate Contest">
+      <h2 className="font-display text-lg font-bold">Affiliate Contest</h2>
+      <p className="mt-1 text-sm leading-relaxed text-[var(--dim)]">
+        Top 30 by valid invites each week — an invite counts only when the invited user&apos;s first withdrawal is
+        approved that week. Prizes are paid in full to the winners&apos; balances when the week ends on Monday 00:00
+        UTC. The pool total is set in Settings → Money.
+      </p>
+      {contest.isPending ? (
+        <p className="mt-3 text-sm text-[var(--dim)]">Loading…</p>
+      ) : contest.isError || !d ? (
+        <p className="mt-3 text-sm text-[var(--dim)]">Could not load the contest.</p>
+      ) : (
+        <>
+          <p className="mt-3 text-sm">
+            This week&apos;s pool: <strong className="font-display">{fmt(d.totalCents)}</strong>
+            {" · "}next contest starts {new Date(d.endsAt).toISOString().slice(0, 10)} 00:00 UTC
+          </p>
+          {d.standings.length > 0 ? (
+            <ul className="mt-3 divide-y divide-[var(--border)] rounded-2xl bg-[var(--surface-2)] px-4 ring-1 ring-[var(--border)]">
+              {d.standings.slice(0, 10).map((s) => (
+                <li key={s.rank} className="flex items-center gap-3 py-2.5 text-sm">
+                  <span className="w-7 shrink-0 font-display font-extrabold">#{s.rank}</span>
+                  <span className="min-w-0 flex-1 truncate font-semibold">{s.name}</span>
+                  <span className="shrink-0 text-[var(--dim)]">
+                    {s.validInvites} valid {s.validInvites === 1 ? "invite" : "invites"}
+                  </span>
+                  <span className="shrink-0 font-display font-bold">prize {fmt(s.prizeCents)}</span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="mt-3 text-sm text-[var(--dim)]">No valid invites yet this week.</p>
+          )}
+          {d.settlements.length > 0 && (
+            <div className="mt-4">
+              <p className="text-sm font-semibold">Settled weeks</p>
+              <ul className="mt-2 space-y-1 text-sm text-[var(--dim)]">
+                {d.settlements.map((s) => (
+                  <li key={s.weekKey}>
+                    Week of {s.weekKey}: {s.winners} winner{s.winners === 1 ? "" : "s"} paid {fmt(s.totalPaidCents)} from a{" "}
+                    {fmt(s.totalCents)} pool
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          <button
+            type="button"
+            onClick={() => {
+              setSettleMsg(null);
+              settle.mutate();
+            }}
+            disabled={settle.isPending}
+            className="mt-4 rounded-full bg-[var(--brand)] px-4 py-2 text-sm font-bold text-white transition disabled:opacity-50"
+          >
+            {settle.isPending ? "Settling…" : "Settle finished weeks now"}
           </button>
           {settleMsg && <p className="mt-2 text-sm text-[var(--dim)]">{settleMsg}</p>}
         </>
@@ -678,8 +788,8 @@ function DeployTab({ token }: { token: string }) {
               [
                 ["MIN_WITHDRAW_CENTS", `${fmt(d.minWithdrawCents)} minimum withdrawal`],
                 ["USER_SHARE_PCT", `${d.userSharePct}% of each postback payout goes to the user`],
-                ["AFFILIATE_EARNING_PCT", `${d.affiliateEarningPct}% referral earning commission`],
-                ["AFFILIATE_SPENDING_PCT", `${d.affiliateSpendingPct}% referral spending commission`],
+                ["AFFILIATE_EARNING_PCT", `${d.affiliateEarningPct}% first-withdrawal commission — inviter's share of an invitee's first approved withdrawal`],
+                ["AFFILIATE_SPENDING_PCT", `${d.affiliateSpendingPct}% lifetime withdrawal commission — inviter's share of every later approved withdrawal`],
               ] as [string, string][]
             ).map(([k, v]) => (
               <div key={k} className="rounded-xl bg-[var(--surface-2)] px-4 py-3">
@@ -4198,9 +4308,16 @@ function SettingsTab({ token }: { token: string }) {
   const [googleClientId, setGoogleClientId] = useState("");
   const [minWithdraw, setMinWithdraw] = useState("");
   const [dailyContestTotal, setDailyContestTotal] = useState("");
+  const [affiliateContestTotal, setAffiliateContestTotal] = useState("");
   const [userSharePct, setUserSharePct] = useState("");
-  const [affiliateEarningPct, setAffiliateEarningPct] = useState("");
-  const [affiliateSpendingPct, setAffiliateSpendingPct] = useState("");
+  // Affiliate commission rates (owner order 2026-11-28): the first
+  // rate is the inviter's % of an invitee's FIRST approved
+  // withdrawal; the second is the inviter's % of every later approved
+  // withdrawal, for life. The server setting keys keep their old
+  // names (affiliate_earning_pct / affiliate_spending_pct) so saved
+  // values keep working — only their meaning changed.
+  const [affiliateFirstWithdrawalPct, setAffiliateFirstWithdrawalPct] = useState("");
+  const [affiliateLifetimePct, setAffiliateLifetimePct] = useState("");
   const [postbackSecret, setPostbackSecret] = useState("");
   const [theoremReachSecret, setTheoremReachSecret] = useState("");
   const [offerwallggApiKey, setOfferwallggApiKey] = useState("");
@@ -4232,9 +4349,10 @@ function SettingsTab({ token }: { token: string }) {
       setGoogleClientId(s.googleClientId);
       setMinWithdraw((s.minWithdrawCents / 100).toFixed(2));
       setDailyContestTotal((s.dailyContestTotalCents / 100).toFixed(2));
+      setAffiliateContestTotal((s.affiliateContestTotalCents / 100).toFixed(2));
       setUserSharePct(String(s.userSharePct));
-      setAffiliateEarningPct(String(s.affiliateEarningPct));
-      setAffiliateSpendingPct(String(s.affiliateSpendingPct));
+      setAffiliateFirstWithdrawalPct(String(s.affiliateEarningPct));
+      setAffiliateLifetimePct(String(s.affiliateSpendingPct));
       setAdminUsername(s.adminUsername);
       setCheckinGoal((s.checkinGoalCents / 100).toFixed(2));
       setCheckinDays(s.checkinRewardsCents.map((c) => (c / 100).toFixed(2)));
@@ -4262,6 +4380,10 @@ function SettingsTab({ token }: { token: string }) {
       const dailyContestTotalCents = toCents(dailyContestTotal);
       if (dailyContestTotalCents === null)
         throw new Error("Daily Contest total must be a valid dollar amount (0 = no contest prizes).");
+      // Affiliate Contest: total prize pool paid out every week (0 = no prizes).
+      const affiliateContestTotalCents = toCents(affiliateContestTotal);
+      if (affiliateContestTotalCents === null)
+        throw new Error("Affiliate Contest total must be a valid dollar amount (0 = no contest prizes).");
       const pct = (raw: string, label: string) => {
         const n = Number.parseInt(raw, 10);
         if (!Number.isFinite(n) || n < 0 || n > 100)
@@ -4333,9 +4455,10 @@ function SettingsTab({ token }: { token: string }) {
         googleClientId: googleClientId.trim(),
         minWithdrawCents,
         dailyContestTotalCents,
+        affiliateContestTotalCents,
         userSharePct: pct(userSharePct, "User share"),
-        affiliateEarningPct: pct(affiliateEarningPct, "Affiliate earning commission"),
-        affiliateSpendingPct: pct(affiliateSpendingPct, "Affiliate spending commission"),
+        affiliateEarningPct: pct(affiliateFirstWithdrawalPct, "First withdrawal commission"),
+        affiliateSpendingPct: pct(affiliateLifetimePct, "Lifetime withdrawal commission"),
         postbackSecret: postbackSecret.trim() === "" ? undefined : postbackSecret.trim(),
         theoremReachSecret: theoremReachSecret.trim() === "" ? undefined : theoremReachSecret.trim(),
         offerwallggApiKey: offerwallggApiKey.trim() === "" ? undefined : offerwallggApiKey.trim(),
@@ -4578,6 +4701,20 @@ function SettingsTab({ token }: { token: string }) {
               </p>
             </div>
             <div>
+              <label htmlFor="set-affiliate-contest" className="text-sm font-semibold">Affiliate Contest total prize per week ($)</label>
+              <input id="set-affiliate-contest" value={affiliateContestTotal} onChange={(e) => setAffiliateContestTotal(e.target.value)} inputMode="decimal" className={fieldCls} />
+              <p className="mt-1 text-xs leading-relaxed text-[var(--dim)]">
+                Top 30 by valid invites each week share this pool; prizes are paid in full on Monday 00:00 UTC. The
+                ladder rescales to this total and always pays exactly this much per week.
+                {(() => {
+                  const total = toCents(affiliateContestTotal);
+                  if (total === null) return "";
+                  const ladder = affiliateContestLadderPreview(total);
+                  return ` Top 3 win ${fmt(ladder[0] ?? 0)} / ${fmt(ladder[1] ?? 0)} / ${fmt(ladder[2] ?? 0)}.`;
+                })()}
+              </p>
+            </div>
+            <div>
               <label htmlFor="set-checkin-goal" className="text-sm font-semibold">Check-in daily goal ($)</label>
               <input id="set-checkin-goal" value={checkinGoal} onChange={(e) => setCheckinGoal(e.target.value)} inputMode="decimal" className={fieldCls} />
               <p className="mt-1 text-xs leading-relaxed text-[var(--dim)]">
@@ -4591,12 +4728,18 @@ function SettingsTab({ token }: { token: string }) {
               <input id="set-share" {...FIELDS.adminUpdateSettings.userSharePct} value={userSharePct} onChange={(e) => setUserSharePct(e.target.value)} inputMode="numeric" className={fieldCls} />
             </div>
             <div>
-              <label htmlFor="set-aep" className="text-sm font-semibold">Affiliate earning commission (%)</label>
-              <input id="set-aep" {...FIELDS.adminUpdateSettings.affiliateEarningPct} value={affiliateEarningPct} onChange={(e) => setAffiliateEarningPct(e.target.value)} inputMode="numeric" className={fieldCls} />
+              <label htmlFor="set-aep" className="text-sm font-semibold">First withdrawal commission (%)</label>
+              <input id="set-aep" {...FIELDS.adminUpdateSettings.affiliateEarningPct} value={affiliateFirstWithdrawalPct} onChange={(e) => setAffiliateFirstWithdrawalPct(e.target.value)} inputMode="numeric" className={fieldCls} />
+              <p className="mt-1 text-xs leading-relaxed text-[var(--dim)]">
+                What the inviter earns from an invitee&apos;s first approved withdrawal.
+              </p>
             </div>
             <div>
-              <label htmlFor="set-asp" className="text-sm font-semibold">Affiliate spending commission (%)</label>
-              <input id="set-asp" {...FIELDS.adminUpdateSettings.affiliateSpendingPct} value={affiliateSpendingPct} onChange={(e) => setAffiliateSpendingPct(e.target.value)} inputMode="numeric" className={fieldCls} />
+              <label htmlFor="set-asp" className="text-sm font-semibold">Lifetime withdrawal commission (%)</label>
+              <input id="set-asp" {...FIELDS.adminUpdateSettings.affiliateSpendingPct} value={affiliateLifetimePct} onChange={(e) => setAffiliateLifetimePct(e.target.value)} inputMode="numeric" className={fieldCls} />
+              <p className="mt-1 text-xs leading-relaxed text-[var(--dim)]">
+                What the inviter earns from every later approved withdrawal, for life.
+              </p>
             </div>
           </div>
           <div className="mt-5 border-t border-[var(--border)] pt-4">

@@ -4,6 +4,7 @@ import { actionFields } from "@hatch/space-sdk/fields" with { type: "macro" };
 import { api, type ApiResponse } from "./api";
 import type { Actions } from "../../server/src/actions";
 import { Icons, MethodLogo, applyThemeMode, fmt, fmtDate, fmtDateTime, getThemeMode, isAuthError } from "./lib"; import { LiveCashoutTab } from "./LiveFeed";
+import { CONTEST_UNLOCK_CENTS, contestUnlockProgress, isContestUnlocked } from "./contestGate";
 import { fileToBase64 } from "@hatch/space-sdk/client";
 import { FooterThemePill, Wordmark } from "./App";
 
@@ -19,6 +20,7 @@ export type DashboardTab =
   | "level"
   | "cashout"
   | "contest"
+  | "affiliate-contest"
   | "withdraw"
   | "invite"
     | "history"
@@ -36,6 +38,7 @@ const TABS: { id: DashboardTab; label: string; icon: (c?: string) => ReactNode }
   { id: "level", label: "Level & Privileges", icon: Icons.chart },
   { id: "cashout", label: "Live Cashout", icon: Icons.wallet },
   { id: "contest", label: "Daily Contest", icon: Icons.trophy },
+  { id: "affiliate-contest", label: "Affiliate Contest", icon: Icons.trophy },
   { id: "withdraw", label: "Withdraw", icon: Icons.wallet },
   { id: "invite", label: "Invite Friends", icon: Icons.users },
   { id: "history", label: "History", icon: Icons.history },
@@ -56,6 +59,7 @@ const KIND_LABELS: Record<string, string> = {
   admin_adjust: "Adjustment",
   checkin_bonus: "Check-in bonus",
   contest_prize: "Daily contest prize",
+  affiliate_contest_prize: "Affiliate Contest prize",
   level_reward: "Level reward",
   redeem_code: "Redeem code reward",
 };
@@ -335,6 +339,7 @@ export function Dashboard({
               {tab === "partners" && <ContentSection token={token} kind="survey" heading="Surveys partners" />}
               {tab === "cashout" && <LiveCashoutTab onWithdraw={() => pick("withdraw")} />}
               {tab === "contest" && <DailyContestTab token={token} />}
+              {tab === "affiliate-contest" && <AffiliateContestTab token={token} />}
               {tab === "withdraw" && <WithdrawTab token={token} />}
               {tab === "history" && <HistoryTab token={token} />}
               {tab === "level" && <LevelTab token={token} go={pick} />}
@@ -1800,7 +1805,7 @@ function WithdrawTab({ token }: { token: string }) {
       });
     },
     onSuccess: () => {
-      setSuccess("Request sent. You will see the status here as soon as it is reviewed.");
+      setSuccess("Request sent. You will receive your withdrawal within 5 days.");
       setAmount("");
       setDetails({});
       void queryClient.invalidateQueries({ queryKey: ["withdraw-info", token] });
@@ -1943,6 +1948,11 @@ function WithdrawTab({ token }: { token: string }) {
                     {w.decidedAt ? ` · Decided ${fmtDateTime(w.decidedAt)}` : ""}
                   </span>
                 </p>
+                {w.status === "pending" && (
+                  <p className="mt-1.5 text-sm text-[var(--dim)]">
+                    You will receive your withdrawal within 5 days.
+                  </p>
+                )}
                 {w.adminNote && (
                   <p className="mt-1.5 text-sm">
                     <span className="font-semibold">Note:</span> {w.adminNote}
@@ -2004,6 +2014,30 @@ function HistoryTab({ token }: { token: string }) {
 
 // --------------------------------------------------------------- daily contest
 
+// $1 unlock gate, shared by the Daily Contest and the Affiliate Contest
+// (owner order 2026-11-28). Shown while the viewer's LIFETIME total
+// earnings are under $1.00. The unlock is permanent — lifetime earnings
+// never reset — so a user who reaches $1 never sees this card again.
+function ContestLockedCard({ earnedCents, contestName }: { earnedCents: number; contestName: string }) {
+  const { remainingCents } = contestUnlockProgress(earnedCents);
+  const pct = Math.min(100, Math.max(0, earnedCents));
+  return (
+    <div className="mt-5 rounded-2xl bg-[var(--surface)] p-5 ring-1 ring-[var(--border)]">
+      <p className="font-display text-lg font-extrabold">Earn $1 to unlock</p>
+      <p className="mt-1 text-sm text-[var(--dim)]">
+        {fmt(earnedCents)} earned — {fmt(remainingCents)} left
+      </p>
+      <div className="mt-3 h-2 overflow-hidden rounded-full bg-[var(--border)]">
+        <div className="h-full rounded-full bg-[var(--brand)]" style={{ width: `${pct}%` }} />
+      </div>
+      <p className="mt-3 text-xs leading-relaxed text-[var(--dim)]">
+        Earn {fmt(CONTEST_UNLOCK_CENTS)} in total from offers, surveys and games to open the {contestName}. Your
+        earnings count toward it no matter how long they take — a minute or ten days.
+      </p>
+    </div>
+  );
+}
+
 function DailyContestTab({ token }: { token: string }) {
   const contest = useQuery({
     queryKey: ["daily-contest", token],
@@ -2034,6 +2068,8 @@ function DailyContestTab({ token }: { token: string }) {
         <p className="mt-6 text-sm text-[var(--dim)]">Loading…</p>
       ) : contest.isError || !d ? (
         <p className="mt-6 text-sm text-[var(--dim)]">Could not load the contest — pull to retry.</p>
+      ) : !isContestUnlocked(d.myLifetimeEarnedCents) ? (
+        <ContestLockedCard earnedCents={d.myLifetimeEarnedCents} contestName="Daily Contest" />
       ) : (
         <>
           <div className="mt-5 grid grid-cols-2 gap-3">
@@ -2096,6 +2132,117 @@ function DailyContestTab({ token }: { token: string }) {
           {d.lastSettlement && (
             <p className="mt-5 text-xs leading-relaxed text-[var(--dim)]">
               Last settled day ({d.lastSettlement.dayKey}): {d.lastSettlement.winners} winner
+              {d.lastSettlement.winners === 1 ? "" : "s"} paid {fmt(d.lastSettlement.totalPaidCents)} from a{" "}
+              {fmt(d.lastSettlement.totalCents)} pool.
+            </p>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+// ------------------------------------------------------------ affiliate contest
+
+function AffiliateContestTab({ token }: { token: string }) {
+  const contest = useQuery({
+    queryKey: ["affiliate-contest", token],
+    queryFn: () => api.getAffiliateContest({ token }),
+    // Standings move as invitees take their first withdrawal, so refresh every minute.
+    refetchInterval: 60_000,
+  });
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const t = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(t);
+  }, []);
+  const d = contest.data;
+  const endsMs = d ? new Date(d.endsAt).getTime() : 0;
+  const leftMs = Math.max(0, endsMs - nowMs);
+  const dd = Math.floor(leftMs / 86400000);
+  const hh = Math.floor((leftMs % 86400000) / 3600000);
+  const mm = Math.floor((leftMs % 3600000) / 60000);
+  const ss = Math.floor((leftMs % 60000) / 1000);
+  const countdown = `${dd}d ${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
+  return (
+    <div>
+      <h1 className="font-display text-2xl font-extrabold sm:text-3xl">Affiliate Contest</h1>
+      <p className="mt-1 text-sm text-[var(--dim)]">
+        Top 30 by valid invites this week. An invite counts only when the friend you invited takes their first
+        withdrawal — signups alone do not count. Prizes are paid in full to the winners&apos; balances when the week
+        ends on Monday 00:00 UTC — then a new contest starts.
+      </p>
+      {contest.isPending ? (
+        <p className="mt-6 text-sm text-[var(--dim)]">Loading…</p>
+      ) : contest.isError || !d ? (
+        <p className="mt-6 text-sm text-[var(--dim)]">Could not load the contest — pull to retry.</p>
+      ) : !isContestUnlocked(d.myLifetimeEarnedCents) ? (
+        <ContestLockedCard earnedCents={d.myLifetimeEarnedCents} contestName="Affiliate Contest" />
+      ) : (
+        <>
+          <div className="mt-5 grid grid-cols-2 gap-3">
+            <div className="rounded-2xl bg-[var(--surface)] p-4 ring-1 ring-[var(--border)]">
+              <p className="font-display text-xl font-extrabold break-words">{fmt(d.totalCents)}</p>
+              <p className="mt-0.5 text-xs font-semibold text-[var(--dim)]">This week&apos;s prize pool</p>
+            </div>
+            <div className="rounded-2xl bg-[var(--surface)] p-4 ring-1 ring-[var(--border)]">
+              <p className="font-display text-xl font-extrabold tabular-nums break-words">{countdown}</p>
+              <p className="mt-0.5 text-xs font-semibold text-[var(--dim)]">Left until Monday 00:00 UTC</p>
+            </div>
+            <div className="rounded-2xl bg-[var(--surface)] p-4 ring-1 ring-[var(--border)]">
+              <p className="font-display text-xl font-extrabold break-words">
+                {d.myRank ? `#${d.myRank}` : "—"}
+              </p>
+              <p className="mt-0.5 text-xs font-semibold text-[var(--dim)]">Your rank this week</p>
+            </div>
+            <div className="rounded-2xl bg-[var(--surface)] p-4 ring-1 ring-[var(--border)]">
+              <p className="font-display text-xl font-extrabold break-words">{d.myValidInvites}</p>
+              <p className="mt-0.5 text-xs font-semibold text-[var(--dim)]">
+                Your valid invites this week{d.myPrizeCents > 0 ? ` · prize ${fmt(d.myPrizeCents)}` : ""}
+              </p>
+            </div>
+          </div>
+
+          {d.standings.length > 0 ? (
+            <ul className="mt-5 divide-y divide-[var(--border)] rounded-2xl bg-[var(--surface)] px-4 ring-1 ring-[var(--border)]">
+              {d.standings.map((s) => (
+                <li
+                  key={s.rank}
+                  className={`flex items-center gap-3 py-3 ${s.isMe ? "rounded-xl bg-[var(--brand)]/10 px-2" : ""}`}
+                >
+                  <span className="w-7 shrink-0 text-center font-display text-base font-extrabold">#{s.rank}</span>
+                  <span className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-full bg-[var(--avatar)] font-display text-sm font-extrabold text-white">
+                    {s.pictureUrl ? (
+                      <img src={s.pictureUrl} alt="" className="h-full w-full object-cover" />
+                    ) : (
+                      s.name.charAt(0).toUpperCase()
+                    )}
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-sm font-semibold">
+                      {s.name}
+                      {s.isMe ? " (you)" : ""}
+                    </span>
+                    <span className="block text-xs text-[var(--dim)]">
+                      {s.validInvites} valid {s.validInvites === 1 ? "invite" : "invites"} this week
+                    </span>
+                  </span>
+                  <span className="shrink-0 font-display text-base font-bold text-[var(--brand-deep)]">
+                    {fmt(s.prizeCents)}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <div className="mt-6 rounded-3xl border-2 border-dashed border-[var(--border)] bg-[var(--surface)] px-6 py-10 text-center text-sm text-[var(--dim)]">
+              No valid invites yet this week — invite friends and help them take their first withdrawal to join the
+              contest.
+            </div>
+          )}
+
+          {d.lastSettlement && (
+            <p className="mt-5 text-xs leading-relaxed text-[var(--dim)]">
+              Last settled week (week of {d.lastSettlement.weekKey}): {d.lastSettlement.winners} winner
               {d.lastSettlement.winners === 1 ? "" : "s"} paid {fmt(d.lastSettlement.totalPaidCents)} from a{" "}
               {fmt(d.lastSettlement.totalCents)} pool.
             </p>
@@ -2264,9 +2411,10 @@ function AffiliateTab({ token }: { token: string }) {
     <div>
       <h1 className="font-display text-2xl font-extrabold sm:text-3xl">Affiliate</h1>
       <p className="mt-1 max-w-xl text-sm leading-relaxed text-[var(--dim)]">
-        Invite friends with your link. You earn{" "}
-        <strong className="text-[var(--text)]">{aff.data?.earningPct ?? 8}% of everything they earn</strong>{" "}
-        and <strong className="text-[var(--text)]">{aff.data?.spendingPct ?? 5}% of what they spend</strong> —
+        Invite friends with your link. When someone you invite takes their first withdrawal (minimum $5), you earn{" "}
+        <strong className="text-[var(--text)]">{aff.data?.firstWithdrawalPct ?? 8}% of that withdrawal</strong> — once
+        per friend. After that, you earn{" "}
+        <strong className="text-[var(--text)]">{aff.data?.lifetimePct ?? 5}% of every withdrawal they take</strong> —
         for life, paid in dollars.
       </p>
 
@@ -2304,7 +2452,7 @@ function AffiliateTab({ token }: { token: string }) {
           <p className="font-display text-2xl font-extrabold">
             {aff.data ? fmt(aff.data.totalCommissionCents) : "–"}
           </p>
-          <p className="mt-0.5 text-xs font-semibold text-[var(--dim)]">Commission earned</p>
+          <p className="mt-0.5 text-xs font-semibold text-[var(--dim)]">Lifetime commission earned</p>
         </div>
       </section>
 
@@ -2330,7 +2478,12 @@ function AffiliateTab({ token }: { token: string }) {
               <tbody className="divide-y divide-[var(--border)]">
                 {aff.data.referrals.map((r, i) => (
                   <tr key={i}>
-                    <td className="break-words px-3 py-3 font-semibold sm:px-4">{r.name}</td>
+                    <td className="break-words px-3 py-3 font-semibold sm:px-4">
+                      {r.name}
+                      <span className="block text-xs font-normal text-[var(--dim)]">
+                        First withdrawal: {r.firstWithdrawalDone ? "Done ✓" : "Pending"}
+                      </span>
+                    </td>
                     <td className="whitespace-nowrap px-2 py-3 text-xs text-[var(--dim)]">{fmtDate(r.joinedAt)}</td>
                     <td className="px-2 py-3 text-right font-semibold">{fmt(r.totalEarnedCents)}</td>
                     <td className="px-3 py-3 text-right font-display font-bold text-[var(--brand-deep)] dark:text-[var(--brand)] sm:px-4">
