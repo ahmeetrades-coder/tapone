@@ -831,9 +831,11 @@ export function FollowRssIcon() {
 export function Wordmark({ light }: { light?: boolean }) {
   return (
     <span className="flex items-center gap-2">
-      <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-[var(--brand)] font-display text-lg font-extrabold text-white shadow-md shadow-[var(--brand)]/30">
-        T
-      </span>
+      <img
+        src={squirrelMascot}
+        alt="TapOne logo"
+        className="h-9 w-9 rounded-xl object-cover shadow-md"
+      />
       <span
         className={`font-display text-xl font-extrabold tracking-tight ${
           light ? "text-white" : "text-[var(--text)]"
