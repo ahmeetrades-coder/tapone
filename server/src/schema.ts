@@ -478,13 +478,13 @@ export const partnerCallbacks = sqliteTable("partner_callbacks", {
   //            joined as name=value&name=value (the original scheme)
   //   colon  — hex HMAC of "{user}:{txn}:{payout}" — the user ID,
   //            transaction ID and payout values joined with colons, in
-  //            that order (the scheme Offerwall.GG uses).   //   moonetix — HMAC-SHA256 of "{txn}:{user}:{payout}:{status}".
+  //            that order (the scheme Offerwall.GG uses).
   //   custom — hex HMAC of the admin-typed sig_template, with
   //            {user} {tx} {amount} {status} (or any configured
   //            parameter name in braces) replaced by the values
   //            exactly as received. This is how a future partner
   //            with a new hash order is added from Admin alone.
-  sigFormat: text("sig_format", { enum: ["params", "colon", "moonetix", "custom"] })
+  sigFormat: text("sig_format", { enum: ["params", "colon", "custom"] })
     .notNull()
     .default("params"),
   // Admin-typed template for sigFormat "custom" (see above). Null

@@ -3082,7 +3082,7 @@ const partnerCallbackShape = z.object({
   txnParam: z.string(),
   payoutParam: z.string(),
   payoutInCents: z.boolean(),
-  sigFormat: z.enum(["params", "colon", "moonetix", "custom"]),
+  sigFormat: z.enum(["params", "colon", "custom"]),
   sigTemplate: z.string().nullable(),
   statusParam: z.string(),
   statusCreditValue: z.string(),
@@ -4236,8 +4236,7 @@ export const Actions = {
             // completed offer/survey can be credited back to them.
             if (viewer) {
               item.url = personalizeContentUrl(item.url, viewer);
-              // Signed wall link: HMAC-SHA256(salt, user Offer Token),
-              // the scheme Moonetix documents for its wall links.
+              // Signed wall link: HMAC-SHA256(salt, user Offer Token).
               // Only the server ever sees the salt.
               const signing = linkSigning.get(
                 partnerKeyOf(r.provider, r.title),
@@ -6256,13 +6255,7 @@ export const Actions = {
       const params = args.params;
       const userId = (params[config.userParam] ?? "").trim();
       const txId = (params[config.txnParam] ?? "").trim();
-      const payoutRaw = (params[config.payoutParam] ?? "").trim();   
-      const status = (params["status"] ?? "").trim();
-      // Moonetix signs the reward (after its user split), not the
-      // gross payout in "amount" — read it verbatim, never reformat.
-      // Missing reward => "" => the HMAC below cannot match, so the 
-      // callback is rejected with "Invalid callback signature."
-      const rewardRaw = (params["reward"] ?? "").trim();
+      const payoutRaw = (params[config.payoutParam] ?? "").trim();
       if (!userId || !txId || !payoutRaw)
         throw new Error(
           `Missing callback parameters: this partner must send ${config.userParam}, ${config.txnParam} and ${config.payoutParam}.`,
@@ -6288,21 +6281,15 @@ export const Actions = {
           // "{user}:{txn}:{payout}" — the three values joined with
           // colons, in that order. Every other HMAC partner signs the
           // sorted name=value&name=value pairs.
-          // "moonetix" (Moonetix) signs "{txn}:{user}:{reward}:{status}"
-          // — the reward is the amount after Moonetix's user split;
-          // the credit itself still uses the gross payout in "amount".
           // The status value, when the partner sends one: from the
           // admin-named status parameter, or "status" when none is
-          // named (Moonetix sends "status").
+          // named.
           const statusRaw = (
             params[config.statusParam || "status"] ?? ""
           ).trim();
           // Which string this partner signs depends on its format:
           // "colon" (Offerwall.GG) signs "{user}:{txn}:{payout}";
-          // "moonetix" signs "{txn}:{user}:{reward}:{status}" where
-          // the reward is the amount AFTER Moonetix's user split
-          // (the credit itself still uses the gross payout in
-          // "amount"); "custom" signs the admin-typed template;
+          // "custom" signs the admin-typed template;
           // every other HMAC partner signs the sorted
           // name=value&name=value pairs. Values are used exactly
           // as received.
@@ -6311,12 +6298,6 @@ export const Actions = {
             expected = await partnerHmacHexRaw(
               config.secret,
               `${userId}:${txId}:${payoutRaw}`,
-              hash,
-            );
-          } else if (config.sigFormat === "moonetix") {
-            expected = await partnerHmacHexRaw(
-              config.secret,
-              `${txId}:${userId}:${rewardRaw}:${statusRaw}`,
               hash,
             );
           } else if (config.sigFormat === "custom") {
@@ -6343,16 +6324,14 @@ export const Actions = {
         }
       }
 
-      // Generic status gate — the Moonetix status 1/2 rule, for any
-      // partner whose admin named a status parameter: only the
-      // configured credit value credits. Any other value the partner
-      // actually sent is rejected with no credit and no debit, before
-      // the duplicate check, so a reversal of an already-credited
-      // transaction is not mistaken for a duplicate credit. The
-      // Moonetix guard below still covers Moonetix rows whose admin
-      // never set a status parameter; when one is set, both guards
-      // agree. A partner that sends no status at all is not rejected
-      // here — its signature (or lack of one) decides.
+      // Generic status gate — for any partner whose admin named a
+      // status parameter: only the configured credit value credits.
+      // Any other value the partner actually sent is rejected with
+      // no credit and no debit, before the duplicate check, so a
+      // reversal of an already-credited transaction is not mistaken
+      // for a duplicate credit. A partner that sends no status at
+      // all is not rejected here — its signature (or lack of one)
+      // decides.
       if (config.statusParam) {
         const statusValue = (params[config.statusParam] ?? "").trim();
         if (statusValue !== "" && statusValue !== config.statusCreditValue) {
@@ -6360,7 +6339,7 @@ export const Actions = {
         }
       }
 
-      const payoutNumber = Number.parseFloat(payoutRaw); if (config.sigFormat === "moonetix" && status !== "1") { return { status: "rejected" as const, creditedCents: 0 }; }
+      const payoutNumber = Number.parseFloat(payoutRaw);
       if (!Number.isFinite(payoutNumber))
         throw new Error("Invalid payout amount.");
       let payout =
@@ -7735,7 +7714,7 @@ export const Actions = {
 
   adminUpsertPartnerCallback: defineAction({
     description:
-      "Adds or edits a partner callback config: partner name + callback key, which parameters carry the user ID, transaction ID and payout (and whether the payout is in cents, and how many payout units make $1), and how callbacks are authenticated — no secret, a shared secret parameter, or an HMAC-SHA1 / HMAC-SHA256 signature — with the secret value and, for HMAC partners, which signature format they use (sorted name=value pairs, the user:transaction:amount colon format Offerwall.GG uses, or the Moonetix tx:user:amount:status format — transaction, user, amount and status joined with colons). Saved configs take effect on the very next callback; no redeploy. Leaving the secret blank while editing keeps the stored one.",
+      "Adds or edits a partner callback config: partner name + callback key, which parameters carry the user ID, transaction ID and payout (and whether the payout is in cents, and how many payout units make $1), and how callbacks are authenticated — no secret, a shared secret parameter, or an HMAC-SHA1 / HMAC-SHA256 signature — with the secret value and, for HMAC partners, which signature format they use (sorted name=value pairs, the user:transaction:amount colon format Offerwall.GG uses, or a custom template). Saved configs take effect on the very next callback; no redeploy. Leaving the secret blank while editing keeps the stored one.",
     request: z.object({
       adminToken: z.string().min(1).max(200),
       id: z.number().int().positive().optional(),
@@ -7757,9 +7736,9 @@ export const Actions = {
       // units per $1). Applied after the cents conversion.
       payoutDivisor: z.number().positive().max(1000000).default(1),
       // Which string an HMAC partner signs: the sorted name=value pairs
-      // ("params") or "{user}:{txn}:{payout}" ("colon", Offerwall.GG), or "{txn}:{user}:{reward}:{status}" ("moonetix", Moonetix).
+      // ("params") or "{user}:{txn}:{payout}" ("colon", Offerwall.GG).
       // Only used for HMAC auth methods.
-      sigFormat: z.enum(["params", "colon", "moonetix", "custom"]).default("params"),
+      sigFormat: z.enum(["params", "colon", "custom"]).default("params"),
       // Admin-typed template for sigFormat "custom" (see
       // resolveSigTemplate); ignored for every other format.
       sigTemplate: z.string().trim().max(200).default(""),
