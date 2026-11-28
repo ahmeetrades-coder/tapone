@@ -1280,19 +1280,21 @@ function GameCard({
       aria-label={`${item.title} — earn up to ${fmt(total)}`}
       className="w-36 flex-none overflow-hidden rounded-2xl bg-[var(--surface)] text-left ring-1 ring-[var(--border)] transition hover:ring-[var(--brand)] sm:w-44"
     >
-      {item.imageUrl && imgOk ? (
-        <img
-          src={item.imageUrl}
-          alt={item.title}
-          className="aspect-square w-full object-cover"
-          loading="lazy"
-          onError={() => setImgOk(false)}
-        />
-      ) : (
-        <span className="flex aspect-square w-full items-center justify-center bg-[var(--surface-2)] text-[var(--brand)]">
-          {Icons.game("h-12 w-12")}
-        </span>
-      )}
+      <span className="block aspect-square w-full overflow-hidden rounded-[22%]">
+        {item.imageUrl && imgOk ? (
+          <img
+            src={item.imageUrl}
+            alt={item.title}
+            className="h-full w-full scale-110 object-cover"
+            loading="lazy"
+            onError={() => setImgOk(false)}
+          />
+        ) : (
+          <span className="flex h-full w-full items-center justify-center bg-[var(--surface-2)] text-[var(--brand)]">
+            {Icons.game("h-12 w-12")}
+          </span>
+        )}
+      </span>
       <span className="block px-3 pb-3 pt-2">
         <span className="block truncate font-display text-sm font-bold text-[var(--text)]">
           {item.title}
@@ -1337,19 +1339,21 @@ function FeedGameCard({
       aria-label={`${title} — earn ${fmt(game.payoutCents)}`}
       className="w-36 flex-none overflow-hidden rounded-2xl bg-[var(--surface)] text-left ring-1 ring-[var(--border)] transition hover:ring-[var(--brand)] sm:w-44"
     >
-      {art && imgOk ? (
-        <img
-          src={art}
-          alt={title}
-          className="aspect-square w-full object-cover"
-          loading="lazy"
-          onError={() => setImgOk(false)}
-        />
-      ) : (
-        <span className="flex aspect-square w-full items-center justify-center bg-[var(--surface-2)] text-[var(--brand)]">
-          {Icons.game("h-12 w-12")}
-        </span>
-      )}
+      <span className="block aspect-square w-full overflow-hidden rounded-[22%]">
+        {art && imgOk ? (
+          <img
+            src={art}
+            alt={title}
+            className="h-full w-full scale-110 object-cover"
+            loading="lazy"
+            onError={() => setImgOk(false)}
+          />
+        ) : (
+          <span className="flex h-full w-full items-center justify-center bg-[var(--surface-2)] text-[var(--brand)]">
+            {Icons.game("h-12 w-12")}
+          </span>
+        )}
+      </span>
       <span className="block px-3 pb-3 pt-2">
         <span className="block truncate font-display text-sm font-bold text-[var(--text)]">
           {title}
