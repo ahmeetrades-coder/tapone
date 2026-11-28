@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { actionFields } from "@hatch/space-sdk/fields" with { type: "macro" };
 import { api, type ApiResponse } from "./api";
 import type { Actions } from "../../server/src/actions";
 import { Icons, MethodLogo, applyThemeMode, fmt, fmtDate, fmtDateTime, getThemeMode, isAuthError } from "./lib"; import { LiveCashoutTab } from "./LiveFeed";
 import { CONTEST_UNLOCK_CENTS, contestUnlockProgress, isContestUnlocked } from "./contestGate";
+import { homeVisible, normalizeSiteControls, tabLabel, tabVisible, type SiteControls } from "./siteControls";
 import { fileToBase64 } from "@hatch/space-sdk/client";
 import { FooterThemePill, Wordmark } from "./App";
 
@@ -115,6 +116,38 @@ export function Dashboard({
   });
   const socialLinks = home.data?.socialLinks ?? [];
 
+  // Site Controls (Admin → Site Controls): which dashboard sections
+  // show, what they are called, and the owner's custom menu links.
+  // No saved config yet = the built-in layout (everything visible).
+  const controls: SiteControls = useMemo(
+    () => normalizeSiteControls(home.data?.siteControls),
+    [home.data?.siteControls],
+  );
+  const displayTabs = TABS.map((t) => ({ ...t, label: tabLabel(controls, t.id, t.label) }));
+  const visibleTabs = displayTabs.filter((t) => tabVisible(controls, t.id));
+  // If the section the user is on was just hidden from Admin, fall
+  // back to the Dashboard instead of showing a blank page.
+  const effectiveTab = visibleTabs.some((t) => t.id === tab) ? tab : "dashboard";
+  const customLinks = controls.customLinks;
+  // Mobile bottom bar: the 4 favourite sections first, filled from
+  // the rest so the bar always has 4 buttons + More — even when some
+  // are hidden from Admin.
+  const BOTTOM_PREFERRED: DashboardTab[] = [
+    "dashboard", "offers", "playtime", "withdraw",
+    "surveys", "cashout", "contest", "invite",
+    "level", "history", "profile", "help", "contact",
+    "partners", "affiliate-contest",
+  ];
+  const bottomTabs = BOTTOM_PREFERRED.map((id) =>
+    displayTabs.find((t) => t.id === id),
+  )
+    .filter((t): t is (typeof displayTabs)[number] => t !== undefined && tabVisible(controls, t.id))
+    .slice(0, 4);
+  const bottomCols =
+    ({ 1: "grid-cols-2", 2: "grid-cols-3", 3: "grid-cols-4", 4: "grid-cols-5" })[
+      bottomTabs.length
+    ] ?? "grid-cols-5";
+
   // Sign out ONLY when the session itself is dead (signed out /
   // account gone / blocked). A network error keeps the session and
   // shows the retry panel below instead of ejecting the user.
@@ -138,6 +171,9 @@ export function Dashboard({
   }, [savedTheme]);
 
   const pick = (t: DashboardTab) => {
+    // A section hidden from Admin cannot be opened — not from the
+    // menu, not from a shortcut, not from a saved tab.
+    if (!tabVisible(controls, t)) return;
     setTab(t);
     setMenuOpen(false);
     try {
@@ -186,8 +222,24 @@ export function Dashboard({
           </div>
         )}
         <nav className="mt-5 flex-1 space-y-1" aria-label="Dashboard">
-          {TABS.map((t) => navButton(t))}
+          {visibleTabs.map((t) => navButton(t))}
         </nav>
+        {customLinks.length > 0 && (
+          <div className="mt-4 space-y-1 border-t border-[var(--border)] pt-4" aria-label="Custom links">
+            {customLinks.map((l) => (
+              <a
+                key={l.id}
+                href={l.url}
+                target="_blank"
+                rel="noreferrer"
+                className="flex w-full items-center gap-3 rounded-full px-3.5 py-2.5 text-sm font-semibold text-[var(--dim)] transition hover:bg-[var(--surface)] hover:text-[var(--text)]"
+              >
+                {Icons.globe("h-5 w-5")}
+                <span className="truncate">{l.label}</span>
+              </a>
+            ))}
+          </div>
+        )}
         <button
           type="button"
           onClick={onSignOut}
@@ -204,7 +256,7 @@ export function Dashboard({
             <Wordmark />
           </span>
           <span className="hidden font-display text-base font-bold lg:block">
-            {TABS.find((t) => t.id === tab)?.label ?? "Dashboard"}
+            {displayTabs.find((t) => t.id === effectiveTab)?.label ?? "Dashboard"}
           </span>
           <span className="flex items-center gap-2.5">
             {user && (
@@ -327,23 +379,23 @@ export function Dashboard({
             <p className="py-16 text-center text-sm text-[var(--dim)]">Loading your account…</p>
           ) : (
             <>
-              {tab === "dashboard" && (
-                <DashboardHome token={token} user={user} go={pick} />
+              {effectiveTab === "dashboard" && (
+                <DashboardHome token={token} user={user} go={pick} controls={controls} />
               )}
-              {tab === "offers" && <ContentSection token={token} kind="offerwall" includeSurveyWalls />}
-              {tab === "surveys" && <SurveysSection token={token} />}
-              {tab === "playtime" && <GamesSection token={token} />}
-              {tab === "partners" && <ContentSection token={token} kind="survey" heading="Surveys partners" />}
-              {tab === "cashout" && <LiveCashoutTab onWithdraw={() => pick("withdraw")} />}
-              {tab === "contest" && <DailyContestTab token={token} />}
-              {tab === "affiliate-contest" && <AffiliateContestTab token={token} />}
-              {tab === "withdraw" && <WithdrawTab token={token} />}
-              {tab === "history" && <HistoryTab token={token} />}
-              {tab === "level" && <LevelTab token={token} go={pick} />}
-              {tab === "invite" && <AffiliateTab token={token} />}
-              {tab === "profile" && <ProfileTab token={token} user={user} go={pick} onSignOut={onSignOut} />}
-              {tab === "help" && <HelpTab token={token} />}
-              {tab === "contact" && <RedeemTab token={token} />}
+              {effectiveTab === "offers" && <ContentSection token={token} kind="offerwall" includeSurveyWalls controls={controls} />}
+              {effectiveTab === "surveys" && <SurveysSection token={token} controls={controls} />}
+              {effectiveTab === "playtime" && <GamesSection token={token} />}
+              {effectiveTab === "partners" && <ContentSection token={token} kind="survey" heading="Surveys partners" controls={controls} />}
+              {effectiveTab === "cashout" && <LiveCashoutTab onWithdraw={() => pick("withdraw")} />}
+              {effectiveTab === "contest" && <DailyContestTab token={token} />}
+              {effectiveTab === "affiliate-contest" && <AffiliateContestTab token={token} />}
+              {effectiveTab === "withdraw" && <WithdrawTab token={token} />}
+              {effectiveTab === "history" && <HistoryTab token={token} />}
+              {effectiveTab === "level" && <LevelTab token={token} go={pick} />}
+              {effectiveTab === "invite" && <AffiliateTab token={token} />}
+              {effectiveTab === "profile" && <ProfileTab token={token} user={user} go={pick} onSignOut={onSignOut} />}
+              {effectiveTab === "help" && <HelpTab token={token} />}
+              {effectiveTab === "contact" && <RedeemTab token={token} />}
             </>
           )}
         </main>
@@ -378,41 +430,30 @@ export function Dashboard({
           className="fixed inset-x-0 bottom-0 z-30 border-t border-[var(--border)] bg-[var(--surface)] pb-safe text-[var(--text)] lg:hidden"
           aria-label="Dashboard"
         >
-          <div className="grid grid-cols-5">
-            {(
-              [
-                TABS.find((t) => t.id === "dashboard"),
-                TABS.find((t) => t.id === "offers"),
-                TABS.find((t) => t.id === "playtime"),
-                TABS.find((t) => t.id === "withdraw"),
-                undefined,
-              ] as ((typeof TABS)[number] | undefined)[]
-            ).map((t, i) =>
-              t ? (
-                <button
-                  key={t.id}
-                  type="button"
-                  onClick={() => pick(t.id)}
-                  aria-current={tab === t.id ? "page" : undefined}
-                  className={`flex flex-col items-center gap-1 py-2.5 text-[11px] font-semibold ${
-                    tab === t.id ? "text-[var(--brand-deep)]" : "text-[var(--dim)]"
-                  }`}
-                >
-                  {t.icon("h-6 w-6")}
-                  {t.label}
-                </button>
-              ) : (
-                <button
-                  key={`more-${i}`}
-                  type="button"
-                  onClick={() => setMenuOpen(true)}
-                  className="flex flex-col items-center gap-1 py-2.5 text-[11px] font-semibold text-[var(--dim)]"
-                >
-                  {Icons.grid("h-6 w-6")}
-                  More
-                </button>
-              ),
-            )}
+          <div className={`grid ${bottomCols}`}>
+            {bottomTabs.map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                onClick={() => pick(t.id)}
+                aria-current={effectiveTab === t.id ? "page" : undefined}
+                className={`flex flex-col items-center gap-1 py-2.5 text-[11px] font-semibold ${
+                  effectiveTab === t.id ? "text-[var(--brand-deep)]" : "text-[var(--dim)]"
+                }`}
+              >
+                {t.icon("h-6 w-6")}
+                {t.label}
+              </button>
+            ))}
+            <button
+              key="more"
+              type="button"
+              onClick={() => setMenuOpen(true)}
+              className="flex flex-col items-center gap-1 py-2.5 text-[11px] font-semibold text-[var(--dim)]"
+            >
+              {Icons.grid("h-6 w-6")}
+              More
+            </button>
           </div>
         </nav>
 
@@ -432,13 +473,13 @@ export function Dashboard({
                 </button>
               </div>
               <div className="grid grid-cols-2 gap-2">
-                {TABS.map((t) => (
+                {visibleTabs.map((t) => (
                   <button
                     key={t.id}
                     type="button"
                     onClick={() => pick(t.id)}
                     className={`flex items-center gap-2.5 rounded-xl px-3.5 py-3 text-sm font-semibold ${
-                      tab === t.id
+                      effectiveTab === t.id
                         ? "bg-[var(--brand)] text-white"
                         : "bg-[var(--surface-2)] text-[var(--text)]"
                     }`}
@@ -448,6 +489,22 @@ export function Dashboard({
                   </button>
                 ))}
               </div>
+              {customLinks.length > 0 && (
+                <div className="mt-2 space-y-2">
+                  {customLinks.map((l) => (
+                    <a
+                      key={l.id}
+                      href={l.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="flex items-center gap-2.5 rounded-xl bg-[var(--surface-2)] px-3.5 py-3 text-sm font-semibold text-[var(--text)]"
+                    >
+                      {Icons.globe("h-5 w-5")}
+                      {l.label}
+                    </a>
+                  ))}
+                </div>
+              )}
               <button
                 type="button"
                 onClick={onSignOut}
@@ -469,15 +526,24 @@ function DashboardHome({
   token,
   user,
   go,
+  controls,
 }: {
   token: string;
   user: User;
   go: (t: DashboardTab) => void;
+  controls: SiteControls;
 }) {
   const dash = useQuery({
     queryKey: ["dashboard", token],
     queryFn: () => api.getDashboard({ token }),
   });
+  // Earn shortcuts follow the same visibility as their tabs — a
+  // shortcut to a hidden section never shows.
+  const earnShortcuts = [
+    { tab: "offers" as DashboardTab, icon: Icons.grid("h-6 w-6"), label: "Offers" },
+    { tab: "surveys" as DashboardTab, icon: Icons.survey("h-6 w-6"), label: "Surveys" },
+    { tab: "playtime" as DashboardTab, icon: Icons.game("h-6 w-6"), label: "Playtime" },
+  ].filter((s) => tabVisible(controls, s.tab));
   return (
     <div>
       <p className="text-sm font-semibold text-[var(--dim)]">Welcome</p>
@@ -486,6 +552,7 @@ function DashboardHome({
       </h1>
 
       {/* balance hero */}
+      {homeVisible(controls, "balance") && (
       <section className="mt-5 overflow-hidden rounded-3xl bg-[var(--pill)] p-5 ring-1 ring-[var(--border)] sm:p-7" aria-label="Balance">
         <p className="text-sm font-semibold text-[var(--dim)]">Available balance</p>
         <p className="mt-1 font-display text-4xl font-extrabold tracking-tight text-[var(--text)] sm:text-5xl">
@@ -511,11 +578,13 @@ function DashboardHome({
           </button>
         </div>
       </section>
+      )}
 
       {/* level progress — real level from lifetime earnings */}
-      <LevelCard token={token} go={go} />
+      {homeVisible(controls, "level") && <LevelCard token={token} go={go} />}
 
       {/* quick stats */}
+      {homeVisible(controls, "quickstats") && (
       <section className="mt-4 grid grid-cols-3 gap-2 sm:gap-3" aria-label="Quick stats">
         <div className="rounded-2xl bg-[var(--surface)] p-4 ring-1 ring-[var(--border)]">
           <p className="font-display text-xl font-extrabold">{dash.data?.pendingWithdrawals ?? "–"}</p>
@@ -532,16 +601,12 @@ function DashboardHome({
           <p className="mt-0.5 text-xs font-semibold text-[var(--dim)]">Affiliate earned</p>
         </div>
       </section>
+      )}
 
       {/* earn shortcuts */}
+      {homeVisible(controls, "earn") && earnShortcuts.length > 0 && (
       <section className="mt-4 grid grid-cols-3 gap-3" aria-label="Earn">
-        {(
-          [
-            { tab: "offers" as DashboardTab, icon: Icons.grid("h-6 w-6"), label: "Offers" },
-            { tab: "surveys" as DashboardTab, icon: Icons.survey("h-6 w-6"), label: "Surveys" },
-            { tab: "playtime" as DashboardTab, icon: Icons.game("h-6 w-6"), label: "Playtime" },
-          ]
-        ).map((s) => (
+        {earnShortcuts.map((s) => (
           <button
             key={s.tab}
             type="button"
@@ -551,10 +616,11 @@ function DashboardHome({
             <span className="flex h-11 w-11 items-center justify-center rounded-xl bg-[var(--pill)] text-[var(--brand)]">
               {s.icon}
             </span>
-            <span className="text-sm font-bold">{s.label}</span>
+            <span className="text-sm font-bold">{tabLabel(controls, s.tab, s.label)}</span>
           </button>
         ))}
       </section>
+      )}
 
     </div>
   );
@@ -804,6 +870,7 @@ function ContentSection({
   kind,
   heading,
   includeSurveyWalls,
+  controls,
 }: {
   token: string;
   kind: "offerwall" | "survey" | "game";
@@ -816,6 +883,7 @@ function ContentSection({
    * the partners' own feeds.
    */
   includeSurveyWalls?: boolean;
+  controls: SiteControls;
 }) {
   const query = useQuery({
     queryKey: ["content", kind, token],
@@ -857,7 +925,7 @@ function ContentSection({
     query.isPending || (includeSurveyWalls === true && wallsQuery.isPending);
   return (
     <div>
-      {kind === "survey" && <CheckinBonus token={token} />}
+      {kind === "survey" && homeVisible(controls, "checkin") && <CheckinBonus token={token} />}
       <h1 className="font-display text-2xl font-extrabold sm:text-3xl">{heading ?? meta.title}</h1>
       <p className="mt-1 text-sm text-[var(--dim)]">
         Showing what's available for your account. This space fills as
@@ -898,7 +966,7 @@ type FeedGame = ApiResponse<typeof api, "listGameFeed">["games"][number];
  * minutes. There are NO partner cards and NO partner website links
  * here: tapping a survey card opens THAT survey directly.
  */
-function SurveysSection({ token }: { token: string }) {
+function SurveysSection({ token, controls }: { token: string; controls: SiteControls }) {
   // Surveys are matched per user AND per device by the panels, so
   // the visitor's device + user agent ride along (same as Games).
   // No popup here: tapping a survey card opens that survey
@@ -925,7 +993,7 @@ function SurveysSection({ token }: { token: string }) {
   const totalPotential = surveys.reduce((sum, s) => sum + s.payoutCents, 0);
   return (
     <div>
-      <CheckinBonus token={token} />
+      {homeVisible(controls, "checkin") && <CheckinBonus token={token} />}
       <h1 className="font-display text-2xl font-extrabold sm:text-3xl">Surveys</h1>
       <p className="mt-1 text-sm text-[var(--dim)]">
         The latest surveys matched to your account from every survey

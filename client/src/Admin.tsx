@@ -17,10 +17,17 @@ getSiteOrigin,
 setAdminToken,
 } from "./lib";
 import { Wordmark, goHome } from "./App";
+import {
+  SITE_CONTROL_HOME,
+  SITE_CONTROL_TABS,
+  defaultSiteControls,
+  normalizeSiteControls,
+  type SiteControls,
+} from "./siteControls";
 
 const FIELDS = actionFields<typeof Actions>();
 
-type AdminTab = "overview" | "users" | "stats" | "withdrawals" | "methods" | "content" | "inbox" | "livechat" | "notifications" | "announcements" | "countries" | "postbacks" | "callbacks" | "settings" | "redeem" | "deploy";
+type AdminTab = "overview" | "users" | "stats" | "withdrawals" | "methods" | "content" | "inbox" | "livechat" | "notifications" | "announcements" | "countries" | "postbacks" | "callbacks" | "settings" | "sitecontrols" | "redeem" | "deploy";
 
 const ADMIN_TABS: { id: AdminTab; label: string }[] = [
   { id: "overview", label: "Overview" },
@@ -37,6 +44,7 @@ const ADMIN_TABS: { id: AdminTab; label: string }[] = [
   { id: "postbacks", label: "Postbacks" },
   { id: "callbacks", label: "Partner Callbacks" },
   { id: "settings", label: "Settings" },
+  { id: "sitecontrols", label: "Site Controls" },
   { id: "redeem", label: "Redeem Codes" },
   { id: "deploy", label: "GitHub & Deploy" },
 ];
@@ -180,6 +188,7 @@ export function Admin() {
         {tab === "postbacks" && <PostbacksTab token={token} />}
         {tab === "callbacks" && <PartnerCallbacksTab token={token} />}
         {tab === "settings" && <SettingsTab token={token} />}
+        {tab === "sitecontrols" && <SiteControlsTab token={token} />}
         {tab === "redeem" && <RedeemCodesTab token={token} />}
         {tab === "deploy" && <DeployTab token={token} />}
 
@@ -1329,7 +1338,7 @@ const EMPTY_FORM: ContentForm = {
 
 function WithdrawMethodsTab({ token }: { token: string }) {
   const queryClient = useQueryClient();
-  const [countryCode, setCountryCode] = useState("");
+  const [countryCodes, setCountryCodes] = useState<string[]>([]);
   const [label, setLabel] = useState("");
   const [imageUrl, setImageUrl] = useState("");
   const [fieldLabels, setFieldLabels] = useState<string[]>([""]);
@@ -1355,7 +1364,6 @@ function WithdrawMethodsTab({ token }: { token: string }) {
 
   const add = useMutation({
     mutationFn: async () => {
-      const country = COUNTRIES.find((c) => c.code === countryCode);
       const usedKeys = new Set<string>();
       const fields = fieldLabels
         .map((f) => f.trim())
@@ -1374,21 +1382,33 @@ function WithdrawMethodsTab({ token }: { token: string }) {
         });
       return api.adminAddWithdrawMethod({
         adminToken: token,
-        countryCode,
-        countryName: country?.name ?? countryCode,
+        countryCodes: [...countryCodes],
         label: label.trim(),
         imageUrl: imageUrl.trim() || undefined,
         fields,
       });
     },
-    onSuccess: () => {
-      setNotice(
-        `"${label.trim()}" added — it now shows on the Withdraw page of every user from the picked country.`,
-      );
+    onSuccess: (data) => {
+      const added = data.ids.length;
+      const skipped = data.skipped ?? [];
+      const parts: string[] = [];
+      if (added > 0)
+        parts.push(
+          `"${label.trim()}" added to ${added} ${added === 1 ? "country" : "countries"} — it now shows on the Withdraw page of users from ${added === 1 ? "that country" : "those countries"}.`,
+        );
+      if (skipped.length > 0)
+        parts.push(
+          `Skipped: ${skipped.map((s) => `${s.countryName} — ${s.reason}`).join("; ")}`,
+        );
+      if (added === 0) setError(parts.join(" ") || "Nothing was added.");
+      else {
+        setNotice(parts.join(" "));
+        setError(null);
+      }
+      setCountryCodes([]);
       setLabel("");
       setImageUrl("");
       setFieldLabels([""]);
-      setError(null);
       invalidate();
     },
     onError: (e) => setError(e.message),
@@ -1491,8 +1511,8 @@ function WithdrawMethodsTab({ token }: { token: string }) {
   });
 
   const submit = () => {
-    if (!countryCode) {
-      setError("Pick a country first.");
+    if (countryCodes.length === 0) {
+      setError("Pick at least one country first.");
       return;
     }
     if (!label.trim()) {
@@ -1520,7 +1540,7 @@ function WithdrawMethodsTab({ token }: { token: string }) {
       <p className="mt-1 max-w-xl text-sm text-[var(--dim)]">
         Every withdraw method is listed on this page: the built-in methods
         for each country first, then the extra methods you add. Add a payment
-        method for a country and it appears on the Withdraw page of{" "}
+        method for one or more countries and it appears on the Withdraw page of{" "}
         <strong className="text-[var(--text)]">every user whose login country is that country</strong>,
         next to that country's built-in methods.
       </p>
@@ -1534,21 +1554,60 @@ function WithdrawMethodsTab({ token }: { token: string }) {
       <section className="mt-5 rounded-2xl bg-[var(--surface)] p-4 ring-1 ring-[var(--border)] sm:p-5" aria-label="Add a withdraw method">
         <h2 className="font-display text-base font-extrabold">Add a method</h2>
         <div className="mt-3 grid gap-3 sm:grid-cols-2">
-          <div>
-            <label htmlFor="wm-country" className="text-sm font-semibold">Country</label>
-            <select
-              id="wm-country"
-              value={countryCode}
-              onChange={(e) => setCountryCode(e.target.value)}
-              className={inputCls}
-            >
-              <option value="">Pick a country…</option>
-              {COUNTRIES.map((c) => (
-                <option key={c.code} value={c.code}>
-                  {flagEmojiFor(c.code)} {c.name} ({c.code})
-                </option>
-              ))}
-            </select>
+          <div className="sm:col-span-2">
+            <p className="text-sm font-semibold">Countries</p>
+            <label className="mt-1 flex cursor-pointer items-center gap-2 text-sm font-semibold">
+              <input
+                type="checkbox"
+                checked={
+                  COUNTRIES.length > 0 &&
+                  countryCodes.length === COUNTRIES.length
+                }
+                onChange={(e) =>
+                  setCountryCodes(
+                    e.target.checked ? COUNTRIES.map((c) => c.code) : [],
+                  )
+                }
+                className="h-5 w-5 shrink-0 accent-[var(--brand)]"
+              />
+              Select all countries
+            </label>
+            <p className="mt-1 text-xs text-[var(--dim)]">
+              {countryCodes.length === 0
+                ? "No country selected yet — tick at least one."
+                : countryCodes.length === COUNTRIES.length
+                  ? `All ${COUNTRIES.length} countries selected.`
+                  : `${countryCodes.length} ${countryCodes.length === 1 ? "country" : "countries"} selected.`}
+            </p>
+            <div className="mt-2 max-h-64 overflow-y-auto rounded-xl ring-1 ring-[var(--border)]">
+              {COUNTRIES.map((c) => {
+                const on = countryCodes.includes(c.code);
+                return (
+                  <label
+                    key={c.code}
+                    className="flex cursor-pointer items-center gap-2 border-b border-[var(--border)] px-3 py-1.5 text-sm last:border-b-0 hover:bg-[var(--surface-2)]"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={on}
+                      aria-label={`${c.name} (${c.code})`}
+                      onChange={(e) =>
+                        setCountryCodes((prev) =>
+                          e.target.checked
+                            ? [...prev, c.code]
+                            : prev.filter((code) => code !== c.code),
+                        )
+                      }
+                      className="h-5 w-5 shrink-0 accent-[var(--brand)]"
+                    />
+                    <span>
+                      {flagEmojiFor(c.code)} {c.name}{" "}
+                      <span className="text-[var(--dim)]">({c.code})</span>
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
           </div>
           <div>
             <label htmlFor="wm-label" className="text-sm font-semibold">Method name</label>
@@ -1625,7 +1684,11 @@ function WithdrawMethodsTab({ token }: { token: string }) {
           onClick={submit}
           className="mt-4 rounded-full bg-[var(--brand)] px-6 py-2.5 text-sm font-bold text-white transition hover:bg-[var(--brand-deep)] disabled:opacity-60"
         >
-          {add.isPending ? "Adding…" : "Add method"}
+          {add.isPending
+            ? "Adding…"
+            : countryCodes.length > 1
+              ? `Add method to ${countryCodes.length} countries`
+              : "Add method"}
         </button>
       </section>
 
@@ -4981,6 +5044,315 @@ function SettingsTab({ token }: { token: string }) {
           {save.isPending ? "Saving…" : "Save settings"}
         </button>
       </form>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------- site controls
+// Owner order 2026-11-28: everything he used to do in GitHub should be
+// doable from the Admin panel. This tab controls the signed-in
+// dashboard itself — which sections show, what they are called, and
+// the owner's own menu links. Saved as one JSON setting
+// (site_controls_json) through adminUpdateSettings; it applies to
+// every user immediately, with no deploy. The Dashboard section
+// itself can be renamed but never hidden, or users would have nowhere
+// to land.
+function SiteControlsTab({ token }: { token: string }) {
+  const queryClient = useQueryClient();
+  const overview = useQuery({
+    queryKey: ["admin-overview", token],
+    queryFn: () => api.adminGetOverview({ adminToken: token }),
+  });
+  const s = overview.data?.settings;
+
+  const [tabRows, setTabRows] = useState<
+    { id: string; label: string; visible: boolean; canHide: boolean }[]
+  >([]);
+  const [homeRows, setHomeRows] = useState<
+    { id: string; label: string; visible: boolean }[]
+  >([]);
+  const [links, setLinks] = useState<{ id: string; label: string; url: string }[]>([]);
+  const [hydrated, setHydrated] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [okMsg, setOkMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (s && !hydrated) {
+      const c: SiteControls = normalizeSiteControls(s.siteControls);
+      setTabRows(
+        SITE_CONTROL_TABS.map((t) => ({
+          id: t.id,
+          label: c.tabs[t.id]?.label ?? t.label,
+          visible: c.tabs[t.id]?.visible ?? true,
+          canHide: t.canHide,
+        })),
+      );
+      setHomeRows(
+        SITE_CONTROL_HOME.map((h) => ({
+          id: h.id,
+          label: c.home[h.id]?.label ?? h.label,
+          visible: c.home[h.id]?.visible ?? true,
+        })),
+      );
+      setLinks(c.customLinks.map((l) => ({ ...l })));
+      setHydrated(true);
+    }
+  }, [s, hydrated]);
+
+  const buildConfig = (): SiteControls => ({
+    tabs: Object.fromEntries(
+      tabRows.map((r) => [
+        r.id,
+        {
+          visible: r.visible,
+          label:
+            r.label.trim() ||
+            SITE_CONTROL_TABS.find((t) => t.id === r.id)?.label ||
+            r.id,
+        },
+      ]),
+    ),
+    home: Object.fromEntries(
+      homeRows.map((r) => [
+        r.id,
+        {
+          visible: r.visible,
+          label:
+            r.label.trim() ||
+            SITE_CONTROL_HOME.find((h) => h.id === r.id)?.label ||
+            r.id,
+        },
+      ]),
+    ),
+    customLinks: links
+      .filter((l) => l.label.trim() !== "" && l.url.trim() !== "")
+      .map((l) => ({ id: l.id, label: l.label.trim(), url: l.url.trim() })),
+  });
+
+  const save = useMutation({
+    mutationFn: async (json: string) => {
+      // Custom links are validated here too — the server re-checks,
+      // but the owner should see which link is wrong.
+      for (const l of links) {
+        if (l.label.trim() === "" && l.url.trim() === "") continue;
+        if (l.label.trim() === "") throw new Error("Every custom link needs a name.");
+        if (!l.url.startsWith("http://") && !l.url.startsWith("https://"))
+          throw new Error(`"${l.label.trim()}": the link must start with https://.`);
+      }
+      return api.adminUpdateSettings({ adminToken: token, siteControlsJson: json });
+    },
+    onSuccess: () => {
+      setError(null);
+      setOkMsg("Site Controls saved. Every user sees the change right away — no deploy needed.");
+      void queryClient.invalidateQueries({ queryKey: ["admin-overview", token] });
+    },
+    onError: (e) => {
+      setOkMsg(null);
+      setError(e.message);
+    },
+  });
+
+  const reset = useMutation({
+    mutationFn: async () =>
+      api.adminUpdateSettings({ adminToken: token, siteControlsJson: "" }),
+    onSuccess: () => {
+      const d = defaultSiteControls();
+      setTabRows(
+        SITE_CONTROL_TABS.map((t) => ({
+          id: t.id,
+          label: d.tabs[t.id]?.label ?? t.label,
+          visible: true,
+          canHide: t.canHide,
+        })),
+      );
+      setHomeRows(
+        SITE_CONTROL_HOME.map((h) => ({
+          id: h.id,
+          label: d.home[h.id]?.label ?? h.label,
+          visible: true,
+        })),
+      );
+      setLinks([]);
+      setError(null);
+      setOkMsg("Site Controls reset to the built-in layout — every section visible with its normal name.");
+      void queryClient.invalidateQueries({ queryKey: ["admin-overview", token] });
+    },
+    onError: (e) => {
+      setOkMsg(null);
+      setError(e.message);
+    },
+  });
+
+  const fieldCls =
+    "w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 text-sm outline-none focus:border-[var(--brand)]";
+
+  if (overview.isPending) return <p className="text-sm text-[var(--dim)]">Loading…</p>;
+
+  return (
+    <div>
+      <h1 className="font-display text-2xl font-extrabold">Site Controls</h1>
+      <p className="mt-1 max-w-2xl text-sm leading-relaxed text-[var(--dim)]">
+        Control the signed-in dashboard itself from here — which sections
+        show, what they are called, and your own menu links. Saved
+        changes apply to every user right away; no GitHub, no deploy.
+        Hiding a section hides it for everyone — a user sitting on a
+        hidden section lands back on the Dashboard.
+      </p>
+      {error && (
+        <p role="alert" className="mt-3 text-sm font-medium text-red-600 dark:text-red-400">{error}</p>
+      )}
+      {okMsg && (
+        <p role="status" className="mt-3 text-sm font-medium text-[var(--brand-deep)] dark:text-[var(--brand)]">{okMsg}</p>
+      )}
+
+      <section className="mt-5 rounded-3xl bg-[var(--surface)] p-5 ring-1 ring-[var(--border)] sm:p-6">
+        <h2 className="font-display text-lg font-bold">Dashboard sections</h2>
+        <p className="mt-1 text-xs leading-relaxed text-[var(--dim)]">
+          The name is what users see in the menu and at the top of the page.
+          The Dashboard itself can be renamed but never hidden.
+        </p>
+        <div className="mt-4 space-y-2">
+          {tabRows.map((r, i) => (
+            <div key={r.id} className="flex flex-wrap items-center gap-3 rounded-2xl bg-[var(--surface-2)] px-3.5 py-3 ring-1 ring-[var(--border)]">
+              <label className="flex min-w-24 items-center gap-2 text-sm font-semibold">
+                <input
+                  type="checkbox"
+                  checked={r.visible}
+                  disabled={!r.canHide}
+                  onChange={(e) =>
+                    setTabRows((rows) =>
+                      rows.map((x, j) => (j === i ? { ...x, visible: e.target.checked } : x)),
+                    )
+                  }
+                  className="h-5 w-5 accent-[var(--brand)] disabled:opacity-40"
+                />
+                Show
+              </label>
+              <input
+                aria-label={`Name for ${r.id}`}
+                value={r.label}
+                onChange={(e) =>
+                  setTabRows((rows) =>
+                    rows.map((x, j) => (j === i ? { ...x, label: e.target.value } : x)),
+                  )
+                }
+                className={fieldCls + " min-w-40 flex-1"}
+                maxLength={30}
+              />
+              {!r.canHide && (
+                <span className="text-xs font-semibold text-[var(--dim)]">Always shown</span>
+              )}
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section className="mt-5 rounded-3xl bg-[var(--surface)] p-5 ring-1 ring-[var(--border)] sm:p-6">
+        <h2 className="font-display text-lg font-bold">Dashboard home blocks</h2>
+        <p className="mt-1 text-xs leading-relaxed text-[var(--dim)]">
+          The blocks on the Dashboard home tab. Weekly check-in sits at the
+          top of the Surveys tabs.
+        </p>
+        <div className="mt-4 space-y-2">
+          {homeRows.map((r, i) => (
+            <div key={r.id} className="flex flex-wrap items-center gap-3 rounded-2xl bg-[var(--surface-2)] px-3.5 py-3 ring-1 ring-[var(--border)]">
+              <label className="flex min-w-24 items-center gap-2 text-sm font-semibold">
+                <input
+                  type="checkbox"
+                  checked={r.visible}
+                  onChange={(e) =>
+                    setHomeRows((rows) =>
+                      rows.map((x, j) => (j === i ? { ...x, visible: e.target.checked } : x)),
+                    )
+                  }
+                  className="h-5 w-5 accent-[var(--brand)]"
+                />
+                Show
+              </label>
+              <span className="text-sm font-semibold">{r.label}</span>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section className="mt-5 rounded-3xl bg-[var(--surface)] p-5 ring-1 ring-[var(--border)] sm:p-6">
+        <h2 className="font-display text-lg font-bold">Custom menu links</h2>
+        <p className="mt-1 text-xs leading-relaxed text-[var(--dim)]">
+          Your own links in the menu — they open in a new tab for every
+          user, on desktop in the sidebar and on phones in All sections.
+          Leave a row empty to ignore it.
+        </p>
+        <div className="mt-4 space-y-2">
+          {links.map((l, i) => (
+            <div key={l.id} className="flex flex-wrap items-center gap-3 rounded-2xl bg-[var(--surface-2)] px-3.5 py-3 ring-1 ring-[var(--border)]">
+              <input
+                aria-label="Link name"
+                placeholder="Name — e.g. YouTube"
+                value={l.label}
+                onChange={(e) =>
+                  setLinks((rows) =>
+                    rows.map((x, j) => (j === i ? { ...x, label: e.target.value } : x)),
+                  )
+                }
+                className={fieldCls + " min-w-32 flex-1"}
+                maxLength={40}
+              />
+              <input
+                aria-label="Link address"
+                placeholder="https://…"
+                value={l.url}
+                onChange={(e) =>
+                  setLinks((rows) =>
+                    rows.map((x, j) => (j === i ? { ...x, url: e.target.value } : x)),
+                  )
+                }
+                className={fieldCls + " min-w-48 flex-[2]"}
+                maxLength={500}
+              />
+              <button
+                type="button"
+                aria-label={`Remove ${l.label || "link"}`}
+                onClick={() => setLinks((rows) => rows.filter((_, j) => j !== i))}
+                className="rounded-full bg-red-500/10 p-2 text-red-600 transition hover:bg-red-500/20 dark:text-red-400"
+              >
+                {Icons.trash("h-4 w-4")}
+              </button>
+            </div>
+          ))}
+        </div>
+        <button
+          type="button"
+          disabled={links.length >= 20}
+          onClick={() =>
+            setLinks((rows) => [
+              ...rows,
+              { id: `link_${Date.now().toString(36)}${rows.length}`, label: "", url: "" },
+            ])
+          }
+          className="mt-3 flex items-center gap-2 rounded-full bg-[var(--surface-2)] px-5 py-2.5 text-sm font-bold text-[var(--text)] ring-1 ring-[var(--border)] transition hover:ring-[var(--brand)] disabled:opacity-60"
+        >
+          {Icons.plus("h-4 w-4")} Add link
+        </button>
+      </section>
+
+      <div className="mt-5 flex flex-wrap gap-3">
+        <button
+          type="button"
+          disabled={save.isPending || reset.isPending}
+          onClick={() => { setError(null); setOkMsg(null); save.mutate(JSON.stringify(buildConfig())); }}
+          className="rounded-full bg-[var(--brand)] px-8 py-3 font-display text-base font-bold text-white transition hover:bg-[var(--brand-deep)] disabled:opacity-60"
+        >
+          {save.isPending ? "Saving…" : "Save Site Controls"}
+        </button>
+        <button
+          type="button"
+          disabled={save.isPending || reset.isPending}
+          onClick={() => { setError(null); setOkMsg(null); reset.mutate(); }}
+          className="rounded-full bg-[var(--surface)] px-6 py-3 font-display text-sm font-bold text-[var(--text)] ring-1 ring-[var(--border)] transition hover:ring-[var(--brand)] disabled:opacity-60"
+        >
+          {reset.isPending ? "Resetting…" : "Reset to defaults"}
+        </button>
+      </div>
     </div>
   );
 }
