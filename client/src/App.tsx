@@ -936,7 +936,7 @@ type StaticPageContent = { title: string; body: string[]; sections?: { heading: 
       {
         heading: "1. Who we are",
         body: [
-          "TapOne is a rewards website operated by Mohammed Ahmed. You can contact us about privacy at info@tapone.store or through Help inside your account.",
+          "TapOne is a rewards website. You can contact us about privacy at info@tapone.store or through Help inside your account.",
           "TapOne is the data controller for the personal data described in this policy. Our partner offerwalls and survey providers are separate controllers for the data they collect on their own pages, and their own privacy policies apply there.",
         ],
       },
