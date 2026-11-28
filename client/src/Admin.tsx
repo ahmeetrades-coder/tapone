@@ -3333,7 +3333,7 @@ const AUTH_METHOD_LABELS: Record<PartnerCallbackRow["authMethod"], string> = {
 
 const SIG_FORMAT_LABELS: Record<PartnerCallbackRow["sigFormat"], string> = {
   params: "sorted name=value pairs",
-  colon: "user:transaction:amount",   moonetix: "tx:user:reward:status",
+  colon: "user:transaction:amount",
   custom: "custom template",
 };
 
@@ -3357,8 +3357,7 @@ function partnerCallbackUrl(origin: string, p: {
     url += `&${p.secretParam}={secret}`;
   else if (p.authMethod !== "none" && p.secretParam)
     url += `&${p.secretParam}={signature}`;
-  if (p.sigFormat === "moonetix") url += "&status={status}&reward={reward}";
-  else if (p.statusParam) url += `&${p.statusParam}={status}`;
+  if (p.statusParam) url += `&${p.statusParam}={status}`;
   return url;
 }
 
@@ -3622,7 +3621,7 @@ function PartnerCallbacksTab({ token }: { token: string }) {
         the signature is the lowercase hex HMAC of every other parameter sorted by
         name and joined as <code className="font-semibold text-[var(--text)]">name=value&amp;name=value</code> —
         unless the partner signs the <em>user:transaction:amount</em> format instead
-        (Offerwall.GG does), in which case pick that format when you add it. Moonetix signs transaction, user, reward and status joined with colons, and a status 2 reversal never credits.
+        (Offerwall.GG does), in which case pick that format when you add it.
       </p>
 
       {error && (
@@ -3757,10 +3756,10 @@ function PartnerCallbacksTab({ token }: { token: string }) {
                       className={fieldCls}
                     >
                       <option value="params">Parameters — HMAC of sorted name=value&amp;name=value pairs</option>
-                      <option value="colon">User:transaction:amount — HMAC of &quot;{"{user}"}:{"{txn}"}:{"{payout}"}&quot; (Offerwall.GG)</option> <option value="moonetix">Transaction:user:reward:status — HMAC of &quot;{"{txn}"}:{"{user}"}:{"{reward}"}:{"{status}"}&quot; (Moonetix)</option>
+                      <option value="colon">User:transaction:amount — HMAC of &quot;{"{user}"}:{"{txn}"}:{"{payout}"}&quot; (Offerwall.GG)</option>
                       <option value="custom">Custom template — HMAC of a template you type below</option>
                     </select>
-                    <p className="mt-1 text-xs text-[var(--dim)]">Pick the one the partner&apos;s docs describe — Offerwall.GG signs the three values joined with colons. Moonetix signs transaction, user, reward and status joined with colons, and a status 2 reversal never credits. A new partner with a different order uses Custom template below — no code change needed.</p>
+                    <p className="mt-1 text-xs text-[var(--dim)]">Pick the one the partner&apos;s docs describe — Offerwall.GG signs the three values joined with colons. A new partner with a different order uses Custom template below — no code change needed.</p>
                     {form.sigFormat === "custom" && (
                       <div className="mt-3">
                         <label htmlFor="pc-sig-template" className="text-sm font-semibold">Signature template</label>
