@@ -86,6 +86,11 @@ const DEFAULT_SETTINGS: Record<string, string> = {
   // country's built-in set, so the owner can add/remove built-in
   // methods per country without a redeploy.
   withdraw_methods_json: "",
+  // Site Controls (owner order 2026-11-28, Admin → Site Controls):
+  // the whole dashboard layout config as JSON — which sections show,
+  // what they are called, and the owner's custom menu links. Empty =
+  // everything visible with its built-in name (see parseSiteControls).
+  site_controls_json: "",
 };
 
 async function getSettings(db: DB): Promise<Record<string, string>> {
@@ -202,6 +207,115 @@ function socialLinksFrom(settings: Record<string, string>) {
     active: s.active,
   })).filter((s) => s.url !== "");
 }
+
+// Site Controls — owner-managed dashboard sections (owner order
+// 2026-11-28: everything he used to do in GitHub should be doable
+// from the Admin panel). One JSON setting (`site_controls_json`):
+// { tabs: { <tabId>: { visible, label } }, home: { <id>: { visible,
+// label } }, customLinks: [{ id, label, url }] }. The dashboard reads
+// it from getPublicHome; the Admin panel edits it in the Site Controls
+// tab and saves it through adminUpdateSettings. Missing keys and bad
+// JSON fall back to "everything visible with its built-in name", so a
+// bad save can never hide the whole dashboard. Mirrors the lists in
+// client/src/siteControls.ts — keep the two in sync.
+const SITE_CONTROL_TABS: { id: string; label: string; canHide: boolean }[] = [
+  { id: "dashboard", label: "Dashboard", canHide: false },
+  { id: "offers", label: "Offers", canHide: true },
+  { id: "surveys", label: "Surveys", canHide: true },
+  { id: "playtime", label: "Playtime", canHide: true },
+  { id: "partners", label: "Surveys partners", canHide: true },
+  { id: "level", label: "Level & Privileges", canHide: true },
+  { id: "cashout", label: "Live Cashout", canHide: true },
+  { id: "contest", label: "Daily Contest", canHide: true },
+  { id: "affiliate-contest", label: "Affiliate Contest", canHide: true },
+  { id: "withdraw", label: "Withdraw", canHide: true },
+  { id: "invite", label: "Invite Friends", canHide: true },
+  { id: "history", label: "History", canHide: true },
+  { id: "profile", label: "Profile", canHide: true },
+  { id: "help", label: "Help", canHide: true },
+  { id: "contact", label: "Redeem Code", canHide: true },
+];
+
+const SITE_CONTROL_HOME: { id: string; label: string }[] = [
+  { id: "balance", label: "Balance" },
+  { id: "level", label: "Level progress" },
+  { id: "quickstats", label: "Quick stats" },
+  { id: "earn", label: "Earn shortcuts" },
+  { id: "checkin", label: "Weekly check-in" },
+];
+
+export type SiteControls = {
+  tabs: Record<string, { visible: boolean; label: string }>;
+  home: Record<string, { visible: boolean; label: string }>;
+  customLinks: { id: string; label: string; url: string }[];
+};
+
+function normalizeSiteControlSection(
+  raw: unknown,
+  fallbackLabel: string,
+  forceVisible: boolean,
+): { visible: boolean; label: string } {
+  const r = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const label =
+    typeof r.label === "string" && r.label.trim() !== ""
+      ? r.label.trim().slice(0, 30)
+      : fallbackLabel;
+  const visible = forceVisible ? true : r.visible !== false && r.visible !== 0;
+  return { visible, label };
+}
+
+// Full normalisation of a parsed Site Controls config: unknown tab/home
+// ids are dropped, missing ones are filled with their built-in values,
+// the Dashboard tab is forced visible, and custom links are capped at
+// 20 with a valid http(s) URL and a unique id.
+function normalizeSiteControlsConfig(raw: unknown): SiteControls {
+  const out: SiteControls = { tabs: {}, home: {}, customLinks: [] };
+  const r = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const tabsRaw = (r.tabs && typeof r.tabs === "object" ? r.tabs : {}) as Record<string, unknown>;
+  for (const t of SITE_CONTROL_TABS)
+    out.tabs[t.id] = normalizeSiteControlSection(tabsRaw[t.id], t.label, !t.canHide);
+  const homeRaw = (r.home && typeof r.home === "object" ? r.home : {}) as Record<string, unknown>;
+  for (const s of SITE_CONTROL_HOME)
+    out.home[s.id] = normalizeSiteControlSection(homeRaw[s.id], s.label, false);
+  const linksRaw = Array.isArray(r.customLinks) ? r.customLinks : [];
+  const seen = new Set<string>();
+  for (const entry of linksRaw.slice(0, 20)) {
+    if (!entry || typeof entry !== "object") continue;
+    const e = entry as Record<string, unknown>;
+    const label = typeof e.label === "string" ? e.label.trim().slice(0, 40) : "";
+    const url = typeof e.url === "string" ? e.url.trim().slice(0, 500) : "";
+    if (!label) continue;
+    if (!url.startsWith("http://") && !url.startsWith("https://")) continue;
+    let id = typeof e.id === "string" ? e.id.trim().slice(0, 40) : "";
+    if (!id || seen.has(id)) id = `link_${randomCode(6).toLowerCase()}`;
+    seen.add(id);
+    out.customLinks.push({ id, label, url });
+  }
+  return out;
+}
+
+function parseSiteControls(settings: Record<string, string>): SiteControls {
+  const raw = (settings["site_controls_json"] ?? "").trim();
+  if (raw === "") return normalizeSiteControlsConfig({});
+  try {
+    return normalizeSiteControlsConfig(JSON.parse(raw));
+  } catch {
+    return normalizeSiteControlsConfig({});
+  }
+}
+
+const siteControlsSectionShape = z.object({
+  visible: z.boolean(),
+  label: z.string(),
+});
+
+const siteControlsShape = z.object({
+  tabs: z.record(z.string(), siteControlsSectionShape),
+  home: z.record(z.string(), siteControlsSectionShape),
+  customLinks: z.array(
+    z.object({ id: z.string(), label: z.string(), url: z.string() }),
+  ),
+});
 
 function settingInt(settings: Record<string, string>, key: string): number {
   const n = Number.parseInt(settings[key] ?? "0", 10);
@@ -3813,6 +3927,11 @@ export const Actions = {
           active: z.number(),
         }),
       ),
+      // Site Controls (Admin → Site Controls): which dashboard
+      // sections show, what they are called, and the owner's custom
+      // menu links. Public by design — it only says which sections
+      // are visible, and users see that anyway.
+      siteControls: siteControlsShape,
       recentPayouts: z.array(
         z.object({
           name: z.string(),
@@ -3870,6 +3989,7 @@ export const Actions = {
         },
         minWithdrawCents: settingInt(settings, "min_withdraw_cents"),
         socialLinks: socialLinksFrom(settings),
+        siteControls: parseSiteControls(settings),
         recentPayouts: payouts.map((p) => ({
           name: p.name.split(" ")[0] ?? p.name,
           amountCents: p.amountCents,
@@ -7084,6 +7204,9 @@ export const Actions = {
             active: z.number(),
           }),
         ),
+        // Site Controls (Admin → Site Controls): the dashboard layout
+        // config — section visibility, names, custom menu links.
+        siteControls: siteControlsShape,
       }),
     }),
     async handler(ctx, args) {
@@ -7158,6 +7281,7 @@ export const Actions = {
             SOCIAL_PLATFORMS.map((s) => [s.id, settings[s.key] ?? ""]),
           ),
           socialLinksList: parseSocialLinks(settings),
+          siteControls: parseSiteControls(settings),
         },
       };
     },
@@ -7621,11 +7745,16 @@ export const Actions = {
 
   adminAddWithdrawMethod: defineAction({
     description:
-      "Adds a new withdraw payment method for one country, with an optional logo image link shown next to its name on the Withdraw page. It appears for every user whose locked country matches, next to the built-in methods. The fields are the details the user must fill in when withdrawing with it.",
+      "Adds a new withdraw payment method for one or more countries, with an optional logo image link shown next to its name on the Withdraw page. It appears for every user whose locked country matches, next to the built-in methods. Pass countryCodes to add it to several countries at once (one row per country); pass the single countryCode/countryName as before to add it to just one country. A country where the name already exists — as a built-in method or as an active custom method — is skipped and reported in `skipped` instead of failing the whole add. The fields are the details the user must fill in when withdrawing with it.",
     request: z.object({
       adminToken: z.string().min(1).max(200),
-      countryCode: z.string().trim().regex(/^[A-Za-z]{2}$/),
-      countryName: z.string().trim().min(1).max(80),
+      countryCode: z.string().trim().regex(/^[A-Za-z]{2}$/).optional(),
+      countryName: z.string().trim().min(1).max(80).optional(),
+      countryCodes: z
+        .array(z.string().trim().regex(/^[A-Za-z]{2}$/))
+        .min(1)
+        .max(300)
+        .optional(),
       label: z.string().trim().min(1).max(60),
       imageUrl: z.string().trim().max(1000).optional(),
       fields: z
@@ -7638,52 +7767,118 @@ export const Actions = {
         .min(1)
         .max(5),
     }),
-    response: z.object({ id: z.number() }),
+    response: z.object({
+      ids: z.array(z.number()),
+      skipped: z.array(
+        z.object({
+          countryCode: z.string(),
+          countryName: z.string(),
+          reason: z.string(),
+        }),
+      ),
+      // First created id, kept so older callers reading `id` keep working.
+      id: z.number().optional(),
+    }),
     async handler(ctx, args) {
       await requireAdmin(ctx, args.adminToken);
       const db = ctx.db<typeof schema>();
-      const code = args.countryCode.toUpperCase();
-      // A custom method must not shadow a built-in method of that
-      // country (same name would confuse users and the merge dedupes).
-      const builtinLabels = new Set(
-        methodsForCountry(code, await getSettings(db)).map((m) =>
-          m.label.toLowerCase(),
-        ),
-      );
-      if (builtinLabels.has(args.label.toLowerCase()))
-        throw new Error(
-          `"${args.label}" is already a built-in method for ${args.countryName}. Pick a different name.`,
-        );
-      const existing = await db
-        .select()
-        .from(schema.withdrawMethods)
-        .where(
-          and(
-            eq(schema.withdrawMethods.countryCode, code),
-            eq(schema.withdrawMethods.active, 1),
+      const label = args.label.trim();
+      const imageUrl = args.imageUrl?.trim() ? args.imageUrl.trim() : null;
+      // Target countries: multi mode (countryCodes — one row per country)
+      // or the original single-country mode (countryCode + countryName).
+      let display: Intl.DisplayNames | null = null;
+      try {
+        display = new Intl.DisplayNames(["en"], { type: "region" });
+      } catch {
+        display = null;
+      }
+      const targets: { code: string; name: string }[] = [];
+      if (args.countryCodes && args.countryCodes.length > 0) {
+        const seen = new Set<string>();
+        for (const raw of args.countryCodes) {
+          const code = raw.toUpperCase();
+          if (seen.has(code)) continue;
+          seen.add(code);
+          targets.push({ code, name: display?.of(code) ?? code });
+        }
+      } else if (args.countryCode) {
+        targets.push({
+          code: args.countryCode.toUpperCase(),
+          name: args.countryName?.trim() || args.countryCode.toUpperCase(),
+        });
+      } else {
+        throw new Error("Pick at least one country.");
+      }
+      const multi = args.countryCodes != null;
+      const settings = await getSettings(db);
+      const ids: number[] = [];
+      const skipped: {
+        countryCode: string;
+        countryName: string;
+        reason: string;
+      }[] = [];
+      for (const target of targets) {
+        // A custom method must not shadow a built-in method of that
+        // country (same name would confuse users and the merge dedupes).
+        const builtinLabels = new Set(
+          methodsForCountry(target.code, settings).map((m) =>
+            m.label.toLowerCase(),
           ),
         );
-      if (
-        existing.some((r) => r.label.toLowerCase() === args.label.toLowerCase())
-      )
-        throw new Error(
-          `"${args.label}" already exists for ${args.countryName}.`,
-        );
-      const inserted = await db
-        .insert(schema.withdrawMethods)
-        .values({
-          countryCode: code,
-          countryName: args.countryName,
-          label: args.label,
-          imageUrl: args.imageUrl?.trim() ? args.imageUrl.trim() : null,
-          fieldsJson: JSON.stringify(args.fields),
-          active: 1,
-        })
-        .returning({ id: schema.withdrawMethods.id });
-      const row = inserted[0];
-      if (!row) throw new Error("The method could not be saved.");
+        if (builtinLabels.has(label.toLowerCase())) {
+          const reason = `"${label}" is already a built-in method for ${target.name}.`;
+          if (multi) {
+            skipped.push({
+              countryCode: target.code,
+              countryName: target.name,
+              reason,
+            });
+            continue;
+          }
+          throw new Error(`${reason} Pick a different name.`);
+        }
+        const existing = await db
+          .select()
+          .from(schema.withdrawMethods)
+          .where(
+            and(
+              eq(schema.withdrawMethods.countryCode, target.code),
+              eq(schema.withdrawMethods.active, 1),
+            ),
+          );
+        if (
+          existing.some(
+            (r) => r.label.toLowerCase() === label.toLowerCase(),
+          )
+        ) {
+          const reason = `"${label}" already exists for ${target.name}.`;
+          if (multi) {
+            skipped.push({
+              countryCode: target.code,
+              countryName: target.name,
+              reason,
+            });
+            continue;
+          }
+          throw new Error(reason);
+        }
+        const inserted = await db
+          .insert(schema.withdrawMethods)
+          .values({
+            countryCode: target.code,
+            countryName: target.name,
+            label,
+            imageUrl,
+            fieldsJson: JSON.stringify(args.fields),
+            active: 1,
+          })
+          .returning({ id: schema.withdrawMethods.id });
+        const row = inserted[0];
+        if (!row) throw new Error("The method could not be saved.");
+        ids.push(row.id);
+      }
       ctx.invalidateQueries();
-      return { id: row.id };
+      return { ids, skipped, id: ids[0] };
     },
   }),
 
@@ -9048,7 +9243,7 @@ export const Actions = {
 
   adminUpdateSettings: defineAction({
     description:
-      "Updates site settings: Google client ID, minimum withdrawal, revenue share, affiliate rates, postback secret, TheoremReach secret key, the weekly check-in goal + 7 day rewards, the level pace and title table, the Daily Contest total prize pool, the Affiliate Contest total prize pool, and the admin username/password.",
+      "Updates site settings: Google client ID, minimum withdrawal, revenue share, affiliate rates, postback secret, TheoremReach secret key, the weekly check-in goal + 7 day rewards, the level pace and title table, the Daily Contest total prize pool, the Affiliate Contest total prize pool, the admin username/password, and the Site Controls layout (section visibility, names, custom links).",
     request: z.object({
       adminToken: z.string().min(1).max(200),
       googleClientId: z.string().trim().max(300).optional(),
@@ -9098,6 +9293,11 @@ export const Actions = {
       // Settings editor sends this instead of the fixed per-platform
       // fields above. Validated and stored as `social_links_json`.
       socialLinksJson: z.string().max(20000).optional(),
+      // The whole Site Controls config as JSON (see parseSiteControls):
+      // per-section show/hide + names and the custom menu links.
+      // Validated and stored as `site_controls_json`. An empty string
+      // resets everything to the built-in layout.
+      siteControlsJson: z.string().max(20000).optional(),
       adminUsername: z.string().trim().min(3).max(80).optional(),
       adminPassword: z.string().min(6).max(200).optional(),
     }),
@@ -9200,6 +9400,25 @@ export const Actions = {
             throw new Error(`"${link.label}": the image link must start with https://.`);
         }
         updates.push(["social_links_json", JSON.stringify(parsed)]);
+      }
+      if (args.siteControlsJson !== undefined) {
+        // Validate the whole config before storing anything: a bad
+        // save must never hide the whole dashboard for every user.
+        // An empty string resets to the built-in layout.
+        if (args.siteControlsJson.trim() === "") {
+          updates.push(["site_controls_json", ""]);
+        } else {
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(args.siteControlsJson);
+          } catch {
+            throw new Error("Site Controls could not be saved — the layout is not valid.");
+          }
+          updates.push([
+            "site_controls_json",
+            JSON.stringify(normalizeSiteControlsConfig(parsed)),
+          ]);
+        }
       }
       if (args.adminUsername !== undefined)
         updates.push(["admin_username", args.adminUsername]);
