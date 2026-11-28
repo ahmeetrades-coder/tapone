@@ -204,6 +204,7 @@ export const transactions = sqliteTable("transactions", {
       "admin_adjust",
       "checkin_bonus",
       "contest_prize",
+      "affiliate_contest_prize",
       "level_reward",
       "redeem_code",
     ],
@@ -564,6 +565,50 @@ export const dailyContestSettlements = sqliteTable(
     dayKey: text("day_key").notNull(),
     totalCents: integer("total_cents").notNull().default(0),
     winnersJson: text("winners_json").notNull().default("[]"),
+    createdAt: integer("created_at", { mode: "timestamp_ms" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+);
+
+// affiliateContestSettlements — one row per settled week of the NEW
+// Affiliate Contest (owner-approved 2026-11-28). week_key is the UTC
+// Monday that starts the week ("YYYY-MM-DD"); the UNIQUE index on it
+// is the idempotency key — a week can be settled at most once, so a
+// redeploy or a repeated settle call can never double-pay.
+// winners_json is the settled ladder
+// [{ userId, rank, validInvites, prizeCents }] (the audit trail; each
+// prize is also a transactions row of kind
+// "affiliate_contest_prize" so it shows in the winner's History).
+export const affiliateContestSettlements = sqliteTable(
+  "affiliate_contest_settlements",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    weekKey: text("week_key").notNull(),
+    totalCents: integer("total_cents").notNull().default(0),
+    winnersJson: text("winners_json").notNull().default("[]"),
+    createdAt: integer("created_at", { mode: "timestamp_ms" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+);
+
+// affiliateWithdrawalCommissions — one row per referral commission
+// paid on an approved withdrawal (owner-approved 2026-11-28: the
+// inviter earns 8% of an invitee's FIRST approved withdrawal and 5%
+// of every later approved withdrawal, for life). withdrawal_id is
+// UNIQUE — the idempotency key: an approved withdrawal can pay its
+// inviter at most once, so a retry or a repeated approve can never
+// double-pay.
+export const affiliateWithdrawalCommissions = sqliteTable(
+  "affiliate_withdrawal_commissions",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    withdrawalId: integer("withdrawal_id").notNull(),
+    referrerId: integer("referrer_id").notNull(),
+    inviteeId: integer("invitee_id").notNull(),
+    pct: integer("pct").notNull(),
+    commissionCents: integer("commission_cents").notNull(),
     createdAt: integer("created_at", { mode: "timestamp_ms" })
       .notNull()
       .$defaultFn(() => new Date()),

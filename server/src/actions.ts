@@ -31,6 +31,13 @@ const DEFAULT_SETTINGS: Record<string, string> = {
   admin_password: "tapone-admin-2026",
   min_withdraw_cents: "500",
   user_share_pct: "70",
+  // Affiliate commissions (owner order 2026-11-28 — withdrawal-based,
+  // REPLACES the old 8%-of-earnings model): affiliate_earning_pct is
+  // the inviter's % of an invitee's FIRST approved withdrawal
+  // (default 8); affiliate_spending_pct is the inviter's % of EVERY
+  // later approved withdrawal, for life (default 5). The keys keep
+  // their old names so saved admin values keep working — only their
+  // meaning changed, and the Admin labels say the new meaning.
   affiliate_earning_pct: "8",
   affiliate_spending_pct: "5",
   postback_secret: "",
@@ -67,6 +74,11 @@ const DEFAULT_SETTINGS: Record<string, string> = {
   // Default $20.00. The owner can lower or raise it; the ladder
   // below rescales proportionally (dailyContestLadder).
   daily_contest_total_cents: "2000",
+  // Affiliate Contest (owner-approved 2026-11-28, Admin → Settings →
+  // Money): the total prize pool paid out every week, in cents.
+  // Default $50.00. The owner can lower or raise it; the ladder
+  // below rescales proportionally (affiliateContestLadder).
+  affiliate_contest_total_cents: "5000",
   // Built-in withdraw methods per country, as JSON
   // { "PK": ["easypaisa", ...], "DEFAULT": [...] } written from
   // Admin → Withdraw Methods. Empty = the built-in table in code
@@ -1442,8 +1454,10 @@ function shiftDayKey(dayKey: string, delta: number): string {
 // week of 7 days (shown M T W T F S S). There is NO claim button: a
 // day completes automatically the moment the user has earned $1 that
 // day — from ANY earning source: offers/surveys/games (offer_credit)
-// and invite-friend commissions (affiliate_earning /
-// affiliate_spending). The day's bonus is credited to the balance in
+// and invite-friend withdrawal commissions (affiliate_earning — 8%
+// of an invitee's first approved withdrawal, 5% of every later one;
+// the old affiliate_spending kind is retired and never credited any
+// more, but stays listed below so old rows keep parsing). The day's bonus is credited to the balance in
 // the same moment (the postback handler calls syncWeeklyCheckin right
 // after crediting, and getCheckin settles any missed day lazily).
 //
@@ -1913,6 +1927,387 @@ async function settleDueDailyContestsBestEffort(db: DB): Promise<void> {
   } catch {
     // The next read retries; the page must still load.
   }
+}
+
+// ------------------------------------------------- affiliate contest
+// AFFILIATE CONTEST (owner-approved 2026-11-28) — a weekly contest
+// for inviters, in the dashboard More / All-sections menu (never on
+// the public homepage), same shape as the Daily Contest above:
+//  - Week: Monday 00:00 UTC to Sunday 23:59 UTC. The dashboard
+//    shows a live countdown to the next Monday 00:00 UTC; at Monday
+//    the contest refreshes.
+//  - Ranking: each user's VALID invites during that UTC week, top 30
+//    only. An invite is valid when the invited user took their FIRST
+//    withdrawal and the admin approved it inside that week. Signups
+//    alone never count, and an invitee's later withdrawals never
+//    count again — one invitee can make their inviter count once,
+//    ever. Users with no valid invite never appear.
+//  - Prize pool: the owner's setting affiliate_contest_total_cents
+//    (default $50.00 = 5000 cents). The ladder below is the approved
+//    $50.00 split; any other total rescales it proportionally.
+//  - Settlement: when a UTC week ends, the top-30 prizes are credited
+//    IN FULL to the winners' balances (no 70/30 split). Settlement is
+//    lazy: it runs on the first dashboard / contest read after Monday
+//    (getDashboard, getAffiliateContest) and on the admin's Settle
+//    button, because this server has no cron. It is idempotent per
+//    week (see settleAffiliateContestWeek): a redeploy or a repeated
+//    call can never double-pay.
+//  - A prize is a transactions row of kind "affiliate_contest_prize",
+//    so it shows in the winner's History as "Affiliate Contest
+//    prize". It does NOT touch totalEarnedCents and never calls
+//    checkLevelUps — contest prizes do not move level progress.
+
+const AFFILIATE_CONTEST_MAX_RANK = 30;
+const AFFILIATE_CONTEST_DEFAULT_TOTAL_CENTS = 5000;
+
+// Owner-approved ladder at the $50.00 default total, rank 1..30 in
+// cents. Sums to exactly 5000: 1000+625+375+300+200, then 5×150,
+// 5×125, 5×100, 5×75, 5×50.
+const AFFILIATE_CONTEST_BASE_LADDER_CENTS: number[] = [
+  1000, 625, 375, 300, 200,
+  150, 150, 150, 150, 150,
+  125, 125, 125, 125, 125,
+  100, 100, 100, 100, 100,
+  75, 75, 75, 75, 75,
+  50, 50, 50, 50, 50,
+];
+
+interface AffiliateContestWinner {
+  userId: number;
+  rank: number;
+  validInvites: number;
+  prizeCents: number;
+}
+
+/** UTC Monday ("YYYY-MM-DD") of the week containing the given date. */
+function utcWeekKeyOf(d: Date): string {
+  const dow = d.getUTCDay(); // 0 = Sunday … 6 = Saturday
+  const sinceMonday = (dow + 6) % 7;
+  return utcDayKeyOf(
+    new Date(
+      Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - sinceMonday),
+    ),
+  );
+}
+
+/** The UTC week key `delta` weeks after `weekKey`. */
+function shiftUtcWeekKey(weekKey: string, delta: number): string {
+  return shiftUtcDayKey(weekKey, delta * 7);
+}
+
+/** Milliseconds since epoch of the next Monday 00:00 UTC after `now`. */
+function nextUtcMondayMs(now = new Date()): number {
+  return utcDayStartMs(shiftUtcWeekKey(utcWeekKeyOf(now), 1));
+}
+
+/** The owner's weekly prize pool, in cents (default $50.00). */
+function affiliateContestTotalFrom(settings: Record<string, string>): number {
+  const n = settingInt(settings, "affiliate_contest_total_cents");
+  return n >= 0 && n <= 100_000_000 ? n : AFFILIATE_CONTEST_DEFAULT_TOTAL_CENTS;
+}
+
+/**
+ * The prize ladder for a given pool total, rank 1..30 in cents.
+ * Each rung is the $50.00 base rung scaled by total/5000 and rounded
+ * to cents; the rounding drift (at most a few cents either way) is
+ * put on rank 1, so the ladder ALWAYS sums to exactly totalCents —
+ * the site never pays a cent more or less than the owner's setting.
+ * A total of 0 pays nothing (all rungs 0).
+ */
+function affiliateContestLadder(totalCents: number): number[] {
+  if (totalCents <= 0)
+    return AFFILIATE_CONTEST_BASE_LADDER_CENTS.map(() => 0);
+  const scaled = AFFILIATE_CONTEST_BASE_LADDER_CENTS.map((c) =>
+    Math.round((c * totalCents) / AFFILIATE_CONTEST_DEFAULT_TOTAL_CENTS),
+  );
+  const drift = totalCents - scaled.reduce((s, c) => s + c, 0);
+  scaled[0] = (scaled[0] ?? 0) + drift;
+  return scaled;
+}
+
+/**
+ * Top-30 standings for one UTC week: userId + VALID invites in
+ * [week Monday 00:00 UTC, next Monday 00:00 UTC), highest first.
+ * Valid = an invited user whose FIRST approved withdrawal was
+ * decided inside that week. Only users with at least one valid
+ * invite appear.
+ */
+async function affiliateContestStandings(
+  db: DB,
+  weekKey: string,
+): Promise<{ userId: number; validInvites: number }[]> {
+  const start = new Date(utcDayStartMs(weekKey));
+  const end = new Date(utcDayStartMs(weekKey) + 7 * 86400000);
+  // Every user who was invited by someone (old and new signups —
+  // the link is stored at sign-up, so old invitees count too).
+  const allUsers = await db
+    .select({ id: schema.users.id, referredById: schema.users.referredById })
+    .from(schema.users);
+  const invitees = allUsers.filter(
+    (u): u is { id: number; referredById: number } => u.referredById != null,
+  );
+  if (invitees.length === 0) return [];
+  const referrerByInvitee = new Map(
+    invitees.map((u) => [u.id, u.referredById]),
+  );
+  // Every approved withdrawal of an invitee — the earliest decided
+  // one is that invitee's first withdrawal.
+  const approved = await db
+    .select({
+      userId: schema.withdrawals.userId,
+      decidedAt: schema.withdrawals.decidedAt,
+      createdAt: schema.withdrawals.createdAt,
+    })
+    .from(schema.withdrawals)
+    .where(
+      and(
+        eq(schema.withdrawals.status, "approved"),
+        inArray(
+          schema.withdrawals.userId,
+          invitees.map((u) => u.id),
+        ),
+      ),
+    )
+    .limit(10000);
+  const firstAt = new Map<number, Date>();
+  for (const w of approved) {
+    const at = w.decidedAt ?? w.createdAt;
+    const prev = firstAt.get(w.userId);
+    if (!prev || at < prev) firstAt.set(w.userId, at);
+  }
+  const counts = new Map<number, number>();
+  for (const [inviteeId, at] of firstAt) {
+    if (at >= start && at < end) {
+      const ref = referrerByInvitee.get(inviteeId);
+      if (ref != null) counts.set(ref, (counts.get(ref) ?? 0) + 1);
+    }
+  }
+  return [...counts.entries()]
+    .map(([userId, validInvites]) => ({ userId, validInvites }))
+    .sort((a, b) => b.validInvites - a.validInvites)
+    .slice(0, AFFILIATE_CONTEST_MAX_RANK);
+}
+
+/**
+ * Settle one finished UTC week: credit the top-30 prizes in full.
+ * IDEMPOTENT — the settlement row (UNIQUE week_key) is inserted FIRST
+ * with onConflictDoNothing; if it already exists (or another request
+ * won the race) nothing is paid again. Returns settled:false when the
+ * week was already settled. Prizes are balance-only: totalEarnedCents
+ * is untouched and checkLevelUps is never called, so prizes do not
+ * move level progress. The total used is the owner's setting at
+ * settlement time.
+ */
+async function settleAffiliateContestWeek(
+  db: DB,
+  weekKey: string,
+  totalCents: number,
+): Promise<{
+  settled: boolean;
+  winners: AffiliateContestWinner[];
+  totalPaidCents: number;
+}> {
+  const existing = await db
+    .select()
+    .from(schema.affiliateContestSettlements)
+    .where(eq(schema.affiliateContestSettlements.weekKey, weekKey))
+    .limit(1);
+  if (existing.length > 0)
+    return { settled: false, winners: [], totalPaidCents: 0 };
+  const standings = await affiliateContestStandings(db, weekKey);
+  const ladder = affiliateContestLadder(totalCents);
+  const winners: AffiliateContestWinner[] = standings
+    .map((s, i) => ({
+      userId: s.userId,
+      rank: i + 1,
+      validInvites: s.validInvites,
+      prizeCents: ladder[i] ?? 0,
+    }))
+    .filter((w) => w.prizeCents > 0);
+  // Marker first: if a concurrent settle already inserted this week,
+  // onConflictDoNothing returns no row and we pay nothing.
+  const inserted = await db
+    .insert(schema.affiliateContestSettlements)
+    .values({
+      weekKey,
+      totalCents,
+      winnersJson: JSON.stringify(winners),
+    })
+    .onConflictDoNothing()
+    .returning();
+  if (inserted.length === 0)
+    return { settled: false, winners: [], totalPaidCents: 0 };
+  if (winners.length > 0) {
+    const users = await db
+      .select()
+      .from(schema.users)
+      .where(
+        inArray(
+          schema.users.id,
+          winners.map((w) => w.userId),
+        ),
+      );
+    const byId = new Map(users.map((u) => [u.id, u]));
+    const statements: BatchItem<"sqlite">[] = [];
+    for (const w of winners) {
+      const user = byId.get(w.userId);
+      if (!user) continue;
+      statements.push(
+        db
+          .update(schema.users)
+          .set({ balanceCents: user.balanceCents + w.prizeCents })
+          .where(eq(schema.users.id, w.userId)),
+        db.insert(schema.transactions).values({
+          userId: w.userId,
+          kind: "affiliate_contest_prize",
+          amountCents: w.prizeCents,
+          note: `Affiliate Contest prize — Rank #${w.rank} — week of ${weekKey}`,
+        }),
+      );
+    }
+    const [first, ...rest] = statements;
+    if (first) await db.batch([first, ...rest]);
+  }
+  return {
+    settled: true,
+    winners,
+    totalPaidCents: winners.reduce((s, w) => s + w.prizeCents, 0),
+  };
+}
+
+/**
+ * Settle every finished UTC week that is not settled yet, from the
+ * contest's start week (the first week this code ran — prizes are
+ * never paid for weeks before the feature existed) up to last week.
+ * The start week is recorded once in settings the first time this
+ * runs. Safe to call on any read: already-settled weeks are skipped,
+ * and a failure settles nothing — the next read retries.
+ */
+async function settleDueAffiliateContests(
+  db: DB,
+): Promise<{ settledWeeks: string[] }> {
+  const settings = await getSettings(db);
+  const totalCents = affiliateContestTotalFrom(settings);
+  const thisWeekKey = utcWeekKeyOf(new Date());
+  let startKey = (settings["affiliate_contest_start_week"] ?? "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(startKey)) {
+    startKey = thisWeekKey;
+    await db
+      .insert(schema.settings)
+      .values({ key: "affiliate_contest_start_week", value: startKey })
+      .onConflictDoNothing();
+  }
+  const settledWeeks: string[] = [];
+  let week = startKey;
+  let guard = 0;
+  while (week < thisWeekKey && guard++ < 53) {
+    const r = await settleAffiliateContestWeek(db, week, totalCents);
+    if (r.settled) settledWeeks.push(week);
+    week = shiftUtcWeekKey(week, 1);
+  }
+  return { settledWeeks };
+}
+
+/** Settle due weeks, but never let a settlement failure break a read. */
+async function settleDueAffiliateContestsBestEffort(db: DB): Promise<void> {
+  try {
+    await settleDueAffiliateContests(db);
+  } catch {
+    // The next read retries; the page must still load.
+  }
+}
+
+// ------------------------------------------- referral withdrawal commission
+// REFERRAL COMMISSION ON WITHDRAWALS (owner order 2026-11-28 — the
+// ONLY affiliate commission now; the old 8%-of-earnings credit in
+// applyRewardCredit is removed). When the admin approves a withdrawal:
+//   - the invitee's FIRST approved withdrawal ever → the inviter gets
+//     8% of the withdrawal amount (setting affiliate_earning_pct);
+//   - EVERY later approved withdrawal → the inviter gets 5% of the
+//     amount, for life (setting affiliate_spending_pct).
+// "First" means the invitee has NO other approved withdrawal in the
+// DB — so an OLD user who never withdrew yet still earns their
+// inviter 8% on their first withdrawal after this patch, and an old
+// user who already withdrew gets 5% onward. Rejected withdrawals pay
+// nothing. The commission is a transactions row of kind
+// "affiliate_earning" with refId = the invitee, so it shows in the
+// inviter's History and in Invite Friends per referral, and it counts
+// toward the inviter's level and weekly check-in like the old
+// commission did. IDEMPOTENT: the marker row in
+// affiliateWithdrawalCommissions (UNIQUE withdrawal_id) is inserted
+// FIRST with onConflictDoNothing — a withdrawal pays its inviter at
+// most once, ever.
+async function creditReferralWithdrawalCommission(
+  db: DB,
+  w: typeof schema.withdrawals.$inferSelect,
+): Promise<void> {
+  const userRows = await db
+    .select()
+    .from(schema.users)
+    .where(eq(schema.users.id, w.userId))
+    .limit(1);
+  const user = userRows[0];
+  if (!user || user.referredById == null) return;
+  const settings = await getSettings(db);
+  const firstPct = settingInt(settings, "affiliate_earning_pct");
+  const lifetimePct = settingInt(settings, "affiliate_spending_pct");
+  // Any OTHER approved withdrawal for this user? (This withdrawal is
+  // already approved in the DB by the time this runs, so exclude it.)
+  const prior = await db
+    .select({ id: schema.withdrawals.id })
+    .from(schema.withdrawals)
+    .where(
+      and(
+        eq(schema.withdrawals.userId, w.userId),
+        eq(schema.withdrawals.status, "approved"),
+        ne(schema.withdrawals.id, w.id),
+      ),
+    )
+    .limit(1);
+  const isFirst = prior.length === 0;
+  const pct = isFirst ? firstPct : lifetimePct;
+  if (pct <= 0) return;
+  const commission = Math.round((w.amountCents * pct) / 100);
+  if (commission <= 0) return;
+  const referrers = await db
+    .select()
+    .from(schema.users)
+    .where(eq(schema.users.id, user.referredById))
+    .limit(1);
+  const referrer = referrers[0];
+  if (!referrer) return;
+  // Marker first: if this withdrawal already paid its commission,
+  // onConflictDoNothing returns no row and we pay nothing.
+  const inserted = await db
+    .insert(schema.affiliateWithdrawalCommissions)
+    .values({
+      withdrawalId: w.id,
+      referrerId: referrer.id,
+      inviteeId: user.id,
+      pct,
+      commissionCents: commission,
+    })
+    .onConflictDoNothing()
+    .returning();
+  if (inserted.length === 0) return;
+  await db.batch([
+    db
+      .update(schema.users)
+      .set({
+        balanceCents: referrer.balanceCents + commission,
+        totalEarnedCents: referrer.totalEarnedCents + commission,
+      })
+      .where(eq(schema.users.id, referrer.id)),
+    db.insert(schema.transactions).values({
+      userId: referrer.id,
+      kind: "affiliate_earning",
+      amountCents: commission,
+      note: `Referral commission — ${pct}% of ${user.name.split(" ")[0] ?? "your referral"}'s ${isFirst ? "first " : ""}withdrawal of $${(w.amountCents / 100).toFixed(2)}`,
+      refId: user.id,
+    }),
+  ]);
+  await checkLevelUps(db, referrer.id);
+  await syncWeeklyCheckin(db, referrer.id);
 }
 
 const SURVEY_NETWORK_HINTS = ["survey", "cpx", "bitlabs", "theorem", "cherries", "prime opinion", "prime"];
@@ -3174,46 +3569,21 @@ async function applyRewardCredit(
       note: opts.note,
     }),
   ];
-  if (user.referredById != null && creditedCents > 0) {
-    const pct = settingInt(settings, "affiliate_earning_pct");
-    const commission = Math.round(creditedCents * (pct / 100));
-    if (commission > 0) {
-      const referrers = await db
-        .select()
-        .from(schema.users)
-        .where(eq(schema.users.id, user.referredById))
-        .limit(1);
-      const referrer = referrers[0];
-      if (referrer) {
-        statements.push(
-          db
-            .update(schema.users)
-            .set({
-              balanceCents: referrer.balanceCents + commission,
-              totalEarnedCents: referrer.totalEarnedCents + commission,
-            })
-            .where(eq(schema.users.id, referrer.id)),
-          db.insert(schema.transactions).values({
-            userId: referrer.id,
-            kind: "affiliate_earning",
-            amountCents: commission,
-            note: `Referral earning commission from ${user.name}`,
-            refId: user.id,
-          }),
-        );
-      }
-    }
-  }
+  // NO affiliate commission here any more (owner order 2026-11-28):
+  // the inviter no longer earns a % of the invitee's earnings. The
+  // commission is now withdrawal-based — 8% of the invitee's FIRST
+  // approved withdrawal, 5% of every later one, for life — and is
+  // paid by creditReferralWithdrawalCommission when the admin
+  // approves a withdrawal (adminDecideWithdrawal). Removing it here
+  // is what stops the inviter being paid twice.
   const [first, ...rest] = statements;
   if (first) await db.batch([first, ...rest]);
-  // Level-ups are real: pay any level rewards this credit unlocked,
-  // for the earner and for their referrer (commission counts too).
+  // Level-ups are real: pay any level rewards this credit unlocked
+  // for the earner.
   await checkLevelUps(db, user.id);
-  if (user.referredById != null) await checkLevelUps(db, user.referredById);
-  // Weekly check-in: this credit may have crossed someone's $1 daily
-  // goal — if so, that day's check-in bonus lands right now.
+  // Weekly check-in: this credit may have crossed the earner's $1
+  // daily goal — if so, that day's check-in bonus lands right now.
   await syncWeeklyCheckin(db, user.id);
-  if (user.referredById != null) await syncWeeklyCheckin(db, user.referredById);
   return creditedCents;
 }
 
@@ -4660,6 +5030,8 @@ export const Actions = {
       // opens the Contest tab. Best-effort — a settlement failure must
       // never break the dashboard.
       await settleDueDailyContestsBestEffort(db);
+      // Affiliate Contest: same, for finished UTC weeks.
+      await settleDueAffiliateContestsBestEffort(db);
       const pending = await db
         .select()
         .from(schema.withdrawals)
@@ -4861,17 +5233,18 @@ export const Actions = {
 
   getAffiliate: defineAction({
     description:
-      "The user's referral code, commission rates (8% earning / 5% spending), and the COMPLETE referral table: every user who signed up with this user's invite link (no limit, nothing hidden), each with their name, signup date, their own total earnings, and the total commission this user earned from that referral.",
+      "The user's referral code, the withdrawal commission rates (first withdrawal % / lifetime withdrawal %), and the COMPLETE referral table: every user who signed up with this user's invite link (no limit, nothing hidden — old and new signups), each with their name, signup date, whether they have taken their first withdrawal yet, their own total earnings, and the total commission this user earned from that referral.",
     request: z.object({ token: z.string().min(1).max(200) }),
     response: z.object({
       referralCode: z.string(),
-      earningPct: z.number(),
-      spendingPct: z.number(),
+      firstWithdrawalPct: z.number(),
+      lifetimePct: z.number(),
       totalCommissionCents: z.number(),
       referrals: z.array(
         z.object({
           name: z.string(),
           joinedAt: z.string(),
+          firstWithdrawalDone: z.boolean(),
           totalEarnedCents: z.number(),
           earnedForYouCents: z.number(),
         }),
@@ -4888,26 +5261,43 @@ export const Actions = {
         .from(schema.users)
         .where(eq(schema.users.referredById, user.id))
         .orderBy(desc(schema.users.id));
-      // All commission this user has ever received, of both kinds
-      // (earning + spending), attributed per referral via refId.
+      // All withdrawal commission this user has ever received,
+      // attributed per referral via refId (kind affiliate_earning —
+      // the withdrawal-based commission rows).
       const myTxns = await db
         .select()
         .from(schema.transactions)
         .where(eq(schema.transactions.userId, user.id))
         .limit(10000);
       const commissions = myTxns.filter(
-        (t) =>
-          t.kind === "affiliate_earning" || t.kind === "affiliate_spending",
+        (t) => t.kind === "affiliate_earning",
       );
       const perRef = new Map<number, number>();
       for (const t of commissions) {
         if (t.refId != null)
           perRef.set(t.refId, (perRef.get(t.refId) ?? 0) + t.amountCents);
       }
+      // First-withdrawal status per referral: has this invitee had ANY
+      // approved withdrawal yet? (Old and new invitees alike.)
+      const refIds = refs.map((r) => r.id);
+      const withdrawn = new Set<number>();
+      if (refIds.length > 0) {
+        const approved = await db
+          .select({ userId: schema.withdrawals.userId })
+          .from(schema.withdrawals)
+          .where(
+            and(
+              eq(schema.withdrawals.status, "approved"),
+              inArray(schema.withdrawals.userId, refIds),
+            ),
+          )
+          .limit(10000);
+        for (const w of approved) withdrawn.add(w.userId);
+      }
       return {
         referralCode: user.referralCode,
-        earningPct: settingInt(settings, "affiliate_earning_pct"),
-        spendingPct: settingInt(settings, "affiliate_spending_pct"),
+        firstWithdrawalPct: settingInt(settings, "affiliate_earning_pct"),
+        lifetimePct: settingInt(settings, "affiliate_spending_pct"),
         totalCommissionCents: commissions.reduce(
           (sum, t) => sum + t.amountCents,
           0,
@@ -4915,6 +5305,7 @@ export const Actions = {
         referrals: refs.map((r) => ({
           name: r.name,
           joinedAt: r.createdAt.toISOString(),
+          firstWithdrawalDone: withdrawn.has(r.id),
           totalEarnedCents: r.totalEarnedCents,
           earnedForYouCents: perRef.get(r.id) ?? 0,
         })),
@@ -5216,6 +5607,9 @@ export const Actions = {
       myRank: z.number().nullable(),
       myEarnedCents: z.number(),
       myPrizeCents: z.number(),
+      // Lifetime total earnings of the viewer — the $1 contest unlock
+      // gate reads this (see contestGate.ts). NOT today's earnings.
+      myLifetimeEarnedCents: z.number(),
       lastSettlement: z
         .object({
           dayKey: z.string(),
@@ -5281,6 +5675,7 @@ export const Actions = {
         myRank: mine?.rank ?? null,
         myEarnedCents: mine?.earnedCents ?? 0,
         myPrizeCents: mine?.prizeCents ?? 0,
+        myLifetimeEarnedCents: user.totalEarnedCents,
         lastSettlement,
       };
     },
@@ -5371,6 +5766,190 @@ export const Actions = {
       const r = await settleDueDailyContests(db);
       ctx.invalidateQueries();
       return { settledDays: r.settledDays };
+    },
+  }),
+
+  getAffiliateContest: defineAction({
+    description:
+      "The signed-in user's Affiliate Contest: this UTC week's standings (top 30 by valid invites — invitees whose first withdrawal was approved this week, signups alone never count), the prize ladder for the owner's current pool total, the live countdown target (next Monday 00:00 UTC), the user's own rank/valid invites/prize, and the most recent settled week. Settles any finished week first (lazy, idempotent — a week pays at most once).",
+    request: z.object({ token: z.string().min(1).max(200) }),
+    response: z.object({
+      weekKey: z.string(),
+      endsAt: z.string(),
+      totalCents: z.number(),
+      ladderCents: z.array(z.number()),
+      standings: z.array(
+        z.object({
+          rank: z.number(),
+          name: z.string(),
+          pictureUrl: z.string().nullable(),
+          validInvites: z.number(),
+          prizeCents: z.number(),
+          isMe: z.boolean(),
+        }),
+      ),
+      myRank: z.number().nullable(),
+      myValidInvites: z.number(),
+      myPrizeCents: z.number(),
+      // Lifetime total earnings of the viewer — the $1 contest unlock
+      // gate reads this (see contestGate.ts).
+      myLifetimeEarnedCents: z.number(),
+      lastSettlement: z
+        .object({
+          weekKey: z.string(),
+          totalCents: z.number(),
+          winners: z.number(),
+          totalPaidCents: z.number(),
+        })
+        .nullable(),
+    }),
+    async handler(ctx, args) {
+      const db = ctx.db<typeof schema>();
+      const user = await requireUser(ctx, args.token);
+      await settleDueAffiliateContestsBestEffort(db);
+      const settings = await getSettings(db);
+      const totalCents = affiliateContestTotalFrom(settings);
+      const weekKey = utcWeekKeyOf(new Date());
+      const standings = await affiliateContestStandings(db, weekKey);
+      const ladder = affiliateContestLadder(totalCents);
+      const ids = standings.map((s) => s.userId);
+      const users = ids.length
+        ? await db.select().from(schema.users).where(inArray(schema.users.id, ids))
+        : [];
+      const byId = new Map(users.map((u) => [u.id, u]));
+      const rows = standings.map((s, i) => {
+        const u = byId.get(s.userId);
+        return {
+          rank: i + 1,
+          name: (u?.name ?? "TapOne user").split(" ")[0] ?? "TapOne user",
+          pictureUrl: u?.pictureUrl ?? null,
+          validInvites: s.validInvites,
+          prizeCents: ladder[i] ?? 0,
+          isMe: s.userId === user.id,
+        };
+      });
+      const mine = rows.find((r) => r.isMe);
+      const last = await db
+        .select()
+        .from(schema.affiliateContestSettlements)
+        .orderBy(desc(schema.affiliateContestSettlements.id))
+        .limit(1);
+      const lastRow = last[0];
+      let lastSettlement: {
+        weekKey: string;
+        totalCents: number;
+        winners: number;
+        totalPaidCents: number;
+      } | null = null;
+      if (lastRow) {
+        const winners = JSON.parse(lastRow.winnersJson) as AffiliateContestWinner[];
+        lastSettlement = {
+          weekKey: lastRow.weekKey,
+          totalCents: lastRow.totalCents,
+          winners: winners.length,
+          totalPaidCents: winners.reduce((s, w) => s + w.prizeCents, 0),
+        };
+      }
+      return {
+        weekKey,
+        endsAt: new Date(nextUtcMondayMs()).toISOString(),
+        totalCents,
+        ladderCents: ladder,
+        standings: rows,
+        myRank: mine?.rank ?? null,
+        myValidInvites: mine?.validInvites ?? 0,
+        myPrizeCents: mine?.prizeCents ?? 0,
+        myLifetimeEarnedCents: user.totalEarnedCents,
+        lastSettlement,
+      };
+    },
+  }),
+
+  adminGetAffiliateContest: defineAction({
+    description:
+      "Admin view of the Affiliate Contest: this UTC week's standings, the prize ladder for the current pool total, the countdown target, and the recent settled weeks (week, pool total, winners, total paid). Settles any finished week first (lazy, idempotent).",
+    request: z.object({ adminToken: z.string().min(1).max(200) }),
+    response: z.object({
+      weekKey: z.string(),
+      endsAt: z.string(),
+      totalCents: z.number(),
+      ladderCents: z.array(z.number()),
+      standings: z.array(
+        z.object({
+          rank: z.number(),
+          name: z.string(),
+          pictureUrl: z.string().nullable(),
+          validInvites: z.number(),
+          prizeCents: z.number(),
+        }),
+      ),
+      settlements: z.array(
+        z.object({
+          weekKey: z.string(),
+          totalCents: z.number(),
+          winners: z.number(),
+          totalPaidCents: z.number(),
+        }),
+      ),
+    }),
+    async handler(ctx, args) {
+      await requireAdmin(ctx, args.adminToken);
+      const db = ctx.db<typeof schema>();
+      await settleDueAffiliateContestsBestEffort(db);
+      const settings = await getSettings(db);
+      const totalCents = affiliateContestTotalFrom(settings);
+      const weekKey = utcWeekKeyOf(new Date());
+      const standings = await affiliateContestStandings(db, weekKey);
+      const ladder = affiliateContestLadder(totalCents);
+      const ids = standings.map((s) => s.userId);
+      const users = ids.length
+        ? await db.select().from(schema.users).where(inArray(schema.users.id, ids))
+        : [];
+      const byId = new Map(users.map((u) => [u.id, u]));
+      const settled = await db
+        .select()
+        .from(schema.affiliateContestSettlements)
+        .orderBy(desc(schema.affiliateContestSettlements.id))
+        .limit(7);
+      return {
+        weekKey,
+        endsAt: new Date(nextUtcMondayMs()).toISOString(),
+        totalCents,
+        ladderCents: ladder,
+        standings: standings.map((s, i) => {
+          const u = byId.get(s.userId);
+          return {
+            rank: i + 1,
+            name: (u?.name ?? "TapOne user").split(" ")[0] ?? "TapOne user",
+            pictureUrl: u?.pictureUrl ?? null,
+            validInvites: s.validInvites,
+            prizeCents: ladder[i] ?? 0,
+          };
+        }),
+        settlements: settled.map((row) => {
+          const winners = JSON.parse(row.winnersJson) as AffiliateContestWinner[];
+          return {
+            weekKey: row.weekKey,
+            totalCents: row.totalCents,
+            winners: winners.length,
+            totalPaidCents: winners.reduce((s, w) => s + w.prizeCents, 0),
+          };
+        }),
+      };
+    },
+  }),
+
+  adminSettleAffiliateContest: defineAction({
+    description:
+      "Admin button: settle every finished Affiliate Contest week that is not settled yet. Idempotent — a week that already settled pays nothing again. Returns the weeks settled by this call.",
+    request: z.object({ adminToken: z.string().min(1).max(200) }),
+    response: z.object({ settledWeeks: z.array(z.string()) }),
+    async handler(ctx, args) {
+      await requireAdmin(ctx, args.adminToken);
+      const db = ctx.db<typeof schema>();
+      const r = await settleDueAffiliateContests(db);
+      ctx.invalidateQueries();
+      return { settledWeeks: r.settledWeeks };
     },
   }),
 
@@ -6478,6 +7057,7 @@ export const Actions = {
         checkinBonusCents: z.number(),
         levelRewardCents: z.number(),
         dailyContestTotalCents: z.number(),
+        affiliateContestTotalCents: z.number(),
         checkinGoalCents: z.number(),
         checkinRewardsCents: z.array(z.number()),
         levelCentsPerLevel: z.number(),
@@ -6563,6 +7143,7 @@ export const Actions = {
           checkinBonusCents: settingInt(settings, "checkin_bonus_cents"),
           levelRewardCents: settingInt(settings, "level_reward_cents"),
           dailyContestTotalCents: dailyContestTotalFrom(settings),
+          affiliateContestTotalCents: affiliateContestTotalFrom(settings),
           checkinGoalCents: checkinGoalFrom(settings),
           checkinRewardsCents: checkinRewardsFrom(settings),
           levelCentsPerLevel: levelConfigFrom(settings).centsPerLevel,
@@ -6873,6 +7454,14 @@ export const Actions = {
       }
       const [first, ...rest] = statements;
       if (first) await db.batch([first, ...rest]);
+      // Approved withdrawals pay the inviter: 8% of the invitee's
+      // FIRST approved withdrawal, 5% of every later one, for life
+      // (creditReferralWithdrawalCommission — idempotent per
+      // withdrawal, so this can never double-pay). Rejected
+      // withdrawals pay nothing.
+      if (args.decision === "approved") {
+        await creditReferralWithdrawalCommission(db, w);
+      }
       ctx.invalidateQueries();
       return { ok: true };
     },
@@ -8459,12 +9048,13 @@ export const Actions = {
 
   adminUpdateSettings: defineAction({
     description:
-      "Updates site settings: Google client ID, minimum withdrawal, revenue share, affiliate rates, postback secret, TheoremReach secret key, the weekly check-in goal + 7 day rewards, the level pace and title table, the Daily Contest total prize pool, and the admin username/password.",
+      "Updates site settings: Google client ID, minimum withdrawal, revenue share, affiliate rates, postback secret, TheoremReach secret key, the weekly check-in goal + 7 day rewards, the level pace and title table, the Daily Contest total prize pool, the Affiliate Contest total prize pool, and the admin username/password.",
     request: z.object({
       adminToken: z.string().min(1).max(200),
       googleClientId: z.string().trim().max(300).optional(),
       minWithdrawCents: z.number().int().nonnegative().max(100_000_000).optional(),
       dailyContestTotalCents: z.number().int().min(0).max(100_000_000).optional(),
+      affiliateContestTotalCents: z.number().int().min(0).max(100_000_000).optional(),
       userSharePct: z.number().int().min(1).max(100).optional(),
       affiliateEarningPct: z.number().int().min(0).max(100).optional(),
       affiliateSpendingPct: z.number().int().min(0).max(100).optional(),
@@ -8522,6 +9112,8 @@ export const Actions = {
         updates.push(["min_withdraw_cents", String(args.minWithdrawCents)]);
       if (args.dailyContestTotalCents !== undefined)
         updates.push(["daily_contest_total_cents", String(args.dailyContestTotalCents)]);
+      if (args.affiliateContestTotalCents !== undefined)
+        updates.push(["affiliate_contest_total_cents", String(args.affiliateContestTotalCents)]);
       if (args.userSharePct !== undefined)
         updates.push(["user_share_pct", String(args.userSharePct)]);
       if (args.affiliateEarningPct !== undefined)
