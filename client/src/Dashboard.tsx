@@ -1285,7 +1285,7 @@ function GameCard({
           <img
             src={item.imageUrl}
             alt={item.title}
-            className="h-full w-full scale-110 object-cover"
+            className="h-full w-full object-cover"
             loading="lazy"
             onError={() => setImgOk(false)}
           />
@@ -1344,7 +1344,7 @@ function FeedGameCard({
           <img
             src={art}
             alt={title}
-            className="h-full w-full scale-110 object-cover"
+            className="h-full w-full object-cover"
             loading="lazy"
             onError={() => setImgOk(false)}
           />
