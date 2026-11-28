@@ -15,7 +15,6 @@ export type DashboardTab =
   | "offers"
   | "surveys"
   | "playtime"
-  | "apps"
   | "partners"
   | "level"
   | "cashout"
@@ -33,10 +32,9 @@ const TABS: { id: DashboardTab; label: string; icon: (c?: string) => ReactNode }
   { id: "offers", label: "Offers", icon: Icons.grid },
   { id: "surveys", label: "Surveys", icon: Icons.survey },
   { id: "playtime", label: "Playtime", icon: Icons.game },
-  { id: "apps", label: "Apps", icon: Icons.grid },
   { id: "partners", label: "Surveys partners", icon: Icons.users },
   { id: "level", label: "Level & Privileges", icon: Icons.chart },
-  { id: "cashout", label: "Live Cashout", icon: Icons.wallet },
+  { id: "cashout", label: "Live Cashout", icon: Icons.clock },
   { id: "contest", label: "Daily Contest", icon: Icons.trophy },
   { id: "affiliate-contest", label: "Affiliate Contest", icon: Icons.trophy },
   { id: "withdraw", label: "Withdraw", icon: Icons.wallet },
@@ -44,7 +42,7 @@ const TABS: { id: DashboardTab; label: string; icon: (c?: string) => ReactNode }
   { id: "history", label: "History", icon: Icons.history },
   { id: "profile", label: "Profile", icon: Icons.user },
   { id: "help", label: "Help", icon: Icons.mail },
-  { id: "contact", label: "Redeem Code", icon: Icons.mail },
+  { id: "contact", label: "Redeem Code", icon: Icons.gift },
 ];
 
 type MeData = ApiResponse<typeof api, "getMe">;
@@ -335,7 +333,6 @@ export function Dashboard({
               {tab === "offers" && (<><ContentSection token={token} kind="offerwall" includeSurveyWalls /><MyOffersPanel token={token} /></>)}
               {tab === "surveys" && <SurveysSection token={token} />}
               {tab === "playtime" && <GamesSection token={token} />}
-              {tab === "apps" && <ContentSection token={token} kind="offerwall" heading="Apps" />}
               {tab === "partners" && <ContentSection token={token} kind="survey" heading="Surveys partners" />}
               {tab === "cashout" && <LiveCashoutTab onWithdraw={() => pick("withdraw")} />}
               {tab === "contest" && <DailyContestTab token={token} />}
